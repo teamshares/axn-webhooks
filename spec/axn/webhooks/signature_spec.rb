@@ -77,4 +77,40 @@ RSpec.describe Axn::Webhooks::Signature do
       expect(described_class.secure_compare("abc", nil)).to be(false)
     end
   end
+
+  describe "replay window" do
+    let(:secret)  { "Jefe" }
+    let(:payload) { "what do ya want for nothing?" }
+    let(:hex)     { "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" }
+    let(:now)     { Time.at(1_700_000_000) }
+
+    it "accepts a signature whose timestamp is within tolerance" do
+      ts = (now - 60).to_i
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts, tolerance: 300, now:)).to be(true)
+    end
+
+    it "rejects a signature whose timestamp is outside tolerance (replay)" do
+      ts = (now - 600).to_i
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts, tolerance: 300, now:)).to be(false)
+    end
+
+    it "rejects future timestamps beyond tolerance (bidirectional)" do
+      ts = (now + 600).to_i
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts, tolerance: 300, now:)).to be(false)
+    end
+
+    it "rejects a missing or unparseable timestamp when tolerance is set" do
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: nil, tolerance: 300, now:)).to be(false)
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: "not-a-time", tolerance: 300, now:)).to be(false)
+    end
+
+    it "accepts a String epoch and a Time" do
+      expect(described_class.within_tolerance?(timestamp: (now - 10).to_i.to_s, tolerance: 300, now:)).to be(true)
+      expect(described_class.within_tolerance?(timestamp: now - 10, tolerance: 300, now:)).to be(true)
+    end
+
+    it "ignores the window entirely when tolerance is nil" do
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: nil, tolerance: nil, now:)).to be(true)
+    end
+  end
 end
