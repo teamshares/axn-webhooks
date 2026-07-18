@@ -18,6 +18,14 @@ module Axn
         end
         # rubocop:enable Naming/MethodParameterName
 
+        # respond { |handler_result| text("...") } — maps a genuine handler success to a
+        # Response. Every other outcome (ack, business fail!, verify failure/exception, or a
+        # no-dispatch endpoint) always gets the default bare ack, regardless of this declaration
+        # — see Endpoint#to_response.
+        def respond(&block)
+          @respond_block = block
+        end
+
         def header(name) = Resolvers.header(name)
         def raw_body     = Resolvers.raw_body
         def params       = Resolvers.params
@@ -39,6 +47,9 @@ module Axn
           router = Router.new(to: spec[:to], on: spec[:on], otherwise: spec[:otherwise], via: spec[:via])
           { router:, parse: Parsers.build(spec[:parse]) }
         end
+
+        # Internal: the captured respond block, or nil if none declared.
+        def __respond__ = @respond_block
       end
     end
   end
