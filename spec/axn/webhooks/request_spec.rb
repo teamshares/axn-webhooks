@@ -121,6 +121,14 @@ RSpec.describe Axn::Webhooks::Request do
       expect(request.url).to eq("https://example.com/webhooks/codat")
     end
 
+    it "preserves the SCRIPT_NAME mount prefix in url (Rack mount / Rails `mount ... at:`)" do
+      # When mounted (e.g. `mount Inbound[:vendor], at: "/webhooks/codat"`), Rack puts the mount
+      # prefix in SCRIPT_NAME and leaves only the remainder in PATH_INFO. A URL built from
+      # PATH_INFO alone would drop the prefix, breaking URL-based verifiers like Twilio's.
+      request = described_class.from_rack(rack_env("SCRIPT_NAME" => "/webhooks/codat", "PATH_INFO" => "/rest"))
+      expect(request.url).to eq("https://example.com/webhooks/codat/rest")
+    end
+
     it "reads the HTTP method" do
       request = described_class.from_rack(rack_env("REQUEST_METHOD" => "GET"))
       expect(request.http_method).to eq("GET")

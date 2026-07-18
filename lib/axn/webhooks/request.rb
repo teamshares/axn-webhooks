@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "rack"
 require "rack/utils"
 
 module Axn
@@ -65,11 +66,14 @@ module Axn
       end
       private_class_method :extract_params
 
+      # Delegates to Rack's own URL builder, which correctly assembles scheme + host +
+      # SCRIPT_NAME (mount prefix) + PATH_INFO + query. A hand-rolled version that used
+      # PATH_INFO alone would drop the mount prefix for endpoints mounted via
+      # `mount Inbound[:vendor], at: "/webhooks/codat"` (Rails) or Rack::Builder#map, since
+      # Rack puts that prefix in SCRIPT_NAME and leaves only the remainder in PATH_INFO —
+      # breaking URL-based verifiers (e.g. Twilio's RequestValidator, which HMACs req.url).
       def self.extract_url(env)
-        scheme = env["rack.url_scheme"] || "http"
-        host = env["HTTP_HOST"] || env["SERVER_NAME"]
-        query = env["QUERY_STRING"]
-        "#{scheme}://#{host}#{env['PATH_INFO']}#{"?#{query}" if query && !query.empty?}"
+        Rack::Request.new(env).url
       end
       private_class_method :extract_url
     end
