@@ -11,7 +11,11 @@ module Axn
       def initialize(status: 200, body: "", headers: {})
         @status = status
         @body = body.to_s.freeze
-        @headers = headers.transform_keys(&:to_s).freeze
+        # Freeze keys AND values so a caller's mutable header value can't mutate the response
+        # after construction (a rendered-later value object must be truly immutable).
+        @headers = headers.each_with_object({}) do |(key, value), frozen|
+          frozen[key.to_s.freeze] = value.frozen? ? value : value.dup.freeze
+        end.freeze
         freeze
       end
 

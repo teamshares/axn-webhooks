@@ -43,6 +43,12 @@ RSpec.describe Axn::Webhooks::Response do
     expect { response.headers["X"] = "y" }.to raise_error(FrozenError)
   end
 
+  it "freezes header values so a caller's mutable value can't mutate the response" do
+    response = described_class.new(headers: { "X-Custom" => +"value" })
+    expect(response.headers["X-Custom"]).to be_frozen
+    expect { response.headers["X-Custom"] << "!" }.to raise_error(FrozenError)
+  end
+
   it "has deeply frozen body" do
     response = described_class.text("hello")
     expect { response.body << " world" }.to raise_error(FrozenError)
