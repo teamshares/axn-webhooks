@@ -20,9 +20,7 @@ require_relative "webhooks/inbound/build_request"
 require_relative "webhooks/inbound/respond_context"
 require_relative "webhooks/respond"
 require_relative "webhooks/dispatch"
-require_relative "webhooks/outbound/signer"
-require_relative "webhooks/outbound/envelope"
-require_relative "webhooks/outbound/transport"
+require_relative "webhooks/outbound"
 
 module Axn
   module Webhooks
