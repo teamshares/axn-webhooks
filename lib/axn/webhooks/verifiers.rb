@@ -6,7 +6,7 @@ module Axn
     # A custom block is used verbatim; a strategy symbol is looked up in STRATEGIES
     # (populated by verifiers/*.rb).
     module Verifiers
-      STRATEGIES = {}
+      STRATEGIES = {} # rubocop:disable Style/MutableConstant
 
       module_function
 
