@@ -19,6 +19,7 @@ module Axn
         # Internal: build the verifier callable from the captured declaration.
         def __verifier__
           raise Axn::Webhooks::Error, "inbound endpoint declared no `verify`" unless @verify_spec
+          raise Axn::Webhooks::Error, "inbound endpoint `verify` needs a strategy or a block" if @verify_spec[:strategy].nil? && @verify_spec[:block].nil?
 
           Verifiers.build(**@verify_spec)
         end

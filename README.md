@@ -58,6 +58,8 @@ result = Axn::Webhooks::Inbound[:merge].verify(request)  # => Axn::Result
 result.ok?  # signature valid?
 ```
 
+**Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
+
 ## Development
 
 - `bin/refresh` — pull latest and install dependencies (fails on a dirty working tree).

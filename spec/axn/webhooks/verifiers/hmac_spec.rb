@@ -57,6 +57,17 @@ RSpec.describe "verify :hmac strategy" do
     expect(Axn::Webhooks::Inbound[:lob].verify(req)).not_to be_ok
   end
 
+  it "accepts a fresh timestamp when replay protection is configured" do
+    fresh = Time.now.to_i.to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:webhook) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300 }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh })
+    expect(Axn::Webhooks::Inbound[:webhook].verify(req)).to be_ok
+  end
+
   it "raises a loud developer error when a required option is missing" do
     expect { Axn::Webhooks.inbound(:x) { verify :hmac, secret: "s" } } # no signature:
       .to raise_error(ArgumentError, /signature/)

@@ -11,7 +11,7 @@ module Axn
       module StandardWebhooks
         module_function
 
-        def decode_secret(secret) = Base64.decode64(secret.to_s.delete_prefix("whsec_"))
+        def decode_secret(secret) = Base64.strict_decode64(secret.to_s.delete_prefix("whsec_"))
 
         # Keep only `v1,<sig>` candidates, stripped to the bare base64 signature.
         # Done here (not via Signature's generic splitter) because that splitter treats

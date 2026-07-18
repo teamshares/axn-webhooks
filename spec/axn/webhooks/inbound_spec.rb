@@ -36,4 +36,8 @@ RSpec.describe "Axn::Webhooks.inbound (registration + custom verify)" do
     expect { Axn::Webhooks.inbound(:x) { verify :nope, secret: "s" } }
       .to raise_error(Axn::Webhooks::Error, /unknown verify strategy/)
   end
+
+  it "requires a strategy or a block in verify" do
+    expect { Axn::Webhooks.inbound(:x) { verify } }.to raise_error(Axn::Webhooks::Error, /strategy or a block/)
+  end
 end
