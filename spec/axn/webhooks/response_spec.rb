@@ -77,4 +77,49 @@ RSpec.describe Axn::Webhooks::Response do
     expect(described_class.text("hi")).to eq(described_class.text("hi"))
     expect(described_class.text("hi")).not_to eq(described_class.text("bye"))
   end
+
+  it "renders as a Rack triple" do
+    response = described_class.text("hi", status: 201)
+    expect(response.to_rack).to eq([201, { "content-type" => "text/plain" }, ["hi"]])
+  end
+
+  it "returns mutable headers from to_rack so Rails/Rack middleware can set headers" do
+    response = described_class.text("hi")
+    rack_headers = response.to_rack[1]
+    expect(rack_headers).not_to be_frozen
+    expect(rack_headers).not_to equal(response.headers)
+    rack_headers["x-custom"] = "value"
+    expect(rack_headers["x-custom"]).to eq("value")
+  end
+
+  it "passes Array (multi-value) header values through unchanged in to_rack for Rack 3" do
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    rack_headers = response.to_rack[1]
+    expect(rack_headers["set-cookie"]).to eq(["a=1", "b=2"])
+    expect(rack_headers["set-cookie"]).to be_a(Array)
+    # Response#headers still holds the frozen Array internally
+    expect(response.headers["set-cookie"]).to be_a(Array)
+  end
+
+  it "returns mutable Array header values from to_rack so middleware can append (e.g., Rack::Utils.set_cookie_header!)" do
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    rack_headers = response.to_rack[1]
+    expect(rack_headers["set-cookie"]).not_to be_frozen
+    expect { rack_headers["set-cookie"] << "c=3" }.not_to raise_error
+    expect(rack_headers["set-cookie"]).to eq(["a=1", "b=2", "c=3"])
+  end
+
+  it "keeps Response's own header Array values frozen for immutability" do
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    expect(response.headers["set-cookie"]).to be_frozen
+    expect { response.headers["set-cookie"] << "c=3" }.to raise_error(FrozenError)
+  end
+
+  it "produces Rack::Lint-valid multi-value (Array) headers" do
+    require "rack/lint"
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    triple = response.to_rack
+    app = Rack::Lint.new(->(_env) { triple })
+    expect { app.call(Rack::MockRequest.env_for("/")) }.not_to raise_error
+  end
 end

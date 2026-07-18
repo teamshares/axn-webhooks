@@ -7,7 +7,7 @@ module Axn
       # the (verified, parsed) event to a handler Axn, and maps the pipeline's outcome to an
       # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
-        def initialize(name:, verifier:, dispatch: nil, respond: nil)
+        def initialize(name:, verifier:, dispatch: nil, respond: nil, challenge: nil)
           if dispatch && dispatch[:mode] == :async && respond
             raise Axn::Webhooks::Error,
                   "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
@@ -18,6 +18,7 @@ module Axn
           @verifier = verifier
           @dispatch = dispatch
           @respond = respond
+          @challenge = challenge
         end
 
         attr_reader :name
@@ -25,7 +26,7 @@ module Axn
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
         # a failure on mismatch, an exception if the verifier raises.
         def verify(request)
-          Verify.call(request:, verifier: @verifier)
+          Verify.call(request:, verifier: @verifier, vendor: @name)
         end
 
         # Full pipeline: verify, then (if a dispatch is declared and verification passed)
@@ -35,7 +36,7 @@ module Axn
           return verified unless verified.ok? && @dispatch
 
           Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
-                        mode: @dispatch[:mode], respond_declared: !@respond.nil?)
+                        mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
         end
 
         # The staged HTTP outcome mapping (spec: "Respond + staged outcome model"). Verify and
@@ -48,8 +49,37 @@ module Axn
           return Response.ack unless @dispatch
 
           dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
-                                     mode: @dispatch[:mode], respond_declared: !@respond.nil?)
+                                     mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
           response_for(dispatched)
+        end
+
+        # The GET branch (spec: the mount owns the whole path, every verb). Testable without a Rack
+        # env, mirroring #verify/#handle/#to_response.
+        def challenge_response(request)
+          return Response.new(status: 405) unless @challenge
+
+          # The Challenge axn computes the exact Response (200 echo / 403 guard-fail / 400 nil).
+          # Only a raising resolver/guard makes it not-ok -> a reported 500.
+          result = Challenge.call(request:, resolver: @challenge[:resolver], guard: @challenge[:guard], vendor: @name)
+          result.ok? ? result.response : Response.new(status: 500)
+        end
+
+        # The Rack app entry point (spec: mount-first packaging). `Inbound[:vendor]` (this object)
+        # is directly `mount`-able in Rails routes.rb or `run`-able in a bare Rack::Builder — the
+        # mount owns the whole path and every verb: POST -> #to_response, GET -> #challenge_response,
+        # anything else -> 405. Named `call`, deliberately reserved since Phase 3 (see #handle).
+        def call(env)
+          built = BuildRequest.call(env:, vendor: @name)
+          return Response.new(status: 500).to_rack unless built.ok?
+
+          request = built.request
+          response =
+            case request.http_method
+            when "POST" then to_response(request)
+            when "GET" then challenge_response(request)
+            else Response.new(status: 405)
+            end
+          response.to_rack
         end
 
         private
@@ -62,7 +92,7 @@ module Axn
 
           # Run the user's respond block inside the Respond axn so a raise in it (e.g. reading a
           # missing exposure) becomes a reported 500, not an exception escaping the HTTP mapper.
-          responded = Respond.call(handler_result: dispatched.handler_result, responder: @respond)
+          responded = Respond.call(handler_result: dispatched.handler_result, responder: @respond, vendor: @name)
           responded.ok? ? responded.response : Response.new(status: 500)
         end
       end

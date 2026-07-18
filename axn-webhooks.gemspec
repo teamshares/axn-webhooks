@@ -36,4 +36,8 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "axn", ">= 0.1.0-alpha.4.3", "< 0.2.0"
+  # Requires Rack 3: Response's headers are lowercased per Rack 3's SPEC, and Rack 3's native
+  # Array multi-value headers are used. Consumers need Rails 7.1+ (the first Rails whose
+  # actionpack allows Rack 3); Rails 7.0 is Rack-2-only and intentionally unsupported.
+  spec.add_dependency "rack", ">= 3.0", "< 4"
 end

@@ -2,14 +2,26 @@
 
 ## [Unreleased]
 
-### Fixed
-- `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
-
-### Changed
-- Clearer README intro and gemspec description, with explicit mention of dispatch.
-- Removed unnecessary rubocop pragma from dispatch parse example.
-
 ### Added
+- `Axn::Webhooks::Inbound::Endpoint#call(env)` — `Inbound[:vendor]` is now directly a Rack app:
+  `mount Axn::Webhooks::Inbound[:vendor], at: "/webhooks/vendor"` in Rails, or
+  `run Axn::Webhooks::Inbound[:vendor]` in a bare `Rack::Builder`/`config.ru`. `POST` runs
+  `#to_response`; `GET` runs `#challenge_response` (or 405 with no declared `challenge`); any other
+  verb 405s. A malformed Rack env is caught by the new `Inbound::BuildRequest` axn and mapped to a
+  reported 500, never an unhandled exception.
+- `Axn::Webhooks::Response#to_rack` — renders a Response as the `[status, headers, [body]]` triple
+  a Rack app returns.
+- `challenge` DSL declaration + `Axn::Webhooks::Inbound::Challenge` — the GET-echo handshake
+  (Nylas `?challenge=`, Meta `?hub.challenge=` + `if:` guard on `hub.verify_token`). A missing/
+  rejected challenge is a quiet 400; a resolver or guard that raises is reported and mapped to 500.
+  `Endpoint#challenge_response(request) → Response` is testable without a Rack env, mirroring
+  `#verify`/`#handle`/`#to_response`.
+- `Axn::Webhooks::Request.from_rack(env)` — builds a Request from a Rack env: pristine raw body
+  (read once from `rack.input`, then rewound if rewindable), headers from `HTTP_*`/`CONTENT_TYPE`/
+  `CONTENT_LENGTH`, params from the request's primary param source (form-decoded body when the
+  content type is `application/x-www-form-urlencoded`, else the query string), url, and
+  http_method.
+- `Axn::Webhooks.config.vendor_facet` (`setting`, default `false`, `one_of: [false, :dimension, :tag]`) — when set, stamps the registered vendor name onto the verify/dispatch/respond pipeline as that observability facet (Datadog/OTel dimension or tag), via the new `Axn::Webhooks::VendorFacet` mixin shared by `Verify`/`Dispatch`/`Respond`/`Challenge`.
 - `Axn::Webhooks::Inbound::Endpoint#to_response(request) → Response` — the staged HTTP outcome mapping: verify mismatch/crash → 401; missing handler/unmatched/parse error/handler crash → 500; `otherwise: :ack` and handler business `fail!` → a bare 2xx ack; a genuine handler success → the declared `respond` block's body (default bare ack).
 - `Axn::Webhooks::Request` — a Rails-agnostic wrapper (`raw_body`, `header`, `params`, `url`, `http_method`) that verifiers and dispatchers read from.
 - `Axn::Webhooks::Signature` — parametric HMAC primitive (`hmac` / `compute` / `secure_compare`) with sha256/sha1/md5 digests; hex, base64, and base64-urlsafe encodings; prefix stripping; multi-candidate (key-rotation) headers; always constant-time.
@@ -26,3 +38,50 @@
 - `Axn::Webhooks::Response` — a Rails-agnostic HTTP response value (status/body/headers) with `.ack`/`.text`/`.xml` factories, produced by the staged HTTP outcome mapping and rendered against Rack in a later phase.
 - `respond` DSL declaration + `Axn::Webhooks::Inbound::RespondContext` — captures a block mapping a genuine handler success to a `Response`; the block runs with `ack`/`text`/`xml` available as bare calls.
 - `dispatch mode:` — the async seam, resolved dynamically: an explicit `:async` delegates to the handler's own `.call_async` (inheriting whatever axn async adapter the app configured — never branches on `:sidekiq`/`:active_job`), an explicit `:sync` runs inline, and the default (`:auto`) runs **async when an adapter is configured for the handler, else sync** — except a custom `respond` (a result-returning hook) always forces sync. An explicit `mode: :async` + custom `respond` is rejected at `inbound` registration time (you can't read a handler result you enqueued). Dispatching `:async` against a handler with no adapter configured (explicitly disabled or never set) is a clean, reported `Axn::Webhooks::Error` (500-bound) rather than an uncaught `NotImplementedError` escaping the axn boundary; adapter presence is a truthiness check, so an explicitly-disabled handler (`_async_adapter == false`) is correctly treated as unconfigured and runs sync under `mode: :auto`.
+
+### Changed
+- Added `rack` (`>= 3.0`, `< 4`) as a runtime dependency. The gem requires Rack 3 (`Response#to_rack`'s
+  lowercase header keys are required by Rack 3's SPEC), which means Rails 7.1+ (the first Rails
+  whose actionpack allows Rack 3); Rails 7.0 (Rack 2 only) is not supported.
+- Clearer README intro and gemspec description, with explicit mention of dispatch.
+- Removed unnecessary rubocop pragma from dispatch parse example.
+
+### Fixed
+- `Request.from_rack`'s `params` no longer merges query-string params into a form-urlencoded
+  body's params. `url` (via `Rack::Request#url`) already includes the query string, so the
+  previous merge double-counted query params for URL-signing verifiers doing
+  `validate(req.url, req.params, signature)` (e.g. Twilio's `RequestValidator`), causing valid
+  signed callbacks to be rejected. `params` is now the request's single primary param source:
+  form body fields only for `application/x-www-form-urlencoded` (query still reachable via
+  `url`), and the query string otherwise (GET challenges, JSON POSTs, etc.).
+- `Request.from_rack` no longer unconditionally calls `rewind` on `rack.input`. A Rack 3 stack
+  without `Rack::RewindableInput::Middleware` in front (e.g. a bare `Rack::Builder` mount on a
+  streaming server) may hand us a non-rewindable input, and calling `rewind` on it raised —
+  turning a valid webhook into an unhandled 500 before verification ever ran. The full body is
+  still read into `raw_body` before the (now guarded) rewind, so the pristine-body guarantee is
+  unaffected.
+- `verify` is now required whenever `dispatch` is declared. The no-op always-succeeds verifier
+  (added to support challenge-only endpoints with no `verify`) had been returned whenever either
+  `dispatch` or `challenge` was present without `verify`, which meant an endpoint declaring
+  `dispatch` but no `verify` would process unverified webhooks. Registering such an endpoint now
+  raises `Axn::Webhooks::Error` immediately; the no-op verifier remains available only for
+  challenge-only endpoints (no `dispatch`).
+- `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
+- `Response#to_rack` now returns a mutable headers hash so Rails/Rack middleware (which sets response headers) works; the `Response` value object itself stays frozen. Array multi-value headers (e.g. Set-Cookie) pass through as Arrays, the native format required by Rack 3.
+- `Request.from_rack`'s `url` now includes the `SCRIPT_NAME` mount prefix (built via
+  `Rack::Request#url` instead of hand-assembling `PATH_INFO` alone). A mounted endpoint (e.g.
+  `mount Axn::Webhooks::Inbound[:vendor], at: "/webhooks/codat"` in Rails, or a `Rack::Builder#map`
+  block) puts the mount prefix in `SCRIPT_NAME` and leaves only the remainder in `PATH_INFO`, so
+  the previous `url` silently dropped the prefix — breaking URL-based verifiers (notably Twilio's
+  `RequestValidator`, which HMACs the full request URL) for otherwise-valid mounted requests.
+- `Request.from_rack`'s `rack.input` rewind is now rescued, not just `respond_to?`-guarded. A
+  non-seekable stream (e.g. a pipe or socket) can `respond_to?(:rewind)` yet still raise
+  `Errno::ESPIPE` when actually called, which the previous guard didn't catch — turning a valid
+  webhook into an unhandled 500 after the body had already been safely captured into `raw_body`.
+  The rewind is best-effort courtesy only; any failure is now silently swallowed.
+- `Request.extract_params` no longer treats a `GET`/`HEAD` request's (empty) body as form params
+  just because it carries a default `application/x-www-form-urlencoded` `Content-Type` header —
+  a common shape for challenge handshakes (Nylas/Meta). Previously this shadowed `QUERY_STRING`
+  with an empty-body parse, so `req.params["challenge"]` returned `nil` and a valid `?challenge=`
+  GET request 400'd. `GET`/`HEAD` now always read params from the query string; `POST` (and other
+  body-carrying methods) keep the form-body-only behavior above.

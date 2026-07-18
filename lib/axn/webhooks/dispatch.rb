@@ -8,6 +8,7 @@ module Axn
     # returned as a formatted result — and a handler business `fail!` stays a quiet failure.
     class Dispatch
       include Axn
+      include Axn::Webhooks::VendorFacet
 
       expects :request, type: Axn::Webhooks::Request
       expects :router

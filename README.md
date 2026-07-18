@@ -160,6 +160,60 @@ can't read a result you enqueued) regardless of adapter config — and declaring
 
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
 
+### Mounting
+
+An `Inbound[:vendor]` endpoint is a Rack app — mount it directly, no controller needed. The Rack
+mount requires **Rack 3** (so **Rails 7.1+**); Rails 7.0 (Rack 2) is not supported.
+
+```ruby
+# config/routes.rb (Rails)
+Rails.application.routes.draw do
+  mount Axn::Webhooks::Inbound[:codat], at: "/webhooks/codat"
+end
+```
+
+```ruby
+# config.ru (no Rails)
+require "axn-webhooks"
+map "/webhooks/codat" { run Axn::Webhooks::Inbound[:codat] }
+```
+
+The mount owns the whole path and every verb: `POST` runs verify → dispatch → respond; `GET` runs
+a declared `challenge`, or 405s if none was declared. Any other verb — including `HEAD` on a bare `Rack::Builder` mount without `Rack::Head` upstream — returns 405. (Rails inserts `Rack::Head` before middleware, so `HEAD` becomes `GET` there.)
+
+### Challenge (GET-echo handshake)
+
+Some vendors (Nylas, Meta) verify a new endpoint with a `GET` request before sending real events:
+
+```ruby
+Axn::Webhooks.inbound :nylas do
+  verify { |req| ... }
+  challenge ->(req) { req.params["challenge"] }   # echoed verbatim, 200 text/plain
+end
+
+Axn::Webhooks.inbound :meta do
+  challenge ->(req) { req.params["hub.challenge"] },
+            if: ->(req) { req.params["hub.verify_token"] == ENV.fetch("META_VERIFY_TOKEN") }
+end
+```
+
+No extra `routes.rb` line is needed — `challenge` just teaches the same mount how to answer `GET`.
+An `if:` guard rejection (e.g. a bad Meta `hub.verify_token`) is a **403**; a missing/nil challenge
+value is a **400**; a `challenge`/`if:` proc that raises is reported and mapped to **500**. (Slack's
+in-band `url_verification` handshake is NOT this — it's a normal `dispatch` entry, since Slack sends
+it as a POST event, not a GET.)
+
+### Per-vendor observability (`vendor_facet`)
+
+```ruby
+Axn::Webhooks.configure { |c| c.vendor_facet = :dimension }  # or :tag; default false
+```
+
+When set, every `verify`/`dispatch`/`respond`/`challenge` call for a registered endpoint is stamped
+with the endpoint's registered name as that Datadog/OTel facet — `:dimension` for a bounded,
+low-cardinality grouping (Teamshares' choice); `:tag` for the higher-cardinality path. Ships `false`
+(no stamping) so a standalone consumer opts in explicitly.
+
 ## Development
 
 - `bin/refresh` — pull latest and install dependencies (fails on a dirty working tree).
