@@ -90,7 +90,7 @@ result.handler_result  # the handler's own Axn::Result (nil on ack / failure)
 
 A missing handler class or an unmatched event with no `otherwise:` is reported to your
 `Axn.config.on_exception` and returned as a failed result — never an unhandled exception.
-Handlers run **synchronously** for now; async dispatch arrives in a later phase.
+Handlers run synchronously or asynchronously depending on `mode:` — see [Async dispatch](#async-dispatch) below.
 
 ### Respond with a custom body
 
