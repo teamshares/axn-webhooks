@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
+
 ### Changed
 - Clearer README intro and gemspec description, with explicit mention of dispatch.
 - Removed unnecessary rubocop pragma from dispatch parse example.

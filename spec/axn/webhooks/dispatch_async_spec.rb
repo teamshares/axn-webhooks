@@ -4,6 +4,18 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
   def request(body) = Axn::Webhooks::Request.new(raw_body: body)
   let(:json_parse) { Axn::Webhooks::Parsers.build(:json) }
 
+  # Stubs the global default adapter for these tests. Also neutralizes Dispatch's own
+  # `_ensure_default_async_configured` (invoked on every `Dispatch.new`, since Dispatch is
+  # itself a real Axn action subject to the same auto-configure-on-first-instantiation
+  # behavior as any handler): without this, the FIRST test in the suite to stub a truthy
+  # global default would cause Dispatch to eagerly `async :sidekiq` on ITSELF and blow up
+  # with the real adapter's `LoadError` (Sidekiq/ActiveJob aren't test deps) — unrelated to
+  # what's under test here, which is the HANDLER's own async resolution.
+  def stub_global_default_adapter(adapter)
+    allow(Axn.config).to receive(:_default_async_adapter).and_return(adapter)
+    allow(Axn::Webhooks::Dispatch).to receive(:_ensure_default_async_configured)
+  end
+
   before do
     # Non-Axn stub: records call_async. Used where mode is EXPLICITLY :async (no detection).
     stub_const("AsyncHandler", Class.new do
@@ -44,6 +56,21 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
     expect(result.exception).to be_a(Axn::Webhooks::Error)
   end
 
+  it "explicit :async on an explicitly-disabled handler settles as a catchable exception, " \
+     "even with a global default adapter configured" do
+    stub_global_default_adapter(:sidekiq)
+    SyncHandler._async_adapter = false
+    router = Axn::Webhooks::Inbound::Router.new(to: "SyncHandler")
+
+    result = nil
+    expect do
+      result = Axn::Webhooks::Dispatch.call(request: request("{}"), router:, parse: json_parse, mode: :async)
+    end.not_to raise_error
+
+    expect(result.outcome).to be_exception
+    expect(result.exception).to be_a(Axn::Webhooks::Error)
+  end
+
   it "explicit :sync runs synchronously even if an adapter is configured" do
     router = Axn::Webhooks::Inbound::Router.new(to: "AdapterHandler")
     result = Axn::Webhooks::Dispatch.call(request: request("{}"), router:, parse: json_parse, mode: :sync)
@@ -65,14 +92,26 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
       expect(AdapterHandler).to have_received(:call_async).with(event: {})
     end
 
-    it "runs ASYNC when a global default adapter is configured (presence, not type)" do
-      # Test presence check by using AdapterHandler which already has an adapter set.
-      # This verifies that when async_adapter_configured? returns true (either via
-      # handler._async_adapter or global default), async mode is used.
-      router = Axn::Webhooks::Inbound::Router.new(to: "AdapterHandler")
+    it "runs ASYNC when a global default adapter is configured and the handler has no explicit setting" do
+      stub_global_default_adapter(:sidekiq)
+      allow(SyncHandler).to receive(:call_async)
+      router = Axn::Webhooks::Inbound::Router.new(to: "SyncHandler")
       result = Axn::Webhooks::Dispatch.call(request: request("{}"), router:, parse: json_parse)
       expect(result.handler_result).to be_nil
-      expect(AdapterHandler).to have_received(:call_async).with(event: {})
+      expect(SyncHandler).to have_received(:call_async).with(event: {})
+    end
+
+    it "runs SYNC when the handler is explicitly disabled, even with a global default adapter configured" do
+      stub_global_default_adapter(:sidekiq)
+      SyncHandler._async_adapter = false
+      router = Axn::Webhooks::Inbound::Router.new(to: "SyncHandler")
+
+      result = nil
+      expect do
+        result = Axn::Webhooks::Dispatch.call(request: request("{}"), router:, parse: json_parse)
+      end.not_to raise_error
+
+      expect(result.handler_result).to be_ok
     end
 
     it "forces SYNC when respond_declared is true, even with an adapter configured" do

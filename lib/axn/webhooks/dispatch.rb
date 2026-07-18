@@ -41,19 +41,24 @@ module Axn
       end
 
       # Presence check ONLY — decides async-vs-sync, never asks which adapter.
-      # Truthiness (not nil-check) so an explicitly-disabled handler (_async_adapter == false)
-      # is correctly treated as "not configured", not "configured".
+      # A handler's own explicit setting always wins over the global default — mirrors axn's own
+      # call_async semantics, where _async_adapter only falls back to the global default when nil;
+      # an explicit `false` (opted out) is sticky and never falls back. So an explicitly-disabled
+      # handler (_async_adapter == false) is correctly treated as "not configured" even when a
+      # truthy global default is set, not silently overridden by it.
       def async_adapter_configured?(handler_class)
-        return true if Axn.config._default_async_adapter
+        if handler_class.respond_to?(:_async_adapter) && !handler_class._async_adapter.nil?
+          return !!handler_class._async_adapter # explicit per-handler setting (incl. `async false`) always wins
+        end
 
-        handler_class.respond_to?(:_async_adapter) && !!handler_class._async_adapter
+        !!Axn.config._default_async_adapter
       end
 
       # Delegates entirely to axn's own async interface; no handler_result (nothing ran
-      # synchronously). Guarded so an unconfigured adapter never reaches call_async, which would
-      # raise a ScriptError (NotImplementedError) that escapes the Dispatch axn boundary entirely
-      # (the boundary only rescues StandardError). Raising our own StandardError here instead keeps
-      # the failure inside the boundary as a clean, reported exception outcome.
+      # synchronously). Guarded so an unconfigured OR explicitly-disabled handler never reaches
+      # call_async, which would raise a ScriptError (NotImplementedError) that escapes the Dispatch
+      # axn boundary entirely (the boundary only rescues StandardError). Raising our own StandardError
+      # here instead keeps the failure inside the boundary as a clean, reported exception outcome.
       #
       # Only handlers that expose _async_adapter (real Axn handlers) are second-guessed here — that's
       # the only case where axn's own call_async can raise the escaping NotImplementedError. A handler
