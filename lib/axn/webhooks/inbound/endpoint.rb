@@ -60,7 +60,10 @@ module Axn
           return Response.ack if dispatched.handler_result.nil? # otherwise: :ack -> bare ack, nothing to render
           return Response.ack unless @respond
 
-          RespondContext.new.instance_exec(dispatched.handler_result, &@respond)
+          # Run the user's respond block inside the Respond axn so a raise in it (e.g. reading a
+          # missing exposure) becomes a reported 500, not an exception escaping the HTTP mapper.
+          responded = Respond.call(handler_result: dispatched.handler_result, responder: @respond)
+          responded.ok? ? responded.response : Response.new(status: 500)
         end
       end
     end

@@ -100,6 +100,17 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#to_response (staged HTTP outcom
     expect(response.headers).to eq("content-type" => "application/xml")
   end
 
+  it "maps a raise inside the respond block to a reported 500 (never an escaping exception)" do
+    Axn::Webhooks.inbound(:vendor) do
+      verify { |_req| true }
+      dispatch to: "Handlers::Created"
+      respond { |result| xml(result.exposure_the_handler_forgot) } # raises NoMethodError inside respond
+    end
+    response = nil
+    expect { response = Axn::Webhooks::Inbound[:vendor].to_response(req("{}")) }.not_to raise_error
+    expect(response.status).to eq(500)
+  end
+
   it "supports a literal string body (DropboxSign-style)" do
     Axn::Webhooks.inbound(:vendor) do
       verify { |_req| true }
