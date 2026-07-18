@@ -22,6 +22,7 @@ require_relative "webhooks/respond"
 require_relative "webhooks/dispatch"
 require_relative "webhooks/outbound/signer"
 require_relative "webhooks/outbound/envelope"
+require_relative "webhooks/outbound/transport"
 
 module Axn
   module Webhooks
