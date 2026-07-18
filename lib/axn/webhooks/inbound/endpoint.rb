@@ -6,10 +6,11 @@ module Axn
       # A registered inbound webhook endpoint. Phase 2 carries only the verifier;
       # later phases add dispatch/challenge/respond.
       class Endpoint
-        def initialize(name:, verifier:, dispatch: nil)
+        def initialize(name:, verifier:, dispatch: nil, respond: nil)
           @name = name.to_sym
           @verifier = verifier
           @dispatch = dispatch
+          @respond = respond
         end
 
         attr_reader :name
@@ -27,6 +28,30 @@ module Axn
           return verified unless verified.ok? && @dispatch
 
           Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse])
+        end
+
+        # The staged HTTP outcome mapping (spec: "Respond + staged outcome model"). Verify and
+        # dispatch are mapped in separate branches — deliberately NOT a single outcome->status
+        # rule, because a verify failure (401) and a handler business fail! (2xx) are both
+        # `outcome.failure?` but mean opposite things at the HTTP layer.
+        def to_response(request)
+          verified = verify(request)
+          return Response.new(status: 401) unless verified.ok?
+          return Response.ack unless @dispatch
+
+          dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse])
+          response_for(dispatched)
+        end
+
+        private
+
+        def response_for(dispatched)
+          return Response.new(status: 500) if dispatched.outcome.exception?
+          return Response.ack if dispatched.outcome.failure?    # handler fail! -> quiet 2xx, already logged
+          return Response.ack if dispatched.handler_result.nil? # otherwise: :ack -> bare ack, nothing to render
+          return Response.ack unless @respond
+
+          RespondContext.new.instance_exec(dispatched.handler_result, &@respond)
         end
       end
     end
