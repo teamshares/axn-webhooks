@@ -66,6 +66,13 @@ RSpec.describe Axn::Webhooks::Response do
     expect { response.body << " world" }.to raise_error(FrozenError)
   end
 
+  it "does not freeze the caller's own body string (copies before freezing)" do
+    caller_body = +"caller owned"
+    described_class.new(body: caller_body)
+    expect(caller_body).not_to be_frozen
+    expect { caller_body << "!" }.not_to raise_error
+  end
+
   it "supports value equality" do
     expect(described_class.text("hi")).to eq(described_class.text("hi"))
     expect(described_class.text("hi")).not_to eq(described_class.text("bye"))

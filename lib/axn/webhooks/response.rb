@@ -10,7 +10,9 @@ module Axn
 
       def initialize(status: 200, body: "", headers: {})
         @status = status
-        @body = body.to_s.freeze
+        # deep_freeze (not `.freeze`) so a caller-owned String body isn't frozen in place —
+        # `String#to_s` returns self, so `.freeze` would mutate the handler's own string.
+        @body = deep_freeze(body.to_s)
         # Keys are lower-cased (Rack 3's SPEC forbids uppercase in response header keys, and
         # Rack::Lint rejects them). Keys AND values are frozen deeply (Array multi-value headers
         # freeze their elements too) so a caller's mutable value can't mutate this rendered-later value.
