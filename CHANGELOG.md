@@ -11,3 +11,4 @@
 - `Axn::Webhooks::Verify` — the verify stage as an Axn: a signature mismatch fails quietly (no exception report); a verifier that raises is surfaced as a loud exception.
 - `Axn::Webhooks.inbound(:vendor) { … }` + `Axn::Webhooks::Inbound[:vendor]` — block-per-endpoint registration and lookup, with a custom-block verifier slot and the `Verifiers` strategy registry.
 - `verify :hmac` strategy — parametric HMAC (digest/encoding/prefix/custom signing string/replay window) over a `Request`, built on `Axn::Webhooks::Signature`.
+- `verify :standard_webhooks` strategy — the Standard Webhooks / Svix scheme (`whsec_` secret, `id.timestamp.body` signing, `v1,` candidate extraction with key rotation, ±tolerance window). Removes any need for the `svix` gem.
