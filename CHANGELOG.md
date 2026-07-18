@@ -17,6 +17,12 @@
 - Added `rack` (`>= 3.0`, `< 4`) as a runtime dependency, in preparation for the Rack mount.
 
 ### Fixed
+- `verify` is now required whenever `dispatch` is declared. The no-op always-succeeds verifier
+  (added to support challenge-only endpoints with no `verify`) had been returned whenever either
+  `dispatch` or `challenge` was present without `verify`, which meant an endpoint declaring
+  `dispatch` but no `verify` would process unverified webhooks. Registering such an endpoint now
+  raises `Axn::Webhooks::Error` immediately; the no-op verifier remains available only for
+  challenge-only endpoints (no `dispatch`).
 - `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
 
 ### Changed
