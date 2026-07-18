@@ -91,4 +91,13 @@ RSpec.describe Axn::Webhooks::Response do
     rack_headers["x-custom"] = "value"
     expect(rack_headers["x-custom"]).to eq("value")
   end
+
+  it "normalizes Array (multi-value) header values to newline-joined Strings in to_rack for Rack 2 Lint" do
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    rack_headers = response.to_rack[1]
+    expect(rack_headers["set-cookie"]).to eq("a=1\nb=2")
+    expect(rack_headers["set-cookie"]).to be_a(String)
+    # Response#headers still holds the frozen Array internally
+    expect(response.headers["set-cookie"]).to be_a(Array)
+  end
 end
