@@ -64,6 +64,24 @@ module Axn
           result.ok? ? result.response : Response.new(status: 500)
         end
 
+        # The Rack app entry point (spec: mount-first packaging). `Inbound[:vendor]` (this object)
+        # is directly `mount`-able in Rails routes.rb or `run`-able in a bare Rack::Builder — the
+        # mount owns the whole path and every verb: POST -> #to_response, GET -> #challenge_response,
+        # anything else -> 405. Named `call`, deliberately reserved since Phase 3 (see #handle).
+        def call(env)
+          built = BuildRequest.call(env:, vendor: @name)
+          return Response.new(status: 500).to_rack unless built.ok?
+
+          request = built.request
+          response =
+            case request.http_method
+            when "POST" then to_response(request)
+            when "GET" then challenge_response(request)
+            else Response.new(status: 405)
+            end
+          response.to_rack
+        end
+
         private
 
         def response_for(dispatched)

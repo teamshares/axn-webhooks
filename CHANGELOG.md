@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- `Axn::Webhooks::Inbound::Endpoint#call(env)` — `Inbound[:vendor]` is now directly a Rack app:
+  `mount Axn::Webhooks::Inbound[:vendor], at: "/webhooks/vendor"` in Rails, or
+  `run Axn::Webhooks::Inbound[:vendor]` in a bare `Rack::Builder`/`config.ru`. `POST` runs
+  `#to_response`; `GET` runs `#challenge_response` (or 405 with no declared `challenge`); any other
+  verb 405s. A malformed Rack env is caught by the new `Inbound::BuildRequest` axn and mapped to a
+  reported 500, never an unhandled exception.
+- `Axn::Webhooks::Response#to_rack` — renders a Response as the `[status, headers, [body]]` triple
+  a Rack app returns.
 - `challenge` DSL declaration + `Axn::Webhooks::Inbound::Challenge` — the GET-echo handshake
   (Nylas `?challenge=`, Meta `?hub.challenge=` + `if:` guard on `hub.verify_token`). A missing/
   rejected challenge is a quiet 400; a resolver or guard that raises is reported and mapped to 500.

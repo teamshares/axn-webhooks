@@ -3,8 +3,8 @@
 module Axn
   module Webhooks
     # A Rails-agnostic HTTP response value: status + body + headers. Produced by
-    # `Endpoint#to_response` from the verify->dispatch pipeline's Axn::Result; Phase 5's Rack
-    # mount renders this — nothing here touches Rack.
+    # `Endpoint#to_response`/`#challenge_response` from the pipeline's Axn::Result. `#to_rack`
+    # renders it as the [status, headers, body] triple Endpoint#call(env) returns.
     class Response
       attr_reader :status, :body, :headers
 
@@ -35,6 +35,10 @@ module Axn
       def ==(other)
         other.is_a?(self.class) && status == other.status && body == other.body && headers == other.headers
       end
+
+      # [status, headers, body] — the Rack app return contract. Headers are already lower-cased
+      # (see #initialize); body is wrapped in an Array, Rack's documented minimal body contract.
+      def to_rack = [status, headers, [body]]
 
       private
 

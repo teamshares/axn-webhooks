@@ -77,4 +77,9 @@ RSpec.describe Axn::Webhooks::Response do
     expect(described_class.text("hi")).to eq(described_class.text("hi"))
     expect(described_class.text("hi")).not_to eq(described_class.text("bye"))
   end
+
+  it "renders as a Rack triple" do
+    response = described_class.text("hi", status: 201)
+    expect(response.to_rack).to eq([201, { "content-type" => "text/plain" }, ["hi"]])
+  end
 end
