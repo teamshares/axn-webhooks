@@ -7,6 +7,7 @@ module Axn
     # (reported to Axn.config.on_exception). The first two rows of the staged-outcome model.
     class Verify
       include Axn
+      include Axn::Webhooks::VendorFacet
 
       expects :request, type: Axn::Webhooks::Request
       expects :verifier

@@ -13,6 +13,7 @@
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Added
+- `Axn::Webhooks.config.vendor_facet` (`setting`, default `false`, `one_of: [false, :dimension, :tag]`) — when set, stamps the registered vendor name onto the verify/dispatch/respond pipeline as that observability facet (Datadog/OTel dimension or tag), via the new `Axn::Webhooks::VendorFacet` mixin shared by `Verify`/`Dispatch`/`Respond`/`Challenge`.
 - `Axn::Webhooks::Inbound::Endpoint#to_response(request) → Response` — the staged HTTP outcome mapping: verify mismatch/crash → 401; missing handler/unmatched/parse error/handler crash → 500; `otherwise: :ack` and handler business `fail!` → a bare 2xx ack; a genuine handler success → the declared `respond` block's body (default bare ack).
 - `Axn::Webhooks::Request` — a Rails-agnostic wrapper (`raw_body`, `header`, `params`, `url`, `http_method`) that verifiers and dispatchers read from.
 - `Axn::Webhooks::Signature` — parametric HMAC primitive (`hmac` / `compute` / `secure_compare`) with sha256/sha1/md5 digests; hex, base64, and base64-urlsafe encodings; prefix stripping; multi-candidate (key-rotation) headers; always constant-time.

@@ -25,7 +25,7 @@ module Axn
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
         # a failure on mismatch, an exception if the verifier raises.
         def verify(request)
-          Verify.call(request:, verifier: @verifier)
+          Verify.call(request:, verifier: @verifier, vendor: @name)
         end
 
         # Full pipeline: verify, then (if a dispatch is declared and verification passed)
@@ -35,7 +35,7 @@ module Axn
           return verified unless verified.ok? && @dispatch
 
           Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
-                        mode: @dispatch[:mode], respond_declared: !@respond.nil?)
+                        mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
         end
 
         # The staged HTTP outcome mapping (spec: "Respond + staged outcome model"). Verify and
@@ -48,7 +48,7 @@ module Axn
           return Response.ack unless @dispatch
 
           dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
-                                     mode: @dispatch[:mode], respond_declared: !@respond.nil?)
+                                     mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
           response_for(dispatched)
         end
 
@@ -62,7 +62,7 @@ module Axn
 
           # Run the user's respond block inside the Respond axn so a raise in it (e.g. reading a
           # missing exposure) becomes a reported 500, not an exception escaping the HTTP mapper.
-          responded = Respond.call(handler_result: dispatched.handler_result, responder: @respond)
+          responded = Respond.call(handler_result: dispatched.handler_result, responder: @respond, vendor: @name)
           responded.ok? ? responded.response : Response.new(status: 500)
         end
       end

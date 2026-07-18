@@ -8,6 +8,7 @@ module Axn
     # mapped to a 500 by Endpoint#to_response, never an unhandled exception escaping the HTTP mapper.
     class Respond
       include Axn
+      include Axn::Webhooks::VendorFacet
 
       expects :handler_result
       expects :responder
