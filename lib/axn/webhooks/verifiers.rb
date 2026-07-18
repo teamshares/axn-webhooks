@@ -15,7 +15,7 @@ module Axn
       def build(strategy:, opts:, block:)
         return block if block
 
-        builder = STRATEGIES.fetch(strategy) do
+        builder = STRATEGIES.fetch(strategy&.to_sym) do
           raise Axn::Webhooks::Error, "unknown verify strategy #{strategy.inspect}"
         end
         builder.call(**opts)
