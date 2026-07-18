@@ -72,3 +72,14 @@
   block) puts the mount prefix in `SCRIPT_NAME` and leaves only the remainder in `PATH_INFO`, so
   the previous `url` silently dropped the prefix — breaking URL-based verifiers (notably Twilio's
   `RequestValidator`, which HMACs the full request URL) for otherwise-valid mounted requests.
+- `Request.from_rack`'s `rack.input` rewind is now rescued, not just `respond_to?`-guarded. A
+  non-seekable stream (e.g. a pipe or socket) can `respond_to?(:rewind)` yet still raise
+  `Errno::ESPIPE` when actually called, which the previous guard didn't catch — turning a valid
+  webhook into an unhandled 500 after the body had already been safely captured into `raw_body`.
+  The rewind is best-effort courtesy only; any failure is now silently swallowed.
+- `Request.extract_params` no longer treats a `GET`/`HEAD` request's (empty) body as form params
+  just because it carries a default `application/x-www-form-urlencoded` `Content-Type` header —
+  a common shape for challenge handshakes (Nylas/Meta). Previously this shadowed `QUERY_STRING`
+  with an empty-body parse, so `req.params["challenge"]` returned `nil` and a valid `?challenge=`
+  GET request 400'd. `GET`/`HEAD` now always read params from the query string; `POST` (and other
+  body-carrying methods) keep the form-body-only behavior above.

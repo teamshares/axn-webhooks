@@ -156,5 +156,36 @@ RSpec.describe Axn::Webhooks::Request do
       expect { request = described_class.from_rack(rack_env("rack.input" => non_rewindable_input)) }.not_to raise_error
       expect(request.raw_body).to eq('{"a":1}')
     end
+
+    it "tolerates a rack.input whose #rewind responds but RAISES (non-seekable pipe/socket)" do
+      # Some rack.input-like streams (e.g. a pipe or socket) DO respond_to?(:rewind) but raise
+      # Errno::ESPIPE (or similar) when actually called, because the underlying descriptor isn't
+      # seekable. respond_to? alone can't catch this — only rescuing the call itself does. We've
+      # already captured raw_body before ever touching rewind, so this must not raise/500.
+      raising_input = Class.new do
+        def initialize(body) = @io = StringIO.new(body)
+        def read(...) = @io.read(...)
+        def rewind = raise(Errno::ESPIPE, "illegal seek")
+      end.new('{"a":1}')
+
+      request = nil
+      expect { request = described_class.from_rack(rack_env("rack.input" => raising_input)) }.not_to raise_error
+      expect(request.raw_body).to eq('{"a":1}')
+    end
+
+    it "uses QUERY_STRING for a GET with a form-urlencoded Content-Type and empty body (challenge regression)" do
+      # GET challenge requests (Nylas/Meta-style) often carry a default
+      # application/x-www-form-urlencoded Content-Type header alongside an empty body and the
+      # real payload in the query string. extract_params must not parse the empty body as form
+      # params for a GET/HEAD — that would silently lose the query-string challenge param.
+      env = rack_env(
+        "REQUEST_METHOD" => "GET",
+        "rack.input" => StringIO.new(""),
+        "CONTENT_TYPE" => "application/x-www-form-urlencoded",
+        "QUERY_STRING" => "challenge=xyz",
+      )
+      request = described_class.from_rack(env)
+      expect(request.params).to eq("challenge" => "xyz")
+    end
   end
 end

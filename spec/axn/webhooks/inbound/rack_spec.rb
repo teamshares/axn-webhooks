@@ -58,6 +58,19 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#call (Rack app)" do
     expect(body).to eq(["xyz"])
   end
 
+  it "handles a GET challenge that carries a form-urlencoded Content-Type header (regression)" do
+    # GET challenge requests (Nylas/Meta-style) sometimes carry a default
+    # application/x-www-form-urlencoded Content-Type header alongside an empty body. This must
+    # not be treated as a form body to parse (which would find nothing and 400) — GET always
+    # reads params from the query string.
+    Axn::Webhooks.inbound(:vendor) { challenge ->(req) { req.params["challenge"] } }
+    env = Rack::MockRequest.env_for("/webhooks/vendor?challenge=xyz", method: "GET", input: "",
+                                                                      "CONTENT_TYPE" => "application/x-www-form-urlencoded")
+    status, _headers, body = Axn::Webhooks::Inbound[:vendor].call(env)
+    expect(status).to eq(200)
+    expect(body).to eq(["xyz"])
+  end
+
   it "405s a GET with no declared challenge" do
     Axn::Webhooks.inbound(:vendor) { verify { |_req| true } }
     env = Rack::MockRequest.env_for("/webhooks/vendor", method: "GET", input: "")

@@ -32,7 +32,11 @@ module Axn
       def self.from_rack(env)
         input = env.fetch("rack.input")
         raw_body = input.read || ""
-        input.rewind if input.respond_to?(:rewind)
+        begin
+          input.rewind
+        rescue StandardError
+          nil # rewind is a courtesy; a non-rewindable/non-seekable stream (pipe/socket) is fine — raw_body is already captured
+        end
 
         content_type = env["CONTENT_TYPE"]
         new(
@@ -65,16 +69,16 @@ module Axn
       # `validate(req.url, req.params, signature)`, which HMACs the query string once via the url
       # and would HMAC it a second time via params if it were also merged in).
       #
-      # - form-urlencoded body (Twilio's SMS/voice POST) -> params = form fields only; the query
-      #   (if any) is still reachable via `url`.
-      # - everything else (GET query, JSON POST, etc.) -> params = query string (e.g. the Nylas/
-      #   Meta GET challenge, read via `req.params["challenge"]`).
+      # - form-urlencoded body on a request that carries one (Twilio's SMS/voice POST) -> params =
+      #   form fields only; the query (if any) is still reachable via `url`.
+      # - everything else (GET/HEAD query, JSON POST, etc.) -> params = query string (e.g. the
+      #   Nylas/Meta GET challenge, read via `req.params["challenge"]`). GET/HEAD never carry a
+      #   body, so even a form-urlencoded default Content-Type header on a GET (common on
+      #   challenge requests) must not shadow the query string with an empty-body parse.
       def self.extract_params(env, raw_body, content_type)
-        if content_type&.start_with?("application/x-www-form-urlencoded")
-          Rack::Utils.parse_nested_query(raw_body)
-        else
-          Rack::Utils.parse_nested_query(env["QUERY_STRING"])
-        end
+        method = env["REQUEST_METHOD"]
+        form_body = content_type&.start_with?("application/x-www-form-urlencoded") && !%w[GET HEAD].include?(method)
+        Rack::Utils.parse_nested_query(form_body ? raw_body : env["QUERY_STRING"])
       end
       private_class_method :extract_params
 
