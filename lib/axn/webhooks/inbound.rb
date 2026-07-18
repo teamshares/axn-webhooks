@@ -2,6 +2,7 @@
 
 require_relative "inbound/dsl"
 require_relative "inbound/endpoint"
+require_relative "inbound/router"
 
 module Axn
   module Webhooks
