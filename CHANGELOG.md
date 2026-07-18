@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `Axn::Webhooks::Request.from_rack(env)` — builds a Request from a Rack env: pristine raw body
+  (read once from `rack.input`, then rewound), headers from `HTTP_*`/`CONTENT_TYPE`/
+  `CONTENT_LENGTH`, params from the query string (merged with form-decoded body params when the
+  content type is `application/x-www-form-urlencoded`), url, and http_method.
+
 ### Changed
 - Added `rack` (`>= 3.0`, `< 4`) as a runtime dependency, in preparation for the Rack mount.
 
