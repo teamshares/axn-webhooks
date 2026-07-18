@@ -38,7 +38,8 @@ module Axn
 
       # [status, headers, body] — the Rack app return contract. Headers are already lower-cased
       # (see #initialize); body is wrapped in an Array, Rack's documented minimal body contract.
-      def to_rack = [status, headers, [body]]
+      # Return a mutable copy of headers so Rails middleware can add headers (e.g., ETag).
+      def to_rack = [status, headers.dup, [body]]
 
       private
 
