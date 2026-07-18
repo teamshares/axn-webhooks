@@ -162,7 +162,8 @@ can't read a result you enqueued) regardless of adapter config — and declaring
 
 ### Mounting
 
-An `Inbound[:vendor]` endpoint is a Rack app — mount it directly, no controller needed:
+An `Inbound[:vendor]` endpoint is a Rack app — mount it directly, no controller needed. The Rack
+mount requires **Rack 3** (so **Rails 7.1+**); Rails 7.0 (Rack 2) is not supported.
 
 ```ruby
 # config/routes.rb (Rails)

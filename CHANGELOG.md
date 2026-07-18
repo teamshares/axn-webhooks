@@ -40,11 +40,9 @@
 - `dispatch mode:` — the async seam, resolved dynamically: an explicit `:async` delegates to the handler's own `.call_async` (inheriting whatever axn async adapter the app configured — never branches on `:sidekiq`/`:active_job`), an explicit `:sync` runs inline, and the default (`:auto`) runs **async when an adapter is configured for the handler, else sync** — except a custom `respond` (a result-returning hook) always forces sync. An explicit `mode: :async` + custom `respond` is rejected at `inbound` registration time (you can't read a handler result you enqueued). Dispatching `:async` against a handler with no adapter configured (explicitly disabled or never set) is a clean, reported `Axn::Webhooks::Error` (500-bound) rather than an uncaught `NotImplementedError` escaping the axn boundary; adapter presence is a truthiness check, so an explicitly-disabled handler (`_async_adapter == false`) is correctly treated as unconfigured and runs sync under `mode: :auto`.
 
 ### Changed
-- Added `rack` (`>= 2.2`, `< 4`) as a runtime dependency so the gem installs on Rails 7.0
-  (whose actionpack pins `rack "~> 2.0", ">= 2.2.4"`) through Rails 7.1+/Rack 3. The gem only
-  uses Rack APIs stable since 2.2 (`Rack::Request#url`, `Rack::Utils.parse_nested_query`,
-  `Rack::MockRequest`, `Rack::RewindableInput`), and `Response#to_rack`'s lowercase header keys —
-  required by Rack 3's SPEC — are accepted by Rack 2's case-insensitive header handling.
+- Added `rack` (`>= 3.0`, `< 4`) as a runtime dependency. The gem requires Rack 3 (`Response#to_rack`'s
+  lowercase header keys are required by Rack 3's SPEC), which means Rails 7.1+ (the first Rails
+  whose actionpack allows Rack 3); Rails 7.0 (Rack 2 only) is not supported.
 - Clearer README intro and gemspec description, with explicit mention of dispatch.
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
