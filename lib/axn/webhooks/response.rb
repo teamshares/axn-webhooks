@@ -39,9 +39,10 @@ module Axn
       # [status, headers, body] — the Rack app return contract. Headers are already lower-cased
       # (see #initialize); body is wrapped in an Array, Rack's documented minimal body contract.
       # Return a mutable copy of headers so Rails middleware can add headers (e.g., ETag).
-      # Array header values (multi-value headers like Set-Cookie) pass through unchanged —
-      # Rack 3 requires them as Arrays, not newline-joined Strings.
-      def to_rack = [status, headers.dup, [body]]
+      # Array header values (multi-value headers like Set-Cookie) are duped to be mutable so
+      # middleware like Rack::Utils.set_cookie_header! can append; String values pass through.
+      # Rack 3 requires Array headers, not newline-joined Strings.
+      def to_rack = [status, headers.transform_values { |value| value.is_a?(Array) ? value.dup : value }, [body]]
 
       private
 

@@ -101,6 +101,20 @@ RSpec.describe Axn::Webhooks::Response do
     expect(response.headers["set-cookie"]).to be_a(Array)
   end
 
+  it "returns mutable Array header values from to_rack so middleware can append (e.g., Rack::Utils.set_cookie_header!)" do
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    rack_headers = response.to_rack[1]
+    expect(rack_headers["set-cookie"]).not_to be_frozen
+    expect { rack_headers["set-cookie"] << "c=3" }.not_to raise_error
+    expect(rack_headers["set-cookie"]).to eq(["a=1", "b=2", "c=3"])
+  end
+
+  it "keeps Response's own header Array values frozen for immutability" do
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    expect(response.headers["set-cookie"]).to be_frozen
+    expect { response.headers["set-cookie"] << "c=3" }.to raise_error(FrozenError)
+  end
+
   it "produces Rack::Lint-valid multi-value (Array) headers" do
     require "rack/lint"
     response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
