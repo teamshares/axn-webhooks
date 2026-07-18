@@ -1,6 +1,6 @@
 # axn-webhooks
 
-An [axn](https://github.com/teamshares/axn)-consuming gem.
+Inbound webhook handling for [axn](https://github.com/teamshares/axn): verify a vendor's signature, dispatch the event to a handler action, and acknowledge — declared per vendor, and runnable in or out of Rails. The name is a deliberate umbrella: this is the **inbound** half; outbound webhook *signing* is a reserved future sibling built on the same signature primitive.
 
 ## Installation
 
@@ -61,6 +61,36 @@ Verify a request (dispatch/respond and HTTP mounting land in later phases):
 result = Axn::Webhooks::Inbound[:codat].verify(request)  # => Axn::Result
 result.ok?  # signature valid?
 ```
+
+### Dispatch to a handler
+
+Add `dispatch` to route the (verified, parsed) event to a handler Axn. The body is parsed as
+JSON by default (string keys) — pass `parse:` for other bodies. Handlers receive the whole
+event as `event:`, or scalar args via a `with:` extractor. Handler targets are class-name
+strings (resolved at request time), not constants.
+
+```ruby
+Axn::Webhooks.inbound :codat do
+  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
+  dispatch on: ->(e) { e["eventType"] },
+           to: { "connection.updated" => "Actions::Codat::ConnectionUpdated" },
+           otherwise: :ack        # unknown-but-expected events: log + 2xx (omit to raise loudly)
+end
+
+# One endpoint, one handler; form-encoded body:
+Axn::Webhooks.inbound :twilio do
+  verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
+                   .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
+  dispatch to: "Actions::Twilio::HandleSms", parse: ->(req) { req.params }
+end
+
+result = Axn::Webhooks::Inbound[:codat].handle(request)  # verify + dispatch => Axn::Result
+result.handler_result  # the handler's own Axn::Result (nil on ack / failure)
+```
+
+A missing handler class or an unmatched event with no `otherwise:` is reported to your
+`Axn.config.on_exception` and returned as a failed result — never an unhandled exception.
+Handlers run **synchronously** for now; async dispatch arrives in a later phase.
 
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
 
