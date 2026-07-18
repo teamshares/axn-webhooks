@@ -11,7 +11,10 @@ module Axn
 
       expects :handler_result
       expects :responder
-      exposes :response
+      # Type-constrained: a respond block that returns a non-Response (e.g. a raw String instead
+      # of `text("…")`) fails outbound validation here → mapped to a 500, preserving the
+      # `to_response -> Response` contract rather than leaking a bad object to the Rack renderer.
+      exposes :response, type: Axn::Webhooks::Response
       error "Webhook respond failed"
 
       def call

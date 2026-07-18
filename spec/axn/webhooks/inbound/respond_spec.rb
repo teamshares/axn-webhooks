@@ -111,6 +111,18 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#to_response (staged HTTP outcom
     expect(response.status).to eq(500)
   end
 
+  it "maps a respond block that returns a non-Response to a 500 (contract enforcement)" do
+    Axn::Webhooks.inbound(:vendor) do
+      verify { |_req| true }
+      dispatch to: "Handlers::Created"
+      respond { |_result| "a raw string, not a Response" }
+    end
+    response = nil
+    expect { response = Axn::Webhooks::Inbound[:vendor].to_response(req("{}")) }.not_to raise_error
+    expect(response).to be_a(Axn::Webhooks::Response)
+    expect(response.status).to eq(500)
+  end
+
   it "supports a literal string body (DropboxSign-style)" do
     Axn::Webhooks.inbound(:vendor) do
       verify { |_req| true }
