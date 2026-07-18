@@ -23,12 +23,16 @@ module Axn
         @headers[name.to_s.downcase]
       end
 
-      # Build a Request from a Rack env. Reads rack.input ONCE, capturing the exact pristine bytes
+      # Build a Request from a Rack env. Reads rack.input ONCE, capturing the exact pristine bytes,
       # before rewinding — this (not a controller's already-parsed params) is why the spec chose a
-      # Rack mount over a controller concern (see "## Packaging" in the design spec).
+      # Rack mount over a controller concern (see "## Packaging" in the design spec). The rewind is
+      # best-effort courtesy for anything downstream: our own pipeline only ever needs raw_body, so
+      # a non-rewindable rack.input (e.g. a bare Rack::Builder mount on a streaming server, with no
+      # Rack::RewindableInput::Middleware in front) is tolerated rather than raising mid-request.
       def self.from_rack(env)
-        raw_body = env.fetch("rack.input").read
-        env["rack.input"].rewind
+        input = env.fetch("rack.input")
+        raw_body = input.read || ""
+        input.rewind if input.respond_to?(:rewind)
 
         content_type = env["CONTENT_TYPE"]
         new(
@@ -55,14 +59,22 @@ module Axn
       end
       private_class_method :extract_headers
 
-      # Query-string params always; form-urlencoded BODY params merged in only when the content
-      # type says so (Twilio's dispatch `parse: ->(req){ req.params }` relies on this) — parsed
-      # from the raw_body we already captured, never by re-reading rack.input.
+      # `params` reflects the request's PRIMARY param source — never a query+form merge, because
+      # `url` (below) already carries the query string. Merging both would double-count query
+      # params for URL-signing verifiers (e.g. Twilio's RequestValidator does
+      # `validate(req.url, req.params, signature)`, which HMACs the query string once via the url
+      # and would HMAC it a second time via params if it were also merged in).
+      #
+      # - form-urlencoded body (Twilio's SMS/voice POST) -> params = form fields only; the query
+      #   (if any) is still reachable via `url`.
+      # - everything else (GET query, JSON POST, etc.) -> params = query string (e.g. the Nylas/
+      #   Meta GET challenge, read via `req.params["challenge"]`).
       def self.extract_params(env, raw_body, content_type)
-        query = Rack::Utils.parse_nested_query(env["QUERY_STRING"])
-        return query unless content_type&.start_with?("application/x-www-form-urlencoded")
-
-        query.merge(Rack::Utils.parse_nested_query(raw_body))
+        if content_type&.start_with?("application/x-www-form-urlencoded")
+          Rack::Utils.parse_nested_query(raw_body)
+        else
+          Rack::Utils.parse_nested_query(env["QUERY_STRING"])
+        end
       end
       private_class_method :extract_params
 

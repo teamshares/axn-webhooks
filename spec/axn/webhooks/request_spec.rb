@@ -94,7 +94,12 @@ RSpec.describe Axn::Webhooks::Request do
       expect(request.params).to eq("challenge" => "xyz", "a" => "1")
     end
 
-    it "merges form-urlencoded body params into params (Twilio's form body)" do
+    it "sets params to the form body fields only, NOT merged with the query (Twilio's form body)" do
+      # Rack::Request#url (used for `url`) already includes the query string. If `params` also
+      # merged the query in, a URL-signing verifier doing `validate(req.url, req.params, sig)`
+      # would double-count query params — once via url, once via params — and reject a validly
+      # signed callback. So for a form POST, params must be form fields only; the query is still
+      # reachable via `url`.
       body = "From=%2B15551234567&To=%2B15557654321"
       env = rack_env(
         "rack.input" => StringIO.new(body),
@@ -102,13 +107,14 @@ RSpec.describe Axn::Webhooks::Request do
         "QUERY_STRING" => "extra=1",
       )
       request = described_class.from_rack(env)
-      expect(request.params).to eq("From" => "+15551234567", "To" => "+15557654321", "extra" => "1")
+      expect(request.params).to eq("From" => "+15551234567", "To" => "+15557654321")
+      expect(request.url).to end_with("?extra=1") # query still reachable via url, not double-counted in params
       expect(request.raw_body).to eq(body) # verify still sees the untouched raw bytes
     end
 
-    it "does not attempt to parse a non-form body as params" do
-      request = described_class.from_rack(rack_env) # application/json body
-      expect(request.params).to eq({})
+    it "does not attempt to parse a non-form body as params, falling back to the query string" do
+      request = described_class.from_rack(rack_env("QUERY_STRING" => "challenge=xyz")) # application/json body
+      expect(request.params).to eq("challenge" => "xyz")
     end
 
     it "builds the full url including scheme, host, path, and query string" do
@@ -132,6 +138,23 @@ RSpec.describe Axn::Webhooks::Request do
     it "reads the HTTP method" do
       request = described_class.from_rack(rack_env("REQUEST_METHOD" => "GET"))
       expect(request.http_method).to eq("GET")
+    end
+
+    it "tolerates a non-rewindable rack.input instead of raising (bare Rack::Builder / streaming server)" do
+      # A Rack 3 stack without Rack::RewindableInput::Middleware in front may hand us an input
+      # that's readable but NOT rewindable. We've already captured the full body into raw_body
+      # before ever touching rewind, so a non-rewindable input shouldn't turn a valid webhook
+      # into a 500 — the rewind is just best-effort courtesy for downstream middleware.
+      non_rewindable_input = Class.new do
+        def initialize(body) = @io = StringIO.new(body)
+        def read(...) = @io.read(...)
+      end.new('{"a":1}')
+
+      expect(non_rewindable_input).not_to respond_to(:rewind)
+
+      request = nil
+      expect { request = described_class.from_rack(rack_env("rack.input" => non_rewindable_input)) }.not_to raise_error
+      expect(request.raw_body).to eq('{"a":1}')
     end
   end
 end

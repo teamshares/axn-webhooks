@@ -17,9 +17,10 @@
   `Endpoint#challenge_response(request) → Response` is testable without a Rack env, mirroring
   `#verify`/`#handle`/`#to_response`.
 - `Axn::Webhooks::Request.from_rack(env)` — builds a Request from a Rack env: pristine raw body
-  (read once from `rack.input`, then rewound), headers from `HTTP_*`/`CONTENT_TYPE`/
-  `CONTENT_LENGTH`, params from the query string (merged with form-decoded body params when the
-  content type is `application/x-www-form-urlencoded`), url, and http_method.
+  (read once from `rack.input`, then rewound if rewindable), headers from `HTTP_*`/`CONTENT_TYPE`/
+  `CONTENT_LENGTH`, params from the request's primary param source (form-decoded body when the
+  content type is `application/x-www-form-urlencoded`, else the query string), url, and
+  http_method.
 - `Axn::Webhooks.config.vendor_facet` (`setting`, default `false`, `one_of: [false, :dimension, :tag]`) — when set, stamps the registered vendor name onto the verify/dispatch/respond pipeline as that observability facet (Datadog/OTel dimension or tag), via the new `Axn::Webhooks::VendorFacet` mixin shared by `Verify`/`Dispatch`/`Respond`/`Challenge`.
 - `Axn::Webhooks::Inbound::Endpoint#to_response(request) → Response` — the staged HTTP outcome mapping: verify mismatch/crash → 401; missing handler/unmatched/parse error/handler crash → 500; `otherwise: :ack` and handler business `fail!` → a bare 2xx ack; a genuine handler success → the declared `respond` block's body (default bare ack).
 - `Axn::Webhooks::Request` — a Rails-agnostic wrapper (`raw_body`, `header`, `params`, `url`, `http_method`) that verifiers and dispatchers read from.
@@ -44,6 +45,19 @@
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Fixed
+- `Request.from_rack`'s `params` no longer merges query-string params into a form-urlencoded
+  body's params. `url` (via `Rack::Request#url`) already includes the query string, so the
+  previous merge double-counted query params for URL-signing verifiers doing
+  `validate(req.url, req.params, signature)` (e.g. Twilio's `RequestValidator`), causing valid
+  signed callbacks to be rejected. `params` is now the request's single primary param source:
+  form body fields only for `application/x-www-form-urlencoded` (query still reachable via
+  `url`), and the query string otherwise (GET challenges, JSON POSTs, etc.).
+- `Request.from_rack` no longer unconditionally calls `rewind` on `rack.input`. A Rack 3 stack
+  without `Rack::RewindableInput::Middleware` in front (e.g. a bare `Rack::Builder` mount on a
+  streaming server) may hand us a non-rewindable input, and calling `rewind` on it raised —
+  turning a valid webhook into an unhandled 500 before verification ever ran. The full body is
+  still read into `raw_body` before the (now guarded) rewind, so the pristine-body guarantee is
+  unaffected.
 - `verify` is now required whenever `dispatch` is declared. The no-op always-succeeds verifier
   (added to support challenge-only endpoints with no `verify`) had been returned whenever either
   `dispatch` or `challenge` was present without `verify`, which meant an endpoint declaring
