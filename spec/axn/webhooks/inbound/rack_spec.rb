@@ -79,4 +79,14 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#call (Rack app)" do
     expect { status, = Axn::Webhooks::Inbound[:vendor].call(broken_env) }.not_to raise_error
     expect(status).to eq(500)
   end
+
+  it "challenge-only endpoint returns bare 200 ack on POST (intentional: no dispatch means no processing)" do
+    Axn::Webhooks.inbound(:probe) { challenge ->(req) { req.params["challenge"] } }
+    env = Rack::MockRequest.env_for("/webhooks/probe", method: "POST", input: '{"event":"test"}',
+                                                       "CONTENT_TYPE" => "application/json")
+    status, headers, response_body = Axn::Webhooks::Inbound[:probe].call(env)
+    expect(status).to eq(200)
+    expect(headers).to eq({})
+    expect(response_body).to eq([""])
+  end
 end

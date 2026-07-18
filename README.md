@@ -178,7 +178,7 @@ map "/webhooks/codat" { run Axn::Webhooks::Inbound[:codat] }
 ```
 
 The mount owns the whole path and every verb: `POST` runs verify → dispatch → respond; `GET` runs
-a declared `challenge`, or 405s if none was declared.
+a declared `challenge`, or 405s if none was declared. Any other verb — including `HEAD` on a bare `Rack::Builder` mount without `Rack::Head` upstream — returns 405. (Rails inserts `Rack::Head` before middleware, so `HEAD` becomes `GET` there.)
 
 ### Challenge (GET-echo handshake)
 
