@@ -31,20 +31,24 @@ It always uses a constant-time comparison and supports multi-signature (key-rota
 
 ## Inbound endpoints
 
-Declare each vendor webhook in one place (e.g. a Rails initializer), grouped by vendor:
+Declare each vendor webhook in one place (e.g. a Rails initializer). The symbol you pass to
+`inbound` is the vendor's name — pick whatever you'll reference it by:
 
 ```ruby
-Axn::Webhooks.inbound :merge do
+# Codat — Standard Webhooks (Svix) preset
+Axn::Webhooks.inbound :codat do
+  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
+end
+
+# Merge (merge.dev) — parametric HMAC
+Axn::Webhooks.inbound :merge_dev do
   verify :hmac,
     secret:    ENV.fetch("MERGE_WEBHOOK_SIGNATURE_KEY"),
     signature: header("X-Merge-Webhook-Signature"),
     encoding:  :base64_urlsafe
 end
 
-Axn::Webhooks.inbound :codat do
-  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
-end
-
+# Twilio — custom verifier delegating to the vendor SDK
 Axn::Webhooks.inbound :twilio do
   verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
                    .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
@@ -54,7 +58,7 @@ end
 Verify a request (dispatch/respond and HTTP mounting land in later phases):
 
 ```ruby
-result = Axn::Webhooks::Inbound[:merge].verify(request)  # => Axn::Result
+result = Axn::Webhooks::Inbound[:codat].verify(request)  # => Axn::Result
 result.ok?  # signature valid?
 ```
 

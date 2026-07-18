@@ -7,8 +7,13 @@
 The ticket's `Axn::Webhooks.configure do |c| c.verifier :merge, … end` was **illustrative**. The settled public API is **block-per-endpoint** (grouped by vendor, not by concern):
 
 ```ruby
-# config/initializers/webhooks.rb — declared centrally at a known boot point
-Axn::Webhooks.inbound :merge do
+# config/initializers/webhooks.rb — declared centrally at a known boot point.
+# The symbol passed to `inbound` is the vendor's name (whatever you reference it by).
+Axn::Webhooks.inbound :codat do              # Codat — Standard Webhooks (Svix) preset
+  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
+end
+
+Axn::Webhooks.inbound :merge_dev do          # Merge (merge.dev) — parametric HMAC
   verify :hmac,
     secret:    ENV.fetch("MERGE_WEBHOOK_SIGNATURE_KEY"),   # boot-time (fail-fast); a lambda defers to request time
     signature: header("X-Merge-Webhook-Signature"),         # request resolver
@@ -16,11 +21,7 @@ Axn::Webhooks.inbound :merge do
   # later phases add dispatch / challenge / respond to the SAME block
 end
 
-Axn::Webhooks.inbound :codat do
-  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
-end
-
-Axn::Webhooks.inbound :twilio do
+Axn::Webhooks.inbound :twilio do             # Twilio — custom verifier delegating to the vendor SDK
   verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
                    .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
 end
@@ -29,8 +30,8 @@ end
 - **`Axn::Webhooks.inbound(:vendor) { … }`** (a top-level method) registers an endpoint; **`Axn::Webhooks::Inbound[:vendor]`** looks it up. Not nested inside `configure` — axn's `Configurable` owns `configure`/`config` for scalar settings (e.g. `vendor_facet`); endpoint registration is a separate concern.
 - **Rationale for block-per-endpoint (Shape A) over the flat `c.verifier`/`c.dispatch` registries (Shape B):** all four declarations for a vendor co-locate, so onboarding/changing a vendor is one contiguous edit; B groups by concern (verifiers together — marginally better for a crypto audit, recoverable in A via `grep 'verify '`) but scatters each vendor across three lists. Deterministic registration at boot (no autoload dependency) — works identically in and out of Rails.
 - **Secrets:** boot-time `ENV.fetch(...)` (fail-fast if missing); a `-> { … }` lambda is accepted anywhere a value must be resolved dynamically (incl. per-request).
-- **Triggering is orthogonal** (Phase 5): Rails `mount Axn::Webhooks::Inbound[:merge], at: "/webhooks/merge"`; non-Rails `map "/webhooks/merge" { run Axn::Webhooks::Inbound[:merge] }` in a `Rack::Builder`. Both consume the same `Inbound[:vendor]` Rack app.
-- Testable without HTTP: `Axn::Webhooks::Inbound[:merge].verify(request) # => Axn::Result`. Each endpoint compiles to a verify→dispatch→respond **Axn pipeline** internally ("internals are Axns").
+- **Triggering is orthogonal** (Phase 5): Rails `mount Axn::Webhooks::Inbound[:codat], at: "/webhooks/codat"`; non-Rails `map "/webhooks/codat" { run Axn::Webhooks::Inbound[:codat] }` in a `Rack::Builder`. Both consume the same `Inbound[:vendor]` Rack app.
+- Testable without HTTP: `Axn::Webhooks::Inbound[:codat].verify(request) # => Axn::Result`. Each endpoint compiles to a verify→dispatch→respond **Axn pipeline** internally ("internals are Axns").
 
 ## Spec-local notes (not in the ticket)
 
