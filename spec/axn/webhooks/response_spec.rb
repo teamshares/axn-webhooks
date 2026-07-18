@@ -82,4 +82,13 @@ RSpec.describe Axn::Webhooks::Response do
     response = described_class.text("hi", status: 201)
     expect(response.to_rack).to eq([201, { "content-type" => "text/plain" }, ["hi"]])
   end
+
+  it "returns mutable headers from to_rack so Rails/Rack middleware can set headers" do
+    response = described_class.text("hi")
+    rack_headers = response.to_rack[1]
+    expect(rack_headers).not_to be_frozen
+    expect(rack_headers).not_to equal(response.headers)
+    rack_headers["x-custom"] = "value"
+    expect(rack_headers["x-custom"]).to eq("value")
+  end
 end

@@ -42,4 +42,16 @@ RSpec.describe Axn::Webhooks::Inbound::Challenge do
     expect { result = described_class.call(request: req({}), resolver: ->(_r) { raise "boom" }) }.not_to raise_error
     expect(result.outcome).to be_exception
   end
+
+  it "reports (exception) rather than raises when the guard crashes" do
+    result = nil
+    expect do
+      result = described_class.call(
+        request: req("hub.challenge" => "xyz"),
+        resolver: ->(r) { r.params["hub.challenge"] },
+        guard: ->(_r) { raise "boom" },
+      )
+    end.not_to raise_error
+    expect(result.outcome).to be_exception
+  end
 end

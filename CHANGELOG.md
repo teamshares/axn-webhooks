@@ -20,24 +20,6 @@
   (read once from `rack.input`, then rewound), headers from `HTTP_*`/`CONTENT_TYPE`/
   `CONTENT_LENGTH`, params from the query string (merged with form-decoded body params when the
   content type is `application/x-www-form-urlencoded`), url, and http_method.
-
-### Changed
-- Added `rack` (`>= 3.0`, `< 4`) as a runtime dependency, in preparation for the Rack mount.
-
-### Fixed
-- `verify` is now required whenever `dispatch` is declared. The no-op always-succeeds verifier
-  (added to support challenge-only endpoints with no `verify`) had been returned whenever either
-  `dispatch` or `challenge` was present without `verify`, which meant an endpoint declaring
-  `dispatch` but no `verify` would process unverified webhooks. Registering such an endpoint now
-  raises `Axn::Webhooks::Error` immediately; the no-op verifier remains available only for
-  challenge-only endpoints (no `dispatch`).
-- `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
-
-### Changed
-- Clearer README intro and gemspec description, with explicit mention of dispatch.
-- Removed unnecessary rubocop pragma from dispatch parse example.
-
-### Added
 - `Axn::Webhooks.config.vendor_facet` (`setting`, default `false`, `one_of: [false, :dimension, :tag]`) — when set, stamps the registered vendor name onto the verify/dispatch/respond pipeline as that observability facet (Datadog/OTel dimension or tag), via the new `Axn::Webhooks::VendorFacet` mixin shared by `Verify`/`Dispatch`/`Respond`/`Challenge`.
 - `Axn::Webhooks::Inbound::Endpoint#to_response(request) → Response` — the staged HTTP outcome mapping: verify mismatch/crash → 401; missing handler/unmatched/parse error/handler crash → 500; `otherwise: :ack` and handler business `fail!` → a bare 2xx ack; a genuine handler success → the declared `respond` block's body (default bare ack).
 - `Axn::Webhooks::Request` — a Rails-agnostic wrapper (`raw_body`, `header`, `params`, `url`, `http_method`) that verifiers and dispatchers read from.
@@ -55,3 +37,18 @@
 - `Axn::Webhooks::Response` — a Rails-agnostic HTTP response value (status/body/headers) with `.ack`/`.text`/`.xml` factories, produced by the staged HTTP outcome mapping and rendered against Rack in a later phase.
 - `respond` DSL declaration + `Axn::Webhooks::Inbound::RespondContext` — captures a block mapping a genuine handler success to a `Response`; the block runs with `ack`/`text`/`xml` available as bare calls.
 - `dispatch mode:` — the async seam, resolved dynamically: an explicit `:async` delegates to the handler's own `.call_async` (inheriting whatever axn async adapter the app configured — never branches on `:sidekiq`/`:active_job`), an explicit `:sync` runs inline, and the default (`:auto`) runs **async when an adapter is configured for the handler, else sync** — except a custom `respond` (a result-returning hook) always forces sync. An explicit `mode: :async` + custom `respond` is rejected at `inbound` registration time (you can't read a handler result you enqueued). Dispatching `:async` against a handler with no adapter configured (explicitly disabled or never set) is a clean, reported `Axn::Webhooks::Error` (500-bound) rather than an uncaught `NotImplementedError` escaping the axn boundary; adapter presence is a truthiness check, so an explicitly-disabled handler (`_async_adapter == false`) is correctly treated as unconfigured and runs sync under `mode: :auto`.
+
+### Changed
+- Added `rack` (`>= 3.0`, `< 4`) as a runtime dependency, in preparation for the Rack mount.
+- Clearer README intro and gemspec description, with explicit mention of dispatch.
+- Removed unnecessary rubocop pragma from dispatch parse example.
+
+### Fixed
+- `verify` is now required whenever `dispatch` is declared. The no-op always-succeeds verifier
+  (added to support challenge-only endpoints with no `verify`) had been returned whenever either
+  `dispatch` or `challenge` was present without `verify`, which meant an endpoint declaring
+  `dispatch` but no `verify` would process unverified webhooks. Registering such an endpoint now
+  raises `Axn::Webhooks::Error` immediately; the no-op verifier remains available only for
+  challenge-only endpoints (no `dispatch`).
+- `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
+- `Response#to_rack` now returns a mutable headers hash so Rails/Rack middleware (which sets response headers) works; the `Response` value object itself stays frozen.
