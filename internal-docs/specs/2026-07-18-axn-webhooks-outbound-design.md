@@ -154,9 +154,8 @@ the adapter does **not** also retry — no double-counting.)
 codes: verify mismatch → 401 (permanent), handler business `fail!` → 2xx (delivered), missing
 handler / handler crash → 5xx (retryable "deploy-grace" window). This design adds one small inbound
 affordance so a receiver can request redelivery *without* paging — a `retry_later!`-style hook
-mapping to **503 + `Retry-After`** (distinct from a crash, which is a reported 5xx). That inbound
-addition is small and may be split into its own follow-up; the outbound engine honors 503 regardless
-of who produced it.
+mapping to **503 + `Retry-After`** (distinct from a crash, which is a reported 5xx). This inbound
+addition is **in scope for this ticket**; the outbound engine honors 503 regardless of who produced it.
 
 ### 5. Observability
 
@@ -203,12 +202,11 @@ PRO-2818).
 * **Consuming-app migration.** Rewire teamshares-rails' `send_webhook` onto `Axn::Webhooks::Outbound`,
   move the event→listeners map into the sending app(s), and delete `WEBHOOK_EVENTS`. Migrate receivers
   to `verify :standard_webhooks`. *(Own ticket, like inbound's per-vendor migration.)*
-* **Inbound `retry_later!` affordance** (503 + `Retry-After`) may be a small split-out follow-up.
 
 ## Open questions
 
 None blocking — ready for an implementation plan. (Confirm during build: the wire-`type` default
-symbol-string vs. dotted; and whether `retry_later!` lands here or splits out.)
+symbol-string vs. dotted.)
 
 ## Related
 
