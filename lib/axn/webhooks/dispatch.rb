@@ -13,6 +13,7 @@ module Axn
       expects :request, type: Axn::Webhooks::Request
       expects :router
       expects :parse
+      exposes :handler_result, allow_nil: true
       error "Webhook dispatch failed"
 
       def call
@@ -21,7 +22,7 @@ module Axn
         return done!("acknowledged") if resolution == :ack
 
         handler_class, args = resolution
-        handler_class.call!(**args)
+        expose handler_result: handler_class.call!(**args)
       end
     end
   end

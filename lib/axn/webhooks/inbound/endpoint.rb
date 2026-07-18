@@ -26,12 +26,7 @@ module Axn
           verified = verify(request)
           return verified unless verified.ok? && @dispatch
 
-          event = @dispatch[:parse].call(request)
-          resolution = @dispatch[:router].resolve(event)
-          return Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse]) if resolution == :ack
-
-          handler_class, args = resolution
-          handler_class.call!(**args)
+          Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse])
         end
       end
     end

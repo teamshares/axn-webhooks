@@ -34,7 +34,7 @@ RSpec.describe "Axn::Webhooks endpoint#handle (verify + dispatch)" do
     body = '{"type":"created","data":{"id":99}}'
     result = Axn::Webhooks::Inbound[:vendor].handle(signed_request(body))
     expect(result).to be_ok
-    expect(result.seen_id).to eq(99)
+    expect(result.handler_result.seen_id).to eq(99)
   end
 
   it "short-circuits to the verify failure without dispatching on a bad signature" do
@@ -69,12 +69,43 @@ RSpec.describe "Axn::Webhooks endpoint#handle (verify + dispatch)" do
     req = Axn::Webhooks::Request.new(raw_body: "From=+15550001111", params: { "From" => "+15550001111" })
     result = Axn::Webhooks::Inbound[:twilio].handle(req)
     expect(result).to be_ok
-    expect(result.from).to eq("+15550001111")
+    expect(result.handler_result.from).to eq("+15550001111")
   end
 
   it "returns the verify result for a verify-only endpoint (no dispatch)" do
     Axn::Webhooks.inbound(:probe) { verify { |_req| true } }
     result = Axn::Webhooks::Inbound[:probe].handle(Axn::Webhooks::Request.new(raw_body: ""))
     expect(result).to be_ok
+  end
+
+  it "returns (does not raise) a Dispatch exception result through handle when the handler class is missing" do
+    Axn::Webhooks.inbound(:missing) do
+      verify { |_req| true }
+      dispatch to: "Totally::Missing::Handler"
+    end
+
+    body = '{"type":"created"}'
+    result = nil
+    expect { result = Axn::Webhooks::Inbound[:missing].handle(signed_request(body)) }.not_to raise_error
+    expect(result.outcome).to be_exception
+  end
+
+  it "returns (does not raise) a Dispatch exception result through handle when the handler crashes" do
+    stub_const("Handlers::Boom",
+               Class.new do
+                 include Axn
+
+                 expects :event, allow_blank: true
+                 def call = raise "boom"
+               end)
+    Axn::Webhooks.inbound(:boom) do
+      verify { |_req| true }
+      dispatch to: "Handlers::Boom"
+    end
+
+    body = '{"type":"created"}'
+    result = nil
+    expect { result = Axn::Webhooks::Inbound[:boom].handle(signed_request(body)) }.not_to raise_error
+    expect(result.outcome).to be_exception
   end
 end

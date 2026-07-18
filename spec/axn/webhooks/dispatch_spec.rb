@@ -30,6 +30,8 @@ RSpec.describe Axn::Webhooks::Dispatch do
     router = Axn::Webhooks::Inbound::Router.new(to: "OkHandler")
     result = described_class.call(request: request('{"a":1}'), router:, parse: json_parse)
     expect(result).to be_ok
+    expect(result.handler_result).to be_a(Axn::Result)
+    expect(result.handler_result).to be_ok
   end
 
   it "settles as a quiet failure when the handler fail!s" do
@@ -77,9 +79,7 @@ RSpec.describe Axn::Webhooks::Dispatch do
       req = Axn::Webhooks::Request.new(raw_body: '{"k":"v"}', params: { "p" => 1 })
       expect(described_class.build(:json).call(req)).to eq("k" => "v")
       expect(described_class.build(nil).call(req)).to eq("k" => "v")
-      # rubocop:disable Style/SymbolProc
-      expect(described_class.build(proc { |r| r.params }).call(req)).to eq("p" => 1)
-      # rubocop:enable Style/SymbolProc
+      expect(described_class.build(lambda(&:params)).call(req)).to eq("p" => 1)
     end
 
     it "rejects an unknown parse option" do
