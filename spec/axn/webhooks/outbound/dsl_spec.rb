@@ -61,4 +61,53 @@ RSpec.describe "Axn::Webhooks.outbound" do
       event :lead_signed, to: []
     end
   end
+
+  describe "Config#transport" do
+    it "defaults to Outbound::Transport when the block does not call `transport`" do
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+        event :lead_signed, to: ["https://x"]
+      end
+      expect(Axn::Webhooks::Outbound.config.transport).to eq(Axn::Webhooks::Outbound::Transport)
+    end
+
+    it "uses the object passed to `transport` when the block declares one" do
+      custom_transport = Object.new
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+        transport custom_transport
+        event :lead_signed, to: ["https://x"]
+      end
+      expect(Axn::Webhooks::Outbound.config.transport).to equal(custom_transport)
+    end
+  end
+
+  describe "Axn::Webhooks.swallow_soft_error" do
+    let(:exception) { RuntimeError.new("boom") }
+
+    it "swallows the error, logs a warning, and returns nil when not raising-in-dev" do
+      allow(Axn.config).to receive(:raise_piping_errors_in_dev).and_return(false)
+      expect(Axn.config.logger).to receive(:warn).with(/doing the thing.*RuntimeError.*boom/m)
+
+      result = Axn::Webhooks.swallow_soft_error("doing the thing", exception:)
+      expect(result).to be_nil
+    end
+
+    it "re-raises when raise_piping_errors_in_dev is set AND env is development" do
+      allow(Axn.config).to receive(:raise_piping_errors_in_dev).and_return(true)
+      allow(Axn.config).to receive(:env).and_return(ActiveSupport::StringInquirer.new("development"))
+
+      expect { Axn::Webhooks.swallow_soft_error("doing the thing", exception:) }
+        .to raise_error(exception)
+    end
+
+    it "does not raise when raise_piping_errors_in_dev is set but env is NOT development" do
+      allow(Axn.config).to receive(:raise_piping_errors_in_dev).and_return(true)
+      allow(Axn.config).to receive(:env).and_return(ActiveSupport::StringInquirer.new("production"))
+      expect(Axn.config.logger).to receive(:warn)
+
+      result = Axn::Webhooks.swallow_soft_error("doing the thing", exception:)
+      expect(result).to be_nil
+    end
+  end
 end
