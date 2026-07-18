@@ -44,9 +44,7 @@ module Axn
           return nil unless @dispatch_spec
 
           spec = @dispatch_spec
-          unless %i[auto sync async].include?(spec[:mode])
-            raise Axn::Webhooks::Error, "dispatch mode: must be :sync or :async (got #{spec[:mode].inspect})"
-          end
+          raise Axn::Webhooks::Error, "dispatch mode: must be :sync or :async (got #{spec[:mode].inspect})" unless %i[auto sync async].include?(spec[:mode])
 
           router = Router.new(to: spec[:to], on: spec[:on], otherwise: spec[:otherwise], via: spec[:via])
           { router:, parse: Parsers.build(spec[:parse]), mode: spec[:mode] }

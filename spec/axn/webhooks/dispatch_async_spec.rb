@@ -13,6 +13,7 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
     # Real Axn handler, no adapter configured.
     stub_const("SyncHandler", Class.new do
       include Axn
+
       expects :event, allow_blank: true
       def call = nil
     end)
@@ -20,6 +21,7 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
     # call_async is stubbed so no real adapter runs.
     stub_const("AdapterHandler", Class.new do
       include Axn
+
       expects :event, allow_blank: true
       def call = nil
     end)
@@ -39,7 +41,7 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
     router = Axn::Webhooks::Inbound::Router.new(to: "SyncHandler")
     result = Axn::Webhooks::Dispatch.call(request: request("{}"), router:, parse: json_parse, mode: :async)
     expect(result.outcome).to be_exception
-    expect(result.exception).to be_a(NotImplementedError)
+    expect(result.exception).to be_a(Axn::Webhooks::Error)
   end
 
   it "explicit :sync runs synchronously even if an adapter is configured" do
@@ -78,6 +80,13 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
       result = Axn::Webhooks::Dispatch.call(request: request("{}"), router:, parse: json_parse, respond_declared: true)
       expect(result.handler_result).to be_ok
       expect(AdapterHandler).not_to have_received(:call_async)
+    end
+
+    it "runs SYNC when the handler's adapter is explicitly disabled (false is not 'configured')" do
+      SyncHandler._async_adapter = false
+      router = Axn::Webhooks::Inbound::Router.new(to: "SyncHandler")
+      result = Axn::Webhooks::Dispatch.call(request: request("{}"), router:, parse: json_parse) # mode defaults to :auto
+      expect(result.handler_result).to be_ok
     end
   end
 end

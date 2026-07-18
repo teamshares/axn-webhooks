@@ -41,14 +41,31 @@ module Axn
       end
 
       # Presence check ONLY — decides async-vs-sync, never asks which adapter.
+      # Truthiness (not nil-check) so an explicitly-disabled handler (_async_adapter == false)
+      # is correctly treated as "not configured", not "configured".
       def async_adapter_configured?(handler_class)
         return true if Axn.config._default_async_adapter
-        handler_class.respond_to?(:_async_adapter) && !handler_class._async_adapter.nil?
+
+        handler_class.respond_to?(:_async_adapter) && !!handler_class._async_adapter
       end
 
       # Delegates entirely to axn's own async interface; no handler_result (nothing ran
-      # synchronously). A call_async with no adapter raises NotImplementedError → loud exception.
+      # synchronously). Guarded so an unconfigured adapter never reaches call_async, which would
+      # raise a ScriptError (NotImplementedError) that escapes the Dispatch axn boundary entirely
+      # (the boundary only rescues StandardError). Raising our own StandardError here instead keeps
+      # the failure inside the boundary as a clean, reported exception outcome.
+      #
+      # Only handlers that expose _async_adapter (real Axn handlers) are second-guessed here — that's
+      # the only case where axn's own call_async can raise the escaping NotImplementedError. A handler
+      # class that doesn't respond to _async_adapter isn't going through axn's async machinery at all
+      # (e.g. a plain object providing its own call_async), so there's nothing to guard against.
       def dispatch_async(handler_class, args)
+        if handler_class.respond_to?(:_async_adapter) && !async_adapter_configured?(handler_class)
+          raise Axn::Webhooks::Error,
+                "dispatch mode: :async requires an axn async adapter, but none is configured for " \
+                "#{handler_class} (add `async :sidekiq`/`async :active_job` to the handler, or set a global default)"
+        end
+
         handler_class.call_async(**args)
         done!("enqueued")
       end

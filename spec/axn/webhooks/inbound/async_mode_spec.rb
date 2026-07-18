@@ -52,6 +52,7 @@ RSpec.describe "Axn::Webhooks::Inbound async dispatch mode" do
   it "a custom respond (mode: :auto) runs sync so respond can read the result" do
     stub_const("TwimlHandler", Class.new do
       include Axn
+
       expects :event, allow_blank: true
       exposes :twiml
       def call = expose(twiml: "<Response/>")
@@ -59,7 +60,7 @@ RSpec.describe "Axn::Webhooks::Inbound async dispatch mode" do
     TwimlHandler._async_adapter = :sidekiq # even with an adapter configured, a respond forces sync
     Axn::Webhooks.inbound(:twilio) do
       verify { |_req| true }
-      dispatch to: "TwimlHandler"       # mode: :auto
+      dispatch to: "TwimlHandler" # mode: :auto
       respond { |result| xml(result.twiml) }
     end
     response = Axn::Webhooks::Inbound[:twilio].to_response(Axn::Webhooks::Request.new(raw_body: "{}"))
