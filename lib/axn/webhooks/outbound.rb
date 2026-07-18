@@ -5,6 +5,7 @@ require_relative "outbound/envelope"
 require_relative "outbound/transport"
 require_relative "outbound/config"
 require_relative "outbound/dsl"
+require_relative "outbound/deliver"
 
 module Axn
   module Webhooks
