@@ -29,6 +29,41 @@ Axn::Webhooks::Signature.hmac(
 
 It always uses a constant-time comparison and supports multi-signature (key-rotation) headers.
 
+## Inbound endpoints
+
+Declare each vendor webhook in one place (e.g. a Rails initializer). The symbol you pass to
+`inbound` is the vendor's name — pick whatever you'll reference it by:
+
+```ruby
+# Codat — Standard Webhooks (Svix) preset
+Axn::Webhooks.inbound :codat do
+  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
+end
+
+# Merge (merge.dev) — parametric HMAC
+Axn::Webhooks.inbound :merge_dev do
+  verify :hmac,
+    secret:    ENV.fetch("MERGE_WEBHOOK_SIGNATURE_KEY"),
+    signature: header("X-Merge-Webhook-Signature"),
+    encoding:  :base64_urlsafe
+end
+
+# Twilio — custom verifier delegating to the vendor SDK
+Axn::Webhooks.inbound :twilio do
+  verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
+                   .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
+end
+```
+
+Verify a request (dispatch/respond and HTTP mounting land in later phases):
+
+```ruby
+result = Axn::Webhooks::Inbound[:codat].verify(request)  # => Axn::Result
+result.ok?  # signature valid?
+```
+
+**Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
+
 ## Development
 
 - `bin/refresh` — pull latest and install dependencies (fails on a dirty working tree).
