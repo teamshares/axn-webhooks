@@ -197,9 +197,10 @@ end
 ```
 
 No extra `routes.rb` line is needed — `challenge` just teaches the same mount how to answer `GET`.
-A missing/rejected challenge is a quiet 400; a `challenge`/`if:` proc that raises is reported and
-mapped to 500. (Slack's in-band `url_verification` handshake is NOT this — it's a normal `dispatch`
-entry, since Slack sends it as a POST event, not a GET.)
+An `if:` guard rejection (e.g. a bad Meta `hub.verify_token`) is a **403**; a missing/nil challenge
+value is a **400**; a `challenge`/`if:` proc that raises is reported and mapped to **500**. (Slack's
+in-band `url_verification` handshake is NOT this — it's a normal `dispatch` entry, since Slack sends
+it as a POST event, not a GET.)
 
 ### Per-vendor observability (`vendor_facet`)
 
