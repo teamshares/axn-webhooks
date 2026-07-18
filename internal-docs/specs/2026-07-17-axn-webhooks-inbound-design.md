@@ -45,6 +45,14 @@ Refines the ticket's "Dispatch" section into the built design:
 - **Handler args:** default `{ event: event }`; a map entry `{ call: "Handler", with: ->(e){ … } }` supplies scalar kwargs for a reused domain axn.
 - **Sync this phase.** The `mode: :async` seam (Phase 4) delegates to the handler's `.call_async` and inherits whatever axn async adapter the app configured — designed against axn's async interface, never branching on `:sidekiq`/`:active_job`. See [[axn-webhooks-async-design]].
 
+## Amendment — Phase 4 respond + async (settled 2026-07-18)
+
+Refines the ticket's "### 4. Respond + staged outcome model":
+
+- **`Axn::Webhooks::Response`** — a Rails-agnostic value (status/body/headers) with `.ack`/`.text`/`.xml` factories. Phase 5's Rack mount renders it. The `respond { |result| … }` DSL block runs with `ack`/`text`/`xml` as bare calls.
+- **`Endpoint#to_response(request) → Response`** (named `to_response`, not `respond`, to avoid clashing with the `respond` DSL verb) is the staged HTTP mapper. Verify and dispatch are mapped in **separate branches** (stage-aware), because a verify failure (401) and a handler `fail!` (2xx) are both `outcome.failure?`. Table: verify mismatch/crash → 401; missing/unmatched handler, parse error, handler crash → 500 (reported); `otherwise: :ack` and handler `fail!` → bare 2xx; genuine handler success → the `respond` body (default bare ack). **`respond` fires only on a genuine handler success.**
+- **Dynamic async `mode:`** (supersedes the ticket's "async is the default"; see [[axn-webhooks-async-design]]): `dispatch mode:` defaults to `:auto` — resolves to **async when an axn async adapter is configured for the resolved handler, else sync**; a custom `respond` forces sync; explicit `:sync`/`:async` override. Delegates to `handler.call_async` (adapter-agnostic; presence-detected, never type-branched). Explicit `mode: :async` + custom `respond` → boot-time error. Sync-vs-async is resolved inside `Dispatch` (per resolved handler).
+
 ## Spec-local notes (not in the ticket)
 
 - **Scope of this repo = the library only.** The per-vendor rows in "Per-vendor migration" describe changes that land in the consuming apps (*os-app*, *buyout*) — separate follow-up work in other repos. Here we build the `axn-webhooks` gem and prove it with its own standalone test suite (no Rails required).
