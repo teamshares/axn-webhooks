@@ -33,6 +33,18 @@ end
 - **Triggering is orthogonal** (Phase 5): Rails `mount Axn::Webhooks::Inbound[:codat], at: "/webhooks/codat"`; non-Rails `map "/webhooks/codat" { run Axn::Webhooks::Inbound[:codat] }` in a `Rack::Builder`. Both consume the same `Inbound[:vendor]` Rack app.
 - Testable without HTTP: `Axn::Webhooks::Inbound[:codat].verify(request) # => Axn::Result`. Each endpoint compiles to a verify→dispatch→respond **Axn pipeline** internally ("internals are Axns").
 
+## Amendment — Phase 3 dispatch (settled 2026-07-18)
+
+Refines the ticket's "Dispatch" section into the built design:
+
+- **`Endpoint#handle(request)`** is the full pipeline: `verify → parse body into event → route to handler Axn → Result`. `verify(request)` stays for verify-only testing. (Named `handle`, not `call` — Phase 5's Rack mount owns `call(env)`.)
+- **Body → `event`:** defaults to `JSON.parse(raw_body)`; a per-endpoint `parse:` override handles other bodies (`parse: ->(req){ req.params }` for Twilio's form body, or a custom proc). Verify still runs on raw bytes *before* any parse. `on:`/`to:`/`with:` and the handler's `event:` all receive the parsed value.
+- **Dispatch is an Axn**, so every "loud" failure is raised *inside* the axn boundary → axn's exception bucket → global `on_exception` (Honeybadger) + a formatted `result.error`; nothing escapes as an unhandled exception. Loud cases: **missing/unresolvable handler class**, and an **unmatched dispatch key when no `otherwise:` is declared** (an unexpected event type should page, not be swallowed).
+- **`otherwise:`** accepts `:ack` (log + success, 2xx) or a **user callable** (a proc — e.g. send a Slack alert). `:notify` is dropped: that's a user decision, expressible as a proc.
+- **Staged outcomes (verify+dispatch rows):** verify mismatch → failure (401); missing handler / unmatched-no-`otherwise` → exception (5xx, reported **once**, via `Handler.call!` inside `Dispatch`); handler business `fail!` → failure (2xx + log); handler crash → exception (5xx, reported); `otherwise: :ack` → success (2xx). HTTP mapping itself lands in Phase 4/5.
+- **Handler args:** default `{ event: event }`; a map entry `{ call: "Handler", with: ->(e){ … } }` supplies scalar kwargs for a reused domain axn.
+- **Sync this phase.** The `mode: :async` seam (Phase 4) delegates to the handler's `.call_async` and inherits whatever axn async adapter the app configured — designed against axn's async interface, never branching on `:sidekiq`/`:active_job`. See [[axn-webhooks-async-design]].
+
 ## Spec-local notes (not in the ticket)
 
 - **Scope of this repo = the library only.** The per-vendor rows in "Per-vendor migration" describe changes that land in the consuming apps (*os-app*, *buyout*) — separate follow-up work in other repos. Here we build the `axn-webhooks` gem and prove it with its own standalone test suite (no Rails required).
