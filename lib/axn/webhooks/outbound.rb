@@ -6,6 +6,7 @@ require_relative "outbound/transport"
 require_relative "outbound/config"
 require_relative "outbound/dsl"
 require_relative "outbound/deliver"
+require_relative "outbound/emit"
 
 module Axn
   module Webhooks
@@ -30,6 +31,12 @@ module Axn
       dsl = Outbound::DSL.new
       dsl.instance_exec(&block)
       Outbound.install(dsl.__config__)
+    end
+
+    # Emit an outbound webhook event. Fans out one signed, self-retrying delivery per subscriber.
+    # Raises loudly (Axn::Webhooks::Error) on an unknown event.
+    def self.emit(event, data: {})
+      Outbound::Emit.call!(event:, data:)
     end
 
     # Local stand-in for the future promoted axn-core soft-error helper (see the outbound spec's
