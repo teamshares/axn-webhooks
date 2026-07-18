@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- `Axn::Webhooks::Outbound::Envelope` — builds the Standard Webhooks message body (`.build(id:, type:, data:, now:) → String`, a `{id,timestamp,type,data}` JSON string) and its idempotency id (`.new_id → "msg_<uuid>"`). Deliberately decoupled from signing: the body is fixed at emit time (part of the dedup identity), while the signature is recomputed per delivery attempt.
 - `Axn::Webhooks::Outbound::Signer` — builds a `#call(id:, timestamp:, body:) → Hash` signer from a `sign` declaration. The `:standard_webhooks` strategy is the outbound face of the inbound `verify :standard_webhooks` (same `whsec_` secret, `id.timestamp.body` HMAC, `v1,<base64>` signature), so a receiver already verifying Standard Webhooks accepts it; a custom block is called verbatim and must return the header hash itself.
 - `Axn::Webhooks::Inbound::Endpoint#call(env)` — `Inbound[:vendor]` is now directly a Rack app:
   `mount Axn::Webhooks::Inbound[:vendor], at: "/webhooks/vendor"` in Rails, or
