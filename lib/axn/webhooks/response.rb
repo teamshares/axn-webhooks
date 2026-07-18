@@ -11,10 +11,10 @@ module Axn
       def initialize(status: 200, body: "", headers: {})
         @status = status
         @body = body.to_s.freeze
-        # Freeze keys AND values so a caller's mutable header value can't mutate the response
-        # after construction (a rendered-later value object must be truly immutable).
+        # Freeze keys AND values (deeply, so multi-value Array headers freeze their elements too)
+        # — a caller's mutable header value must not be able to mutate this rendered-later value.
         @headers = headers.each_with_object({}) do |(key, value), frozen|
-          frozen[key.to_s.freeze] = value.frozen? ? value : value.dup.freeze
+          frozen[key.to_s.freeze] = deep_freeze(value)
         end.freeze
         freeze
       end
@@ -31,6 +31,17 @@ module Axn
 
       def ==(other)
         other.is_a?(self.class) && status == other.status && body == other.body && headers == other.headers
+      end
+
+      private
+
+      # Freeze a header value so it can't be mutated after construction. Handles the two Rack
+      # header-value shapes: a String, and an Array of Strings (multi-value headers) whose
+      # elements are frozen too.
+      def deep_freeze(value)
+        return value.map { |element| deep_freeze(element) }.freeze if value.is_a?(Array)
+
+        value.frozen? ? value : value.dup.freeze
       end
     end
   end

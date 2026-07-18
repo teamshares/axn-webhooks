@@ -49,6 +49,13 @@ RSpec.describe Axn::Webhooks::Response do
     expect { response.headers["X-Custom"] << "!" }.to raise_error(FrozenError)
   end
 
+  it "deep-freezes Array (multi-value) header values including their elements" do
+    response = described_class.new(headers: { "Set-Cookie" => [+"a=1", +"b=2"] })
+    expect(response.headers["Set-Cookie"]).to be_frozen
+    expect(response.headers["Set-Cookie"].first).to be_frozen
+    expect { response.headers["Set-Cookie"].first << "; Secure" }.to raise_error(FrozenError)
+  end
+
   it "has deeply frozen body" do
     response = described_class.text("hello")
     expect { response.body << " world" }.to raise_error(FrozenError)
