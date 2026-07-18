@@ -112,5 +112,15 @@ RSpec.describe Axn::Webhooks::Signature do
     it "ignores the window entirely when tolerance is nil" do
       expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: nil, tolerance: nil, now:)).to be(true)
     end
+
+    it "pins the inclusive boundary: exactly at tolerance is accepted" do
+      ts = (now - 300).to_i
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts, tolerance: 300, now:)).to be(true)
+    end
+
+    it "rejects timestamps just outside the inclusive boundary" do
+      ts = (now - 301).to_i
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts, tolerance: 300, now:)).to be(false)
+    end
   end
 end

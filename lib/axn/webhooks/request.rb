@@ -7,8 +7,8 @@ module Axn
     # or a plain test constructor. Header lookup is case-insensitive.
     class Request
       def initialize(raw_body:, headers: {}, params: {}, url: nil, http_method: "POST")
-        @raw_body = raw_body
-        @headers = headers.each_with_object({}) { |(k, v), h| h[k.to_s.downcase] = v }
+        @raw_body = raw_body.frozen? ? raw_body : raw_body.dup.freeze
+        @headers = (headers || {}).each_with_object({}) { |(k, v), h| h[k.to_s.downcase] = v }
         @params = (params || {}).dup.freeze
         @url = url
         @http_method = http_method.to_s.upcase

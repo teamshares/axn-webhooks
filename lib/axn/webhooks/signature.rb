@@ -61,6 +61,9 @@ module Axn
       end
       private_class_method :encode
 
+      # Splits a signature header on whitespace and commas. Phase 2's :standard_webhooks preset
+      # sends v1,<sig> version-tagged candidates; callers must deliberately strip the v1, tag
+      # before this splitter to avoid splitting v1,<sig> into two tokens.
       def candidates(signature, prefix:)
         signature.to_s.split(/[\s,]+/).reject(&:empty?).map do |token|
           if prefix

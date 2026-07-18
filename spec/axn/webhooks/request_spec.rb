@@ -41,4 +41,13 @@ RSpec.describe Axn::Webhooks::Request do
   it "does not let callers mutate internal params" do
     expect { request.params["injected"] = true }.to raise_error(FrozenError)
   end
+
+  it "handles nil headers without raising" do
+    expect(described_class.new(raw_body: "x", headers: nil).header("anything")).to be_nil
+  end
+
+  it "exposes raw_body frozen to prevent accidental mutation" do
+    expect(request.raw_body).to be_frozen
+    expect { request.raw_body << "!" }.to raise_error(FrozenError)
+  end
 end
