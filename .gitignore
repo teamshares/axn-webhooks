@@ -11,3 +11,7 @@ Gemfile.lock
 node_modules/
 package-lock.json
 yarn.lock
+
+# Bundler --path installs (CI installs gems here; never commit or lint them)
+/vendor/
+spec_rails/dummy_app/vendor/

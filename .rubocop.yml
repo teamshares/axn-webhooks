@@ -3,6 +3,20 @@
 inherit_gem:
   axn: ".rubocop.yml"
 
+# Merge our Exclude with axn's rather than replacing it.
+inherit_mode:
+  merge:
+    - Exclude
+
+# axn's inherited `AllCops/Exclude` globs resolve relative to the axn gem dir, so its
+# `vendor/**/*` does NOT cover THIS repo's bundle. CI installs gems into ./vendor/bundle
+# (ruby/setup-ruby bundler-cache) and into spec_rails/dummy_app/vendor/bundle, so exclude
+# both here with project-relative globs — otherwise RuboCop lints installed gem binstubs.
+AllCops:
+  Exclude:
+    - "vendor/**/*"
+    - "spec_rails/dummy_app/vendor/**/*"
+
 # Hyphenated gem entry shim; standard for gems whose name maps to a nested module.
 Naming/FileName:
   Exclude:
