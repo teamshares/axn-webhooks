@@ -2,11 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
+
 ### Changed
 - Clearer README intro and gemspec description, with explicit mention of dispatch.
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Added
+- `Axn::Webhooks::Inbound::Endpoint#to_response(request) → Response` — the staged HTTP outcome mapping: verify mismatch/crash → 401; missing handler/unmatched/parse error/handler crash → 500; `otherwise: :ack` and handler business `fail!` → a bare 2xx ack; a genuine handler success → the declared `respond` block's body (default bare ack).
 - `Axn::Webhooks::Request` — a Rails-agnostic wrapper (`raw_body`, `header`, `params`, `url`, `http_method`) that verifiers and dispatchers read from.
 - `Axn::Webhooks::Signature` — parametric HMAC primitive (`hmac` / `compute` / `secure_compare`) with sha256/sha1/md5 digests; hex, base64, and base64-urlsafe encodings; prefix stripping; multi-candidate (key-rotation) headers; always constant-time.
 - `Axn::Webhooks::Signature` replay protection — optional `timestamp:` / `tolerance:` bidirectional window (`within_tolerance?`), accepting epoch Integer/String or `Time`.
@@ -19,3 +23,6 @@
 - `Axn::Webhooks::Inbound::Router` — resolves a parsed webhook event to a handler (single `to:`, keyed `on:`+map, or name-from-key convention with `via:`), with a `with:` scalar extractor and `otherwise:` (`:ack` or a user callable). Missing/unmatched targets raise loudly.
 - `Axn::Webhooks::Dispatch` — the dispatch stage as an Axn (parse → resolve → `Handler.call!`): a handler `fail!` is a quiet failure; a missing/unmatched handler, parse error, or handler crash is a loud exception reported once. Exposes the handler's own `Axn::Result` as `handler_result` so callers can read its exposures. `Axn::Webhooks::Parsers` builds the body parser (`:json` default or a proc).
 - `dispatch` DSL + `Axn::Webhooks::Inbound::Endpoint#handle` — declare routing in an `inbound` block (`dispatch to:`/`on:`/`otherwise:`/`via:`/`parse:`); `handle(request)` runs verify then dispatch and returns the final `Axn::Result`.
+- `Axn::Webhooks::Response` — a Rails-agnostic HTTP response value (status/body/headers) with `.ack`/`.text`/`.xml` factories, produced by the staged HTTP outcome mapping and rendered against Rack in a later phase.
+- `respond` DSL declaration + `Axn::Webhooks::Inbound::RespondContext` — captures a block mapping a genuine handler success to a `Response`; the block runs with `ack`/`text`/`xml` available as bare calls.
+- `dispatch mode:` — the async seam, resolved dynamically: an explicit `:async` delegates to the handler's own `.call_async` (inheriting whatever axn async adapter the app configured — never branches on `:sidekiq`/`:active_job`), an explicit `:sync` runs inline, and the default (`:auto`) runs **async when an adapter is configured for the handler, else sync** — except a custom `respond` (a result-returning hook) always forces sync. An explicit `mode: :async` + custom `respond` is rejected at `inbound` registration time (you can't read a handler result you enqueued). Dispatching `:async` against a handler with no adapter configured (explicitly disabled or never set) is a clean, reported `Axn::Webhooks::Error` (500-bound) rather than an uncaught `NotImplementedError` escaping the axn boundary; adapter presence is a truthiness check, so an explicitly-disabled handler (`_async_adapter == false`) is correctly treated as unconfigured and runs sync under `mode: :auto`.
