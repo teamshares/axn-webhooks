@@ -19,3 +19,11 @@ Before writing or modifying an Axn action (`include Axn`): run `bundle show axn`
 ## Changes & compatibility
 
 - CHANGELOG every user-visible change under `## [Unreleased]`.
+
+## Docs & planning artifacts
+
+Brainstorming specs and implementation plans — including anything the `superpowers` skills generate —
+go in `internal-docs/specs/` and `internal-docs/plans/`. (This is the location preference the
+`writing-plans` / `brainstorming` skills defer to.) `docs/` is **reserved for a future user-facing
+VitePress site** (as in [teamshares/axn](https://github.com/teamshares/axn)); don't put internal notes
+there.

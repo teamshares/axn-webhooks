@@ -8,7 +8,7 @@
 
 **Tech Stack:** Ruby ≥ 3.2.1, `axn` (the `axn-*` family base), Rack, `OpenSSL`/`Base64` (stdlib). No teamshares-rails, no ActionController.
 
-**Spec:** `docs/superpowers/specs/2026-07-17-axn-webhooks-inbound-design.md` (settled design, PRO-2947).
+**Spec:** `internal-docs/specs/2026-07-17-axn-webhooks-inbound-design.md` (settled design, PRO-2947).
 
 ## Global Constraints
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Ruby ≥ 3.2.1, `axn`, `OpenSSL`/`Base64` (stdlib). No Rails required.
 
-**Spec:** `docs/superpowers/specs/2026-07-17-axn-webhooks-inbound-design.md` — read the **"Amendment — Phase 2 public API (settled 2026-07-18)"** section at the top; it is the binding API decision this plan implements. Phase 1 (`Request`, `Signature`) is already merged to `main`.
+**Spec:** `internal-docs/specs/2026-07-17-axn-webhooks-inbound-design.md` — read the **"Amendment — Phase 2 public API (settled 2026-07-18)"** section at the top; it is the binding API decision this plan implements. Phase 1 (`Request`, `Signature`) is already merged to `main`.
 
 ## Global Constraints
 
