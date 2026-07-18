@@ -34,7 +34,6 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
 
   it "derives the class from the key via convention (default transform)" do
     router = described_class.new(on: ->(e) { e["eventType"] }, to: "Actions::Codat")
-    stub_const("Actions::Codat::ConnectionUpdated", Actions::Codat::ConnectionUpdated) # ensure defined
     expect(router.resolve({ "eventType" => "connection.updated" }).first)
       .to eq(Actions::Codat::ConnectionUpdated)
   end

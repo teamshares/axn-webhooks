@@ -66,7 +66,8 @@ result.ok?  # signature valid?
 
 Add `dispatch` to route the (verified, parsed) event to a handler Axn. The body is parsed as
 JSON by default (string keys) — pass `parse:` for other bodies. Handlers receive the whole
-event as `event:`, or scalar args via a `with:` extractor.
+event as `event:`, or scalar args via a `with:` extractor. Handler targets are class-name
+strings (resolved at request time), not constants.
 
 ```ruby
 Axn::Webhooks.inbound :codat do

@@ -74,6 +74,20 @@ RSpec.describe Axn::Webhooks::Dispatch do
     expect(result.outcome).to be_exception
   end
 
+  it "reports a handler crash to on_exception exactly once" do
+    reports = []
+    original = Axn.config.instance_variable_get(:@on_exception)
+    Axn.config.instance_variable_set(:@on_exception, ->(e, **) { reports << e })
+    begin
+      router = Axn::Webhooks::Inbound::Router.new(to: "BoomHandler")
+      result = described_class.call(request: request("{}"), router:, parse: json_parse)
+      expect(result.outcome).to be_exception
+      expect(reports.count { |e| e.is_a?(RuntimeError) }).to eq(1)
+    ensure
+      Axn.config.instance_variable_set(:@on_exception, original)
+    end
+  end
+
   describe Axn::Webhooks::Parsers do
     it "defaults to JSON and passes a proc through" do
       req = Axn::Webhooks::Request.new(raw_body: '{"k":"v"}', params: { "p" => 1 })
