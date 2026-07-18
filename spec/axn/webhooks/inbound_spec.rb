@@ -40,4 +40,22 @@ RSpec.describe "Axn::Webhooks.inbound (registration + custom verify)" do
   it "requires a strategy or a block in verify" do
     expect { Axn::Webhooks.inbound(:x) { verify } }.to raise_error(Axn::Webhooks::Error, /strategy or a block/)
   end
+
+  it "requires a verify declaration when dispatch is declared (unverified dispatch is unsafe)" do
+    expect { Axn::Webhooks.inbound(:x) { dispatch to: "SomeHandler" } }.to raise_error(Axn::Webhooks::Error, /verify/)
+  end
+
+  it "requires a verify declaration when both dispatch and challenge are declared" do
+    expect do
+      Axn::Webhooks.inbound(:x) do
+        challenge ->(req) { req.params["challenge"] }
+        dispatch to: "SomeHandler"
+      end
+    end.to raise_error(Axn::Webhooks::Error, /verify/)
+  end
+
+  it "registers fine with only a challenge declared and no verify (challenge-only endpoint)" do
+    Axn::Webhooks.inbound(:x) { challenge ->(req) { req.params["challenge"] } }
+    expect(Axn::Webhooks::Inbound.registered).to include(:x)
+  end
 end

@@ -41,15 +41,23 @@ module Axn
         def url          = Resolvers.url
 
         # Internal: build the verifier callable from the captured declaration.
-        # For challenge-only endpoints (no verify declared), return a no-op verifier that always succeeds.
-        # Verify is required only if neither dispatch nor challenge is declared.
+        # For challenge-only endpoints (no dispatch, no verify declared), return a no-op verifier
+        # that always succeeds — a challenge-only endpoint just handshakes the GET and 200-acks any
+        # POST, so there's no unverified processing to guard against.
+        # `verify` is REQUIRED whenever `dispatch` is declared — dispatching an unverified webhook
+        # would run the handler on an unauthenticated request.
         def __verifier__
           unless @verify_spec
-            # If no verify is declared, check if at least dispatch or challenge is declared.
-            # If nothing is declared at all, raise an error.
+            # Nothing declared at all: bare endpoint, always an error.
             raise Axn::Webhooks::Error, "inbound endpoint declared no `verify`" if @dispatch_spec.nil? && @challenge_spec.nil?
 
-            # Challenge-only or dispatch-only endpoint: return a no-op verifier.
+            # `dispatch` without `verify` is unsafe regardless of whether `challenge` is also present.
+            if @dispatch_spec
+              raise Axn::Webhooks::Error,
+                    "inbound endpoint with `dispatch` must declare `verify` — dispatching an unverified webhook is unsafe"
+            end
+
+            # Challenge-only endpoint (no dispatch): return a no-op verifier.
             return ->(_request) { true }
           end
 
