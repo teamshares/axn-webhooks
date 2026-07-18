@@ -6,9 +6,10 @@ module Axn
       # A registered inbound webhook endpoint. Phase 2 carries only the verifier;
       # later phases add dispatch/challenge/respond.
       class Endpoint
-        def initialize(name:, verifier:)
+        def initialize(name:, verifier:, dispatch: nil)
           @name = name.to_sym
           @verifier = verifier
+          @dispatch = dispatch
         end
 
         attr_reader :name
@@ -17,6 +18,20 @@ module Axn
         # a failure on mismatch, an exception if the verifier raises.
         def verify(request)
           Verify.call(request:, verifier: @verifier)
+        end
+
+        # Full pipeline: verify, then (if a dispatch is declared and verification passed)
+        # parse + route to the handler. Returns the final Axn::Result.
+        def handle(request)
+          verified = verify(request)
+          return verified unless verified.ok? && @dispatch
+
+          event = @dispatch[:parse].call(request)
+          resolution = @dispatch[:router].resolve(event)
+          return Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse]) if resolution == :ack
+
+          handler_class, args = resolution
+          handler_class.call!(**args)
         end
       end
     end

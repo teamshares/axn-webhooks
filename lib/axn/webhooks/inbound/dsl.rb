@@ -11,6 +11,13 @@ module Axn
           @verify_spec = { strategy:, opts:, block: }
         end
 
+        # dispatch to: "Handler" | dispatch on: ->(e){…}, to: {map}, otherwise:, via: | parse:
+        # rubocop:disable Naming/MethodParameterName
+        def dispatch(to: nil, on: nil, otherwise: nil, via: nil, parse: :json)
+          @dispatch_spec = { to:, on:, otherwise:, via:, parse: }
+        end
+        # rubocop:enable Naming/MethodParameterName
+
         def header(name) = Resolvers.header(name)
         def raw_body     = Resolvers.raw_body
         def params       = Resolvers.params
@@ -22,6 +29,15 @@ module Axn
           raise Axn::Webhooks::Error, "inbound endpoint `verify` needs a strategy or a block" if @verify_spec[:strategy].nil? && @verify_spec[:block].nil?
 
           Verifiers.build(**@verify_spec)
+        end
+
+        # Internal: build the { router:, parse: } dispatch config, or nil if none declared.
+        def __dispatch__
+          return nil unless @dispatch_spec
+
+          spec = @dispatch_spec
+          router = Router.new(to: spec[:to], on: spec[:on], otherwise: spec[:otherwise], via: spec[:via])
+          { router:, parse: Parsers.build(spec[:parse]) }
         end
       end
     end

@@ -26,7 +26,7 @@ module Axn
 
       dsl = Inbound::DSL.new
       dsl.instance_exec(&block)
-      Inbound.register(name, Inbound::Endpoint.new(name:, verifier: dsl.__verifier__))
+      Inbound.register(name, Inbound::Endpoint.new(name:, verifier: dsl.__verifier__, dispatch: dsl.__dispatch__))
     end
   end
 end
