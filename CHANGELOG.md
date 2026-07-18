@@ -67,7 +67,7 @@
   raises `Axn::Webhooks::Error` immediately; the no-op verifier remains available only for
   challenge-only endpoints (no `dispatch`).
 - `Dispatch`'s async-adapter detection now lets a handler's own explicit setting (including `async false`, an opt-out) win over the global default adapter, matching axn's own `call_async` precedence. Previously a handler explicitly disabled for async was still treated as "configured" whenever a truthy global default was set, so `mode: :auto`/`:async` would call `call_async` for real and axn's `NotImplementedError` — a `ScriptError`, not rescued by the Dispatch axn boundary — escaped `Dispatch.call` uncaught. It's now caught before `call_async` is ever reached and reported as a clean `Axn::Webhooks::Error`.
-- `Response#to_rack` now returns a mutable headers hash so Rails/Rack middleware (which sets response headers) works; the `Response` value object itself stays frozen.
+- `Response#to_rack` now returns a mutable headers hash so Rails/Rack middleware (which sets response headers) works; the `Response` value object itself stays frozen. Array multi-value headers (e.g. Set-Cookie) pass through as Arrays, the native format required by Rack 3.
 - `Request.from_rack`'s `url` now includes the `SCRIPT_NAME` mount prefix (built via
   `Rack::Request#url` instead of hand-assembling `PATH_INFO` alone). A mounted endpoint (e.g.
   `mount Axn::Webhooks::Inbound[:vendor], at: "/webhooks/codat"` in Rails, or a `Rack::Builder#map`

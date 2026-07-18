@@ -92,12 +92,20 @@ RSpec.describe Axn::Webhooks::Response do
     expect(rack_headers["x-custom"]).to eq("value")
   end
 
-  it "normalizes Array (multi-value) header values to newline-joined Strings in to_rack for Rack 2 Lint" do
+  it "passes Array (multi-value) header values through unchanged in to_rack for Rack 3" do
     response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
     rack_headers = response.to_rack[1]
-    expect(rack_headers["set-cookie"]).to eq("a=1\nb=2")
-    expect(rack_headers["set-cookie"]).to be_a(String)
+    expect(rack_headers["set-cookie"]).to eq(["a=1", "b=2"])
+    expect(rack_headers["set-cookie"]).to be_a(Array)
     # Response#headers still holds the frozen Array internally
     expect(response.headers["set-cookie"]).to be_a(Array)
+  end
+
+  it "produces Rack::Lint-valid multi-value (Array) headers" do
+    require "rack/lint"
+    response = described_class.new(headers: { "Set-Cookie" => ["a=1", "b=2"] })
+    triple = response.to_rack
+    app = Rack::Lint.new(->(_env) { triple })
+    expect { app.call(Rack::MockRequest.env_for("/")) }.not_to raise_error
   end
 end
