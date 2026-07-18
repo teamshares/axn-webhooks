@@ -36,4 +36,8 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "axn", ">= 0.1.0-alpha.4.3", "< 0.2.0"
+  # Rack 3+ only: Response's headers are already lower-cased per Rack 3's SPEC (done in Phase 4,
+  # before this was a real dependency), and Rails 7's own transitive rack (spec_rails/dummy_app's
+  # Gemfile.lock: rack 3.2.6) is already 3.x — no need to support Rack 2's mixed-case convention.
+  spec.add_dependency "rack", ">= 3.0", "< 4"
 end
