@@ -11,10 +11,11 @@ module Axn
       def initialize(status: 200, body: "", headers: {})
         @status = status
         @body = body.to_s.freeze
-        # Freeze keys AND values (deeply, so multi-value Array headers freeze their elements too)
-        # — a caller's mutable header value must not be able to mutate this rendered-later value.
+        # Keys are lower-cased (Rack 3's SPEC forbids uppercase in response header keys, and
+        # Rack::Lint rejects them). Keys AND values are frozen deeply (Array multi-value headers
+        # freeze their elements too) so a caller's mutable value can't mutate this rendered-later value.
         @headers = headers.each_with_object({}) do |(key, value), frozen|
-          frozen[key.to_s.freeze] = deep_freeze(value)
+          frozen[key.to_s.downcase.freeze] = deep_freeze(value)
         end.freeze
         freeze
       end
@@ -22,11 +23,11 @@ module Axn
       def self.ack(status: 200, headers: {}) = new(status:, headers:)
 
       def self.text(body, status: 200, headers: {})
-        new(status:, body:, headers: { "Content-Type" => "text/plain" }.merge(headers))
+        new(status:, body:, headers: { "content-type" => "text/plain" }.merge(headers))
       end
 
       def self.xml(body, status: 200, headers: {})
-        new(status:, body:, headers: { "Content-Type" => "application/xml" }.merge(headers))
+        new(status:, body:, headers: { "content-type" => "application/xml" }.merge(headers))
       end
 
       def ==(other)

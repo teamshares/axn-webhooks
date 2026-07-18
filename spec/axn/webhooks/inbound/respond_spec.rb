@@ -97,7 +97,7 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#to_response (staged HTTP outcom
     response = Axn::Webhooks::Inbound[:vendor].to_response(req("{}"))
     expect(response.status).to eq(200)
     expect(response.body).to eq("<Response>ok</Response>")
-    expect(response.headers).to eq("Content-Type" => "application/xml")
+    expect(response.headers).to eq("content-type" => "application/xml")
   end
 
   it "supports a literal string body (DropboxSign-style)" do

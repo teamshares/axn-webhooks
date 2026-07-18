@@ -16,18 +16,23 @@ RSpec.describe Axn::Webhooks::Response do
     response = described_class.text("Hello API Event Received")
     expect(response.status).to eq(200)
     expect(response.body).to eq("Hello API Event Received")
-    expect(response.headers).to eq("Content-Type" => "text/plain")
+    expect(response.headers).to eq("content-type" => "text/plain")
   end
 
   it "builds an xml body" do
     response = described_class.xml("<Response></Response>")
     expect(response.body).to eq("<Response></Response>")
-    expect(response.headers).to eq("Content-Type" => "application/xml")
+    expect(response.headers).to eq("content-type" => "application/xml")
   end
 
-  it "lets a caller override the default Content-Type header" do
+  it "lets a caller override the default Content-Type header (case-insensitively; emitted lowercase)" do
     response = described_class.text("hi", headers: { "Content-Type" => "text/csv" })
-    expect(response.headers).to eq("Content-Type" => "text/csv")
+    expect(response.headers).to eq("content-type" => "text/csv")
+  end
+
+  it "lower-cases header keys for Rack 3 compliance" do
+    response = described_class.new(headers: { "X-Custom-Header" => "v" })
+    expect(response.headers.keys).to eq(["x-custom-header"])
   end
 
   it "stringifies a non-String body" do
@@ -45,15 +50,15 @@ RSpec.describe Axn::Webhooks::Response do
 
   it "freezes header values so a caller's mutable value can't mutate the response" do
     response = described_class.new(headers: { "X-Custom" => +"value" })
-    expect(response.headers["X-Custom"]).to be_frozen
-    expect { response.headers["X-Custom"] << "!" }.to raise_error(FrozenError)
+    expect(response.headers["x-custom"]).to be_frozen
+    expect { response.headers["x-custom"] << "!" }.to raise_error(FrozenError)
   end
 
   it "deep-freezes Array (multi-value) header values including their elements" do
     response = described_class.new(headers: { "Set-Cookie" => [+"a=1", +"b=2"] })
-    expect(response.headers["Set-Cookie"]).to be_frozen
-    expect(response.headers["Set-Cookie"].first).to be_frozen
-    expect { response.headers["Set-Cookie"].first << "; Secure" }.to raise_error(FrozenError)
+    expect(response.headers["set-cookie"]).to be_frozen
+    expect(response.headers["set-cookie"].first).to be_frozen
+    expect { response.headers["set-cookie"].first << "; Secure" }.to raise_error(FrozenError)
   end
 
   it "has deeply frozen body" do
