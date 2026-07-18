@@ -3,8 +3,9 @@
 module Axn
   module Webhooks
     module Inbound
-      # A registered inbound webhook endpoint. Phase 2 carries only the verifier;
-      # later phases add dispatch/challenge/respond.
+      # A registered inbound webhook endpoint. Verifies a request's signature, dispatches
+      # the (verified, parsed) event to a handler Axn, and maps the pipeline's outcome to an
+      # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
         def initialize(name:, verifier:, dispatch: nil, respond: nil)
           if dispatch && dispatch[:mode] == :async && respond

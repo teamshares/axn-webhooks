@@ -10,8 +10,8 @@ module Axn
 
       def initialize(status: 200, body: "", headers: {})
         @status = status
-        @body = body.to_s
-        @headers = headers.transform_keys(&:to_s)
+        @body = body.to_s.freeze
+        @headers = headers.transform_keys(&:to_s).freeze
         freeze
       end
 

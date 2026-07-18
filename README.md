@@ -92,6 +92,72 @@ A missing handler class or an unmatched event with no `otherwise:` is reported t
 `Axn.config.on_exception` and returned as a failed result — never an unhandled exception.
 Handlers run **synchronously** for now; async dispatch arrives in a later phase.
 
+### Respond with a custom body
+
+By default a successful request gets a bare 2xx ack — most vendors want nothing else. Add
+`respond` only for the two real cases that need it: a literal string body, or an
+instruction body the handler computed (e.g. TwiML). The block receives the handler's own
+`Axn::Result` and runs with `ack`/`text`/`xml` available as bare calls:
+
+```ruby
+# DropboxSign requires this exact literal string:
+Axn::Webhooks.inbound :dropbox_sign do
+  verify { |req| … }
+  dispatch to: "Actions::DropboxSign::HandleWebhook"
+  respond { |_result| text("Hello API Event Received") }
+end
+
+# Twilio call-control: the handler computes TwiML; respond renders it.
+Axn::Webhooks.inbound :twilio do
+  verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
+                   .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
+  dispatch to: "Actions::Twilio::HandleCall", parse: ->(req) { req.params }
+  respond { |result| xml(result.twiml) }   # handler exposes :twiml
+end
+
+response = Axn::Webhooks::Inbound[:dropbox_sign].to_response(request)  # => Axn::Webhooks::Response
+response.status   # => 200
+response.body     # => "Hello API Event Received"
+```
+
+`respond` only runs for a genuine handler success — an unmatched event acked via
+`otherwise: :ack`, a handler's own business `fail!`, and a verify failure or crash all get
+their own fixed status (see below) regardless of any declared `respond`.
+
+### The staged HTTP outcome mapping
+
+`Axn::Webhooks::Inbound[:vendor].to_response(request)` runs the whole pipeline and maps the
+outcome to an HTTP status:
+
+| Stage | Outcome | Status |
+| -- | -- | -- |
+| Verify | signature mismatch, or the verifier itself crashes | 401 |
+| Dispatch | missing/unresolvable handler, unmatched event with no `otherwise:`, a parse error, or a handler crash | 500 (reported to `Axn.config.on_exception`) |
+| Dispatch | unknown-but-expected event (`otherwise: :ack`) | 2xx ack |
+| Handle | the handler's own business `fail!` ("we don't care") | 2xx ack (logged) |
+| Handle | success | the declared `respond` body, or a bare 2xx ack |
+
+### Async dispatch
+
+By default (`mode: :auto`) a handler runs **async when it has an axn async adapter configured**
+(an `async :sidekiq` / `async :active_job` on the handler, or a host-app global default), and
+**sync otherwise** — so it works out of the box standalone and automatically uses async once you
+wire an adapter up, the same way you would for any other axn. This gem never references a
+specific adapter (`:sidekiq`/`:active_job`); it only checks whether one is present.
+
+Pin a mode explicitly when you want to override the default:
+
+```ruby
+Axn::Webhooks.inbound :merge_dev do
+  verify :hmac, secret: ENV.fetch("MERGE_WEBHOOK_SIGNATURE_KEY"), signature: header("X-Merge-Webhook-Signature")
+  dispatch to: "Actions::MergeDev::HandleWebhook", mode: :async   # force async (handler must have an adapter)
+end
+```
+
+A custom `respond` block reads the handler's own result, so those hooks always run **sync** (you
+can't read a result you enqueued) regardless of adapter config — and declaring both an explicit
+`mode: :async` and a custom `respond` raises at registration time.
+
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
 
 ## Development

@@ -38,6 +38,16 @@ RSpec.describe Axn::Webhooks::Response do
     expect(described_class.ack).to be_frozen
   end
 
+  it "has deeply frozen headers" do
+    response = described_class.new(headers: { "X-Custom" => "value" })
+    expect { response.headers["X"] = "y" }.to raise_error(FrozenError)
+  end
+
+  it "has deeply frozen body" do
+    response = described_class.text("hello")
+    expect { response.body << " world" }.to raise_error(FrozenError)
+  end
+
   it "supports value equality" do
     expect(described_class.text("hi")).to eq(described_class.text("hi"))
     expect(described_class.text("hi")).not_to eq(described_class.text("bye"))
