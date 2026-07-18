@@ -11,10 +11,10 @@ module Axn
           @verify_spec = { strategy:, opts:, block: }
         end
 
-        # dispatch to: "Handler" | dispatch on: ->(e){…}, to: {map}, otherwise:, via: | parse:
+        # dispatch to: "Handler" | dispatch on: ->(e){…}, to: {map}, otherwise:, via: | parse: | mode:
         # rubocop:disable Naming/MethodParameterName
-        def dispatch(to: nil, on: nil, otherwise: nil, via: nil, parse: :json)
-          @dispatch_spec = { to:, on:, otherwise:, via:, parse: }
+        def dispatch(to: nil, on: nil, otherwise: nil, via: nil, parse: :json, mode: :auto)
+          @dispatch_spec = { to:, on:, otherwise:, via:, parse:, mode: }
         end
         # rubocop:enable Naming/MethodParameterName
 
@@ -39,13 +39,17 @@ module Axn
           Verifiers.build(**@verify_spec)
         end
 
-        # Internal: build the { router:, parse: } dispatch config, or nil if none declared.
+        # Internal: build the { router:, parse:, mode: } dispatch config, or nil if none declared.
         def __dispatch__
           return nil unless @dispatch_spec
 
           spec = @dispatch_spec
+          unless %i[auto sync async].include?(spec[:mode])
+            raise Axn::Webhooks::Error, "dispatch mode: must be :sync or :async (got #{spec[:mode].inspect})"
+          end
+
           router = Router.new(to: spec[:to], on: spec[:on], otherwise: spec[:otherwise], via: spec[:via])
-          { router:, parse: Parsers.build(spec[:parse]) }
+          { router:, parse: Parsers.build(spec[:parse]), mode: spec[:mode] }
         end
 
         # Internal: the captured respond block, or nil if none declared.

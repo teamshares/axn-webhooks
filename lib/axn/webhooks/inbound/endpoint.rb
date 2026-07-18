@@ -7,6 +7,12 @@ module Axn
       # later phases add dispatch/challenge/respond.
       class Endpoint
         def initialize(name:, verifier:, dispatch: nil, respond: nil)
+          if dispatch && dispatch[:mode] == :async && respond
+            raise Axn::Webhooks::Error,
+                  "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
+                  "can't produce a handler_result for it to read — use `mode: :sync` (or omit mode) or drop the respond block"
+          end
+
           @name = name.to_sym
           @verifier = verifier
           @dispatch = dispatch
@@ -27,7 +33,8 @@ module Axn
           verified = verify(request)
           return verified unless verified.ok? && @dispatch
 
-          Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse])
+          Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
+                        mode: @dispatch[:mode], respond_declared: !@respond.nil?)
         end
 
         # The staged HTTP outcome mapping (spec: "Respond + staged outcome model"). Verify and
@@ -39,7 +46,8 @@ module Axn
           return Response.new(status: 401) unless verified.ok?
           return Response.ack unless @dispatch
 
-          dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse])
+          dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
+                                     mode: @dispatch[:mode], respond_declared: !@respond.nil?)
           response_for(dispatched)
         end
 
