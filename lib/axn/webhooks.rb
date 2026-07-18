@@ -6,6 +6,7 @@ require "active_support/deprecation"
 require_relative "webhooks/version"
 require_relative "webhooks/request"
 require_relative "webhooks/signature"
+require_relative "webhooks/resolvers"
 
 module Axn
   module Webhooks
