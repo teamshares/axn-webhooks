@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- Lowered the `rack` dependency floor to `>= 2.2` (from `>= 3.0`) so the gem installs on Rails
+  7.0 (whose actionpack pins `rack "~> 2.0", ">= 2.2.4"`) through Rails 7.1+/Rack 3. The gem only
+  uses Rack APIs stable since 2.2 (`Rack::Request#url`, `Rack::Utils.parse_nested_query`,
+  `Rack::MockRequest`, `Rack::RewindableInput`), and `Response#to_rack`'s lowercase header keys —
+  required by Rack 3's SPEC — are accepted by Rack 2's case-insensitive header handling.
+
 ### Added
 - `Axn::Webhooks::Inbound::Endpoint#call(env)` — `Inbound[:vendor]` is now directly a Rack app:
   `mount Axn::Webhooks::Inbound[:vendor], at: "/webhooks/vendor"` in Rails, or
