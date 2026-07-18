@@ -1,10 +1,14 @@
 # frozen_string_literal: true
 
 require "bundler/setup"
+require "logger"
 Bundler.require(:default, :development)
 
 require "axn-webhooks"
 require "axn/testing/spec_helpers"
+
+# Silence axn's per-call INFO logging so spec output stays pristine.
+Axn.config.logger = Logger.new(File::NULL)
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure
