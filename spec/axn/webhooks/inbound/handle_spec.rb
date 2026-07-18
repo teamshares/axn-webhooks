@@ -61,9 +61,7 @@ RSpec.describe "Axn::Webhooks endpoint#handle (verify + dispatch)" do
                end)
     Axn::Webhooks.inbound(:twilio) do
       verify { |_req| true }
-      # rubocop:disable Style/SymbolProc
-      dispatch to: "Handlers::Sms", parse: ->(req) { req.params }
-      # rubocop:enable Style/SymbolProc
+      dispatch to: "Handlers::Sms", parse: lambda(&:params)
     end
 
     req = Axn::Webhooks::Request.new(raw_body: "From=+15550001111", params: { "From" => "+15550001111" })

@@ -59,7 +59,7 @@ module Axn
           end
         end
 
-        def constantize(name) = name.is_a?(Module) ? name : Object.const_get(name)
+        def constantize(name) = Object.const_get(name)
 
         def default_transform(key) = key.to_s.split(/[._]/).reject(&:empty?).map(&:capitalize).join
       end
