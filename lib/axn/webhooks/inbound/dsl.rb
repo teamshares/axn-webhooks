@@ -26,14 +26,33 @@ module Axn
           @respond_block = block
         end
 
+        # challenge ->(req){ req.params["challenge"] }                          — Nylas
+        # challenge ->(req){ req.params["hub.challenge"] }, if: ->(req){ ... }  — Meta
+        def challenge(resolver, if: nil)
+          # `if:` shadows Ruby's `if` keyword inside this method body — must read it back via
+          # binding.local_variable_get, not a bare `if` reference (that's a syntax trap, not a var).
+          guard = binding.local_variable_get(:if)
+          @challenge_spec = { resolver:, guard: }
+        end
+
         def header(name) = Resolvers.header(name)
         def raw_body     = Resolvers.raw_body
         def params       = Resolvers.params
         def url          = Resolvers.url
 
         # Internal: build the verifier callable from the captured declaration.
+        # For challenge-only endpoints (no verify declared), return a no-op verifier that always succeeds.
+        # Verify is required only if neither dispatch nor challenge is declared.
         def __verifier__
-          raise Axn::Webhooks::Error, "inbound endpoint declared no `verify`" unless @verify_spec
+          unless @verify_spec
+            # If no verify is declared, check if at least dispatch or challenge is declared.
+            # If nothing is declared at all, raise an error.
+            raise Axn::Webhooks::Error, "inbound endpoint declared no `verify`" if @dispatch_spec.nil? && @challenge_spec.nil?
+
+            # Challenge-only or dispatch-only endpoint: return a no-op verifier.
+            return ->(_request) { true }
+          end
+
           raise Axn::Webhooks::Error, "inbound endpoint `verify` needs a strategy or a block" if @verify_spec[:strategy].nil? && @verify_spec[:block].nil?
 
           Verifiers.build(**@verify_spec)
@@ -54,6 +73,9 @@ module Axn
 
         # Internal: the captured respond block, or nil if none declared.
         def __respond__ = @respond_block
+
+        # Internal: the captured { resolver:, guard: } challenge declaration, or nil if none.
+        def __challenge__ = @challenge_spec
       end
     end
   end

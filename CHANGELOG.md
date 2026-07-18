@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- `challenge` DSL declaration + `Axn::Webhooks::Inbound::Challenge` — the GET-echo handshake
+  (Nylas `?challenge=`, Meta `?hub.challenge=` + `if:` guard on `hub.verify_token`). A missing/
+  rejected challenge is a quiet 400; a resolver or guard that raises is reported and mapped to 500.
+  `Endpoint#challenge_response(request) → Response` is testable without a Rack env, mirroring
+  `#verify`/`#handle`/`#to_response`.
 - `Axn::Webhooks::Request.from_rack(env)` — builds a Request from a Rack env: pristine raw body
   (read once from `rack.input`, then rewound), headers from `HTTP_*`/`CONTENT_TYPE`/
   `CONTENT_LENGTH`, params from the query string (merged with form-decoded body params when the

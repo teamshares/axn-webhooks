@@ -7,7 +7,7 @@ module Axn
       # the (verified, parsed) event to a handler Axn, and maps the pipeline's outcome to an
       # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
-        def initialize(name:, verifier:, dispatch: nil, respond: nil)
+        def initialize(name:, verifier:, dispatch: nil, respond: nil, challenge: nil)
           if dispatch && dispatch[:mode] == :async && respond
             raise Axn::Webhooks::Error,
                   "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
@@ -18,6 +18,7 @@ module Axn
           @verifier = verifier
           @dispatch = dispatch
           @respond = respond
+          @challenge = challenge
         end
 
         attr_reader :name
@@ -50,6 +51,17 @@ module Axn
           dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
                                      mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
           response_for(dispatched)
+        end
+
+        # The GET branch (spec: the mount owns the whole path, every verb). Testable without a Rack
+        # env, mirroring #verify/#handle/#to_response.
+        def challenge_response(request)
+          return Response.new(status: 405) unless @challenge
+
+          # The Challenge axn computes the exact Response (200 echo / 403 guard-fail / 400 nil).
+          # Only a raising resolver/guard makes it not-ok -> a reported 500.
+          result = Challenge.call(request:, resolver: @challenge[:resolver], guard: @challenge[:guard], vendor: @name)
+          result.ok? ? result.response : Response.new(status: 500)
         end
 
         private
