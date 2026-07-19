@@ -107,3 +107,25 @@ RSpec.describe "Axn::Webhooks endpoint#handle (verify + dispatch)" do
     expect(result.outcome).to be_exception
   end
 end
+
+RSpec.describe "Endpoint#to_response retry_later" do
+  after { Axn::Webhooks::Inbound.reset! }
+
+  it "maps a handler retry_later! to 503 + Retry-After" do
+    stub_const("DeferHandler", Class.new do
+      include Axn
+
+      expects :event, allow_blank: true
+      def call = Axn::Webhooks.retry_later!(after: 60)
+    end)
+
+    Axn::Webhooks.inbound(:vendor) do
+      verify { |_req| true }
+      dispatch to: "DeferHandler", mode: :sync
+    end
+
+    response = Axn::Webhooks::Inbound[:vendor].to_response(Axn::Webhooks::Request.new(raw_body: "{}"))
+    expect(response.status).to eq(503)
+    expect(response.headers["retry-after"]).to eq("60")
+  end
+end

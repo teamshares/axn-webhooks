@@ -85,6 +85,7 @@ module Axn
         private
 
         def response_for(dispatched)
+          return Response.service_unavailable(retry_after: dispatched.retry_after) if dispatched.retry_after
           return Response.new(status: 500) if dispatched.outcome.exception?
           return Response.ack if dispatched.outcome.failure?    # handler fail! -> quiet 2xx, already logged
           return Response.ack if dispatched.handler_result.nil? # otherwise: :ack -> bare ack, nothing to render

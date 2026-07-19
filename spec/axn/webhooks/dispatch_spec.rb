@@ -101,3 +101,26 @@ RSpec.describe Axn::Webhooks::Dispatch do
     end
   end
 end
+
+RSpec.describe "Axn::Webhooks::Dispatch retry_later" do
+  after { Axn::Webhooks::Inbound.reset! }
+
+  it "catches a handler RetryLater as a non-exception result exposing retry_after" do
+    stub_const("RetryingHandler", Class.new do
+      include Axn
+
+      expects :event, allow_blank: true
+      def call = Axn::Webhooks.retry_later!(after: 45)
+    end)
+
+    router = Axn::Webhooks::Inbound::Router.new(to: "RetryingHandler")
+    result = Axn::Webhooks::Dispatch.call(
+      request: Axn::Webhooks::Request.new(raw_body: "{}"),
+      router:, parse: Axn::Webhooks::Parsers.build(:json), mode: :sync
+    )
+
+    expect(result).to be_ok
+    expect(result.outcome).not_to be_exception
+    expect(result.retry_after).to eq(45)
+  end
+end
