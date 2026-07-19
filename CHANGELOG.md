@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- `Axn::Webhooks.retry_later!(after: nil)` and `Axn::Webhooks::RetryLater < Axn::Webhooks::Error` (`#retry_after`) — the receiver-side half of the 503 delivery contract: a handler raises this (directly, or via the new helper) to ask the sender to redeliver later. `Axn::Webhooks::Response.service_unavailable(retry_after: nil)` builds the matching 503 response, with a `retry-after` header only when given. `Axn::Webhooks::Error` now lives in the new `lib/axn/webhooks/errors.rb`, required first (before `version` and everything else) so `Error`/`RetryLater` are defined before any file that references them at load or runtime. `Axn::Webhooks::Dispatch` now rescues a `RetryLater` raised by the synchronous handler call around it, exposing the new `retry_later` (`type: :boolean, default: false`) and `retry_after` (`allow_nil: true`) instead of surfacing it as an exception outcome; `Inbound::Endpoint#response_for` maps a `dispatched.retry_later` of `true` to `Response.service_unavailable(retry_after: dispatched.retry_after)` as its first check, ahead of the exception/failure mapping — so raising `RetryLater` at all always means 503, whether or not `after:` was given (`after:` only controls whether the `Retry-After` header is present). Only the synchronous dispatch path is wired this way — a `retry_later!` raised inside an async worker is just a worker exception, unrelated to the HTTP response already sent.
+- `Axn::Webhooks::Handler` (new `lib/axn/webhooks/handler.rb`, required from `lib/axn/webhooks.rb` right after `webhooks/errors`) — the recommended `include` for an inbound webhook handler that wants `retry_later!`'s "without paging" promise to actually hold: it includes `Axn` and declares `fails_on Axn::Webhooks::RetryLater`, so a `RetryLater` the handler raises settles as a quiet failure, not an unhandled exception. Without it (a plain `include Axn` handler calling `retry_later!`), `Dispatch`'s rescue still maps the response to 503 — but axn's own executor classifies the unhandled `RetryLater` as an exception FIRST, inside the handler's own boundary, and reports it via `Axn.config.on_exception` (e.g. Honeybadger) on every single deferral, exactly the paging the feature was meant to avoid. `include Axn::Webhooks::Handler` (or an equivalent manual `fails_on Axn::Webhooks::RetryLater`) closes that gap.
+- `Axn::Webhooks.emit(event, data: {}) → Axn::Result` and its backing `Axn::Webhooks::Outbound::Emit` axn — the outbound fan-out entrypoint. Validates the event via `Outbound.config` (`#wire_type`/`#targets_for`, raising `Axn::Webhooks::Error` loudly on an unknown event), then per resolved target generates a fresh `Envelope.new_id`, builds the envelope body, and enqueues one `Outbound::Deliver`. Delivery goes async via `Deliver.call_async` when an async adapter is configured (per-`Deliver` setting, else the global default — the same presence-check pattern as inbound `Dispatch`, never branching on adapter type); otherwise it falls back to a synchronous inline `Deliver.call` with a `Axn.config.logger.warn` (best-effort, no cross-process retries).
+- `Axn::Webhooks::Outbound::Deliver` — the per-attempt delivery axn and self-managed retry engine: signs each attempt with a fresh timestamp (reusing the stable `webhook_id`) via `Outbound.config.signer`, POSTs via `Outbound.config.transport`, and classifies the response — 2xx succeeds; a permanent 4xx `fail!`s quietly (no reschedule); a 5xx/429/retryable network error (`Transport::RETRYABLE_NETWORK_ERRORS`) reschedules itself via `call_async(..., attempt: attempt + 1, _async: { wait: })` where `wait` is `max(backoff(attempt), Retry-After)`; exhaustion (`attempt >= max_attempts`) reports once via `Axn.config.on_exception` (never raises, so the async adapter doesn't re-retry an already-exhausted job) then `fail!`s. Only `expects :url, :webhook_id, :body, :event, :attempt` — secret/curve/transport are read from `Outbound.config` at call time so nothing sensitive rides the job payload. An unexpected (non-network) exception is left unrescued and surfaces as a loud axn exception, the async adapter's at-least-once crash safety net.
+- `Axn::Webhooks.outbound { … }` — the declaration surface: evaluates the block in `Outbound::DSL` (`sign`, `subscribers`, `max_attempts`, `backoff`, `transport`, `event name, to:, type:`) and installs a single process-global `Outbound::Config`. `Axn::Webhooks::Outbound.config` returns it (raising `Axn::Webhooks::Error` if `outbound` was never declared); `.reset!` clears it (for tests). `Config#targets_for(event)` resolves a static `to:` Array, else the block-level `subscribers` resolver, else `[]` — and raises `Axn::Webhooks::Error` listing known events for an unknown one; `#wire_type(event)` is the per-event `type:` override or the event name; `#max_attempts`/`#backoff` default to 8 attempts and a capped exponential curve; a statically empty `to: []` warns (not raises) at boot. `lib/axn/webhooks/outbound.rb` is now the umbrella requiring the Signer/Envelope/Transport/Config/DSL files.
+- `Axn::Webhooks.swallow_soft_error(desc, exception:)` — local stand-in for a future promoted axn-core helper: logs a swallowed exception via `Axn.config.logger.warn`, but re-raises in development when `Axn.config.raise_piping_errors_in_dev` is set.
+- `Axn::Webhooks::Outbound::Transport` — the injectable HTTP seam: `.post(url:, body:, headers:, open_timeout: 5, read_timeout: 10) → Transport::Response` (`Data.define(:status, :headers)`), backed by stdlib `net/http` so the gem gains no new runtime dependency. `RETRYABLE_NETWORK_ERRORS` names the exception classes callers treat as retryable when raised by a transport (`Timeout::Error`, connection/DNS/IO errors); a consuming app may inject its own object with the same `.post` signature (e.g. Faraday-backed) via Outbound config.
+- `Axn::Webhooks::Outbound::Envelope` — builds the Standard Webhooks message body (`.build(id:, type:, data:, now:) → String`, a `{id,timestamp,type,data}` JSON string) and its idempotency id (`.new_id → "msg_<uuid>"`). Deliberately decoupled from signing: the body is fixed at emit time (part of the dedup identity), while the signature is recomputed per delivery attempt.
+- `Axn::Webhooks::Outbound::Signer` — builds a `#call(id:, timestamp:, body:) → Hash` signer from a `sign` declaration. The `:standard_webhooks` strategy is the outbound face of the inbound `verify :standard_webhooks` (same `whsec_` secret, `id.timestamp.body` HMAC, `v1,<base64>` signature), so a receiver already verifying Standard Webhooks accepts it; a custom block is called verbatim and must return the header hash itself.
 - `Axn::Webhooks::Inbound::Endpoint#call(env)` — `Inbound[:vendor]` is now directly a Rack app:
   `mount Axn::Webhooks::Inbound[:vendor], at: "/webhooks/vendor"` in Rails, or
   `run Axn::Webhooks::Inbound[:vendor]` in a bare `Rack::Builder`/`config.ru`. `POST` runs
@@ -47,6 +56,44 @@
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Fixed
+- `Outbound::Deliver#report_exhaustion` now passes the running `Deliver` INSTANCE (`self`), not the
+  class, as `action:` to `Axn.config.on_exception` — matching axn's own internal convention (the
+  action instance, not its class) and the instance-only state (`action.result`) axn's
+  `on_exception` relies on to enrich the report; the configured reporter (e.g. Honeybadger) also
+  receives the real instance rather than a bare `Class` object.
+- `Outbound::Deliver#call`'s retryable-network rescue is now scoped to ONLY the `post` (HTTP) call,
+  not the whole method body. Previously the method-level `rescue *Transport::RETRYABLE_NETWORK_ERRORS`
+  also wrapped `retry_or_exhaust!`'s own `call_async` reschedule call — so if the async adapter
+  (e.g. Redis/Sidekiq) raised a `Timeout::Error`/`IOError` while ENQUEUING the follow-up job, that
+  enqueue failure was misinterpreted as another delivery network error and `retry_or_exhaust!` ran
+  a second time in the same attempt (a duplicate enqueue), instead of propagating. An enqueue
+  failure from `call_async` now always propagates as a loud exception outcome — the current job
+  goes un-acked and the async adapter's own retry path handles the outage (at-least-once), matching
+  the documented crash-safety-net contract for unexpected exceptions.
+- `Outbound::Config#targets_for` now actually invokes a per-event `to:` lambda
+  (`event :x, to: ->(event){ [...] }`), arity-aware like the inbound `Resolvers.resolve` (a
+  0-arity proc is called with no args, else called with the event). Previously `spec[:to]` being a
+  truthy `Proc` short-circuited `Array(list)`, wrapping the Proc itself in a single-element array
+  and handing it to `Deliver` as a bogus delivery `url` — the documented "`to:` accepts a static
+  Array OR a lambda" contract was silently broken. The block-level `subscribers` fallback is now
+  invoked the same arity-aware way for consistency (a `->(event){...}` still works as before).
+- `Outbound::Deliver#parse_retry_after` now also parses the HTTP-date form of `Retry-After`
+  (RFC 7231, e.g. `"Wed, 21 Oct 2015 07:28:00 GMT"`, sent during maintenance windows), not just
+  integer-seconds. It's parsed via stdlib `Time.httpdate` (`require "time"`, no new runtime
+  dependency) and converted to the remaining seconds, clamped to `>= 0`. Previously an HTTP-date
+  Retry-After failed to parse and silently fell back to the computed backoff, retrying earlier than
+  the server asked for.
+  (5xx/429/network error) occurs with no async adapter configured. Previously it unconditionally
+  called `self.class.call_async` to reschedule, which raises a `NotImplementedError` (a
+  `ScriptError`, not rescued by axn's `StandardError`-only exception boundary) — escaping `Deliver`,
+  escaping `Outbound::Emit`'s per-target fan-out loop, and aborting delivery to any remaining
+  targets. `Deliver` now checks adapter presence first (mirroring inbound `Dispatch`'s own
+  `self.class._async_adapter` / `Axn.config._default_async_adapter` check, never branching on
+  adapter type): with no adapter configured, a retryable failure is now treated like an exhausted
+  retry budget — reported once via `Axn.config.on_exception`, then `fail!`s quietly — matching the
+  documented best-effort, no-cross-process-retries promise of the synchronous fallback path.
+  Also: `Outbound::Emit`'s sync-fallback warning now logs once per `emit` call, not once per
+  resolved target, so a high-fan-out event no longer spams one warn line per subscriber.
 - `Request.from_rack`'s `params` no longer merges query-string params into a form-urlencoded
   body's params. `url` (via `Rack::Request#url`) already includes the query string, so the
   previous merge double-counted query params for URL-signing verifiers doing
@@ -85,3 +132,31 @@
   with an empty-body parse, so `req.params["challenge"]` returned `nil` and a valid `?challenge=`
   GET request 400'd. `GET`/`HEAD` now always read params from the query string; `POST` (and other
   body-carrying methods) keep the form-body-only behavior above.
+- `Outbound::Config#targets_for` no longer falls back to the block-level `subscribers` resolver
+  when an event DECLARES a per-event `to:` resolver that itself resolves to `nil` (e.g. a DB lookup
+  finding no recipients for this event). A declared `to:` — static Array (including `[]`) or
+  callable — now always wins, wrapping its (possibly `nil`) result in `Array(...)`; `subscribers`
+  is consulted only when the event declared no `to:` at all. Previously a declared resolver
+  returning `nil` silently fell through to the default audience, sending the webhook to
+  subscribers the event's own `to:` explicitly meant to exclude.
+- `Outbound::Deliver` now looks up the `Retry-After` response header case-insensitively instead of
+  assuming the stdlib net/http lowercase-keyed form. `Transport` is a public injectable seam — a
+  custom transport (e.g. Faraday-backed) may return a plain Hash with `"Retry-After"` or
+  `"RETRY-AFTER"` — and HTTP header names are case-insensitive, so the previous exact-key lookup
+  silently missed the server's requested delay on such transports and retried on backoff alone.
+- `Outbound::Config#wire_type` now stringifies a per-event `type:` override the same way it already
+  stringifies the default (event-name) branch. A non-String override (e.g. `event :invoice_paid,
+  type: :invoice_paid`) was previously returned unchanged, and `Emit` passes it straight through as
+  `event:` to `Deliver`, whose `expects :event, type: String` rejected it — so a Symbol (or other
+  non-String) `type:` override made the event undeliverable.
+- `Outbound::Deliver`'s exhaustion report now runs from an `on_failure` callback
+  (`report_exhaustion_if_needed`, gated on a new `@exhaustion_error` ivar set only by
+  `retry_or_exhaust!`'s exhaustion branch) instead of being called inline immediately before
+  `fail!`. Previously `Axn.config.on_exception(error, action: self, ...)` ran BEFORE `fail!` had
+  settled the result, so a reporter reading `action.result` (as axn's own `on_exception` does, and
+  as a real reporter like Honeybadger may) observed a pre-finalized, still-`ok?` result — undercutting
+  the entire point of handing it the action instance. `on_failure` only fires on `fail!` (never on
+  an unhandled exception) and axn dispatches it after `@context.__record_exception` has already
+  marked the context failed, so the reporter now sees the genuine, finalized failure it exists to
+  describe. The gate ensures a permanent-4xx `fail!` (which also triggers `on_failure`, but never
+  sets `@exhaustion_error`) does not report.

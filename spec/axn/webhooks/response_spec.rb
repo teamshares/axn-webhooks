@@ -123,3 +123,15 @@ RSpec.describe Axn::Webhooks::Response do
     expect { app.call(Rack::MockRequest.env_for("/")) }.not_to raise_error
   end
 end
+
+RSpec.describe Axn::Webhooks::Response, ".service_unavailable" do
+  it "is a 503 with a retry-after header when given" do
+    resp = described_class.service_unavailable(retry_after: 90)
+    expect(resp.status).to eq(503)
+    expect(resp.headers["retry-after"]).to eq("90")
+  end
+
+  it "omits retry-after when not given" do
+    expect(described_class.service_unavailable.headers).not_to have_key("retry-after")
+  end
+end

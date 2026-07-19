@@ -1,0 +1,160 @@
+# frozen_string_literal: true
+
+require "time"
+
+module Axn
+  module Webhooks
+    module Outbound
+      # A single delivery attempt + the self-managed retry engine. Built as an Axn: metrics/OTel/
+      # structured logs per attempt come free. Retryable responses reschedule via axn's
+      # adapter-agnostic call_async(_async: { wait: }) seam (never branching on adapter type);
+      # unexpected exceptions propagate so the async adapter retries the un-acked job (at-least-once).
+      class Deliver
+        include Axn
+        include Axn::Webhooks::VendorFacet
+
+        expects :url, type: String
+        expects :webhook_id, type: String
+        expects :body, type: String
+        expects :event, type: String
+        expects :attempt, type: Integer, default: 1
+
+        # Only reports when `@exhaustion_error` was set by `retry_or_exhaust!`'s exhaustion branch
+        # (see `report_exhaustion_if_needed`) -- a permanent-4xx `fail!` (in `#call`) also fires
+        # `on_failure` (axn dispatches it for ANY `fail!`), but must NOT page: it never sets that
+        # ivar, so the guard holds. Registering here (rather than reporting inline before `fail!`)
+        # means the report runs once axn has already finalized `action.result` as a failure (see
+        # `with_exception_handling` in axn's executor.rb: `@context.__record_exception` runs before
+        # the `:failure` callback dispatch) -- so a reporter reading `action.result` observes the
+        # settled failure it exists to describe (Codex P2 finding).
+        on_failure :report_exhaustion_if_needed
+
+        def call
+          # Scoped deliberately to ONLY `post` (not the whole method): a network error talking to
+          # the receiver is a retryable delivery failure, but if `retry_or_exhaust!`'s own
+          # `call_async` raises while ENQUEUING the follow-up job (e.g. a Redis/Sidekiq outage),
+          # that must propagate as a loud exception — not get caught here and misinterpreted as
+          # another delivery network error, which would re-run retry_or_exhaust! a second time in
+          # the same attempt (a duplicate enqueue). Letting it propagate means the current job goes
+          # un-acked and the async adapter's own retry path handles the outage (at-least-once).
+          response = nil
+          begin
+            response = post
+          rescue *Transport::RETRYABLE_NETWORK_ERRORS => e
+            return retry_or_exhaust!(network_error: e)
+          end
+
+          return if success?(response.status) # 2xx -> done
+          return retry_or_exhaust!(retry_after: header_value(response.headers, "retry-after")) if retryable?(response.status)
+
+          fail!("permanent delivery failure (HTTP #{response.status}) for #{event} to #{url}")
+        end
+
+        private
+
+        def config = Axn::Webhooks::Outbound.config
+
+        def post
+          config.transport.post(url:, body:, headers: signed_headers)
+        end
+
+        # Sign per attempt with a FRESH timestamp (so the receiver's replay window accepts a retry),
+        # reusing the stable webhook_id for idempotent dedup.
+        def signed_headers
+          config.signer.call(id: webhook_id, timestamp: Time.now.to_i, body:)
+                .merge("content-type" => "application/json", "user-agent" => user_agent)
+        end
+
+        def user_agent = "axn-webhooks/#{Axn::Webhooks::VERSION}"
+
+        def success?(status) = (200..299).cover?(status)
+
+        # 5xx, plus the "come back later" 4xx codes.
+        def retryable?(status) = status >= 500 || [429].include?(status)
+
+        # Only reschedule when BOTH attempts remain AND an async adapter is actually configured for
+        # Deliver to reschedule itself onto — otherwise `call_async` would raise a ScriptError
+        # (NotImplementedError) that escapes axn's StandardError-only exception boundary entirely,
+        # crashing the caller (e.g. Emit's synchronous best-effort fallback fan-out loop). No
+        # adapter configured is therefore treated the same as an exhausted retry budget: report
+        # once, fail! quietly (no crash, no cross-process retries — matches the documented
+        # best-effort promise of the sync fallback path).
+        def retry_or_exhaust!(retry_after: nil, network_error: nil)
+          if attempt >= config.max_attempts || !async_configured?
+            @exhaustion_error = network_error || Axn::Webhooks::Error.new("outbound delivery exhausted for #{event} to #{url}")
+            return fail!(terminal_message)
+          end
+
+          delay = [config.backoff.call(attempt), parse_retry_after(retry_after)].compact.max
+          self.class.call_async(url:, webhook_id:, body:, event:, attempt: attempt + 1, _async: { wait: delay })
+        end
+
+        def terminal_message
+          return "delivery exhausted after #{attempt} attempts for #{event} to #{url}" if attempt >= config.max_attempts
+
+          "delivery failed for #{event} to #{url} (no async adapter configured to retry attempt #{attempt + 1})"
+        end
+
+        # Presence check ONLY (never branches on adapter type) — mirrors Dispatch's own
+        # `async_adapter_configured?` exactly, but against `self.class` since Deliver reschedules
+        # ITSELF. An explicit per-class setting (including `false`) always wins over the global
+        # default.
+        def async_configured?
+          return !!self.class._async_adapter unless self.class._async_adapter.nil?
+
+          !!Axn.config._default_async_adapter
+        end
+
+        # HTTP header names are case-insensitive, but `Transport` is a public injectable seam — a
+        # custom transport (e.g. Faraday-backed) may return a plain Hash with "Retry-After" or
+        # "RETRY-AFTER" rather than the lowercased keys net/http's `to_hash` produces. Look up by
+        # name case-insensitively instead of assuming lowercase.
+        def header_value(headers, name)
+          headers.each { |k, v| return v if k.to_s.casecmp?(name) }
+          nil
+        end
+
+        # Retry-After per RFC 7231: either delay-seconds (integer) or an HTTP-date. For the
+        # HTTP-date form, compute the remaining seconds until that instant, clamped to >= 0 (a
+        # past/now date means "no extra delay beyond backoff", not "retry immediately forever").
+        def parse_retry_after(value)
+          return nil if value.nil? || value.to_s.empty?
+
+          return Integer(value, 10) if value.to_s.match?(/\A\d+\z/)
+
+          begin
+            [(Time.httpdate(value) - Time.now).to_i, 0].max
+          rescue ArgumentError
+            nil
+          end
+        end
+
+        # Gated `on_failure` handler (registered above, at class-body level): fires on EVERY
+        # `fail!` (including the permanent-4xx branch in `#call`), but only reports when
+        # `retry_or_exhaust!`'s exhaustion branch actually set `@exhaustion_error` — a permanent-4xx
+        # `fail!` never sets it, so this is a no-op there.
+        def report_exhaustion_if_needed
+          return unless @exhaustion_error
+
+          report_exhaustion(@exhaustion_error)
+        end
+
+        # Report ONCE at exhaustion via axn's configured reporter (Honeybadger at Teamshares),
+        # WITHOUT raising — raising would trigger the adapter to retry the already-exhausted job.
+        # `action:` must be the running INSTANCE (`self`), not the class — axn's own internal
+        # callers always pass the instance (see executor.rb), and `on_exception` relies on
+        # instance-only state (e.g. `action.result`) to enrich the report; the configured reporter
+        # itself may also expect a real action instance. `report_exhaustion` is itself an instance
+        # method, so `self` here already IS that instance. Called from `report_exhaustion_if_needed`
+        # (an `on_failure` callback), which runs AFTER axn has finalized `action.result` as a
+        # failure — see the `on_failure` doc comment above `retry_or_exhaust!` for why that ordering
+        # matters.
+        def report_exhaustion(error)
+          Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt: })
+        rescue StandardError => e
+          Axn::Webhooks.swallow_soft_error("reporting outbound delivery exhaustion", exception: e)
+        end
+      end
+    end
+  end
+end

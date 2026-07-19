@@ -3,6 +3,8 @@
 require "axn"
 require "active_support/deprecation"
 
+require_relative "webhooks/errors"
+require_relative "webhooks/handler"
 require_relative "webhooks/version"
 require_relative "webhooks/request"
 require_relative "webhooks/response"
@@ -20,6 +22,7 @@ require_relative "webhooks/inbound/build_request"
 require_relative "webhooks/inbound/respond_context"
 require_relative "webhooks/respond"
 require_relative "webhooks/dispatch"
+require_relative "webhooks/outbound"
 
 module Axn
   module Webhooks
@@ -32,8 +35,6 @@ module Axn
     # Per-vendor observability facet (spec Decision 7 / PRO-2818). Off by default; a consuming app
     # (Teamshares: :dimension) opts in. See Axn::Webhooks::VendorFacet for the runtime mechanism.
     setting :vendor_facet, default: false, one_of: [false, :dimension, :tag]
-
-    class Error < StandardError; end
 
     # A dedicated deprecator instance, so a consuming Rails app can register it
     # (Rails.application.deprecators[:webhooks] = Axn::Webhooks.deprecator) and govern

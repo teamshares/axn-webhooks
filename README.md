@@ -1,6 +1,9 @@
 # axn-webhooks
 
-Inbound webhook handling for [axn](https://github.com/teamshares/axn): verify a vendor's signature, dispatch the event to a handler action, and acknowledge — declared per vendor, and runnable in or out of Rails. The name is a deliberate umbrella: this is the **inbound** half; outbound webhook *signing* is a reserved future sibling built on the same signature primitive.
+Webhook handling for [axn](https://github.com/teamshares/axn), both directions, on one signature primitive:
+
+* **Inbound** — verify a vendor's signature, dispatch the event to a handler action, and acknowledge — declared per vendor, and runnable in or out of Rails.
+* **Outbound** — declare your own events and subscribers, and emit signed, self-retrying deliveries — declared once per sending app.
 
 ## Installation
 
@@ -213,6 +216,147 @@ When set, every `verify`/`dispatch`/`respond`/`challenge` call for a registered 
 with the endpoint's registered name as that Datadog/OTel facet — `:dimension` for a bounded,
 low-cardinality grouping (Teamshares' choice); `:tag` for the higher-cardinality path. Ships `false`
 (no stamping) so a standalone consumer opts in explicitly.
+
+## Outbound (sending webhooks)
+
+Declare your own events and their subscribers once (e.g. a Rails initializer), then emit by symbol
+from wherever the triggering event happens:
+
+```ruby
+Axn::Webhooks.outbound do
+  # Standard Webhooks signing (reuses Axn::Webhooks::Signature under the hood) — symmetric with
+  # a receiver's own `verify :standard_webhooks`. A custom signer block is accepted in the same slot.
+  sign :standard_webhooks, secret: ENV.fetch("WEBHOOK_SIGNING_SECRET")
+
+  # Default subscriber resolver — the seam a future DB-backed subscription store slots into.
+  # Any event declared with no explicit `to:` falls back to this.
+  subscribers ->(event) { Subscription.urls_for(event) }
+
+  event :lead_signed, to: ["https://example.com/webhooks/lead_signed"]  # static list
+  event :lead_closed                                                    # no `to:` -> resolved via `subscribers`
+  event :invoice_paid, type: "invoice.paid", to: ["https://example.com/webhooks/invoice_paid"]  # override the wire `type`
+
+  max_attempts 8                                                # default shown
+  backoff ->(attempt) { [30 * (3**(attempt - 1)), 6 * 3600].min } # default shown (seconds; capped at 6h)
+  transport MyFaradayTransport                                  # optional; defaults to stdlib net/http
+end
+
+Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })  # => Axn::Result
+```
+
+* **Symbols are the identity.** `emit(:unknown_event)` raises `Axn::Webhooks::Error` immediately,
+  listing the known events — no silent no-op for a typo'd event name. A statically declared
+  `event :x, to: []` warns at boot (it will deliver nowhere).
+* **Wire `type`** defaults to the symbol as a string (`:lead_signed` → `"lead_signed"`), overridable
+  per event with `type:` when a receiver expects a dotted convention or another exact value.
+* **`to:`** accepts a static Array or a lambda (`->(event) { … }`); the block-level `subscribers`
+  resolver is the shared default when an event declares no `to:` at all.
+* **Fan-out**: `emit` resolves the event's subscribers and enqueues one independent, self-retrying
+  `Axn::Webhooks::Outbound::Deliver` per target — one slow/failing subscriber can't block another.
+  Each delivery gets its own stable `webhook-id`, generated once per (emission × target) and reused
+  across every retry attempt of that delivery, so receivers can dedup.
+
+### Envelope & signing
+
+The body is the Standard Webhooks envelope; `id` and `timestamp` are mirrored into the signed
+headers:
+
+```
+POST <subscriber-url>
+webhook-id: msg_<uuid>
+webhook-timestamp: 1721160000
+webhook-signature: v1,<base64 hmac of "id.timestamp.body">
+content-type: application/json
+user-agent: axn-webhooks/<version>
+
+{"id":"msg_<uuid>","timestamp":1721160000,"type":"lead_signed","data":{"lead_id":42}}
+```
+
+Receivers verify with the inbound half's `verify :standard_webhooks` — end-to-end symmetry, and
+`id`/`timestamp` give idempotency + replay protection for free. **Signing happens per attempt**: each
+retry recomputes the signature with a fresh `webhook-timestamp` (so it lands inside the receiver's
+replay-tolerance window) while reusing the same `webhook-id` from the first attempt (so the receiver
+can still dedup a redelivered message).
+
+### Transport
+
+The HTTP call is an injectable seam (`.post(url:, body:, headers:) -> Transport::Response`, a
+`Data.define(:status, :headers)`). The default is stdlib `net/http` — no new runtime dependency — and
+a consuming app can swap in its own object (e.g. Faraday-backed) via `transport` in the `outbound`
+block.
+
+### Async posture
+
+Mirrors inbound's `:auto`: **async when an axn async adapter is configured** for `Deliver` (an
+`async :sidekiq`/`async :active_job` global default, per axn's own presence-check semantics — never
+a branch on adapter type), else a **synchronous inline fallback** so the gem works standalone without
+Sidekiq. The sync path is best-effort: no cross-process retries/backoff, and it logs a warning (once
+per `emit` call, not once per subscriber) so the degraded mode is never silent.
+
+### Delivery contract
+
+Each delivery attempt classifies the receiver's response. This is the canonical contract — useful
+both for reading this gem's `Deliver` behavior and for a single-side (non-gem) implementer of either
+half:
+
+| Receiver responds | Delivery does |
+| -- | -- |
+| **2xx** | success |
+| **5xx, 429, 503 + `Retry-After`, timeout, connection error** | retryable → self-reschedule the next attempt |
+| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet `fail!`, no retry (a silent business failure surfaced via the `Deliver` result + axn's routine outcome logging, NOT via `on_exception`) |
+| **unexpected exception** (crash / OOM / network raise mid-flight) | propagates → adapter retries the un-acked job (at-least-once safety net) |
+
+**One self-managed retry engine, adapter-agnostic.** On a retryable response, `Deliver` computes its
+own delay and re-enqueues itself via axn's adapter-agnostic delayed-enqueue seam
+(`call_async(_async: { wait: delay })`, carrying `attempt: n + 1`) rather than inheriting whatever
+default backoff curve the underlying adapter has — identical retry behavior across every axn adapter,
+and `Retry-After` is honored precisely: `delay = max(backoff(attempt), retry_after_seconds)`. After
+`max_attempts`, exhaustion is reported **once** (via `Axn.config.on_exception`) and then delivery
+stops — it never raises, so the async adapter doesn't also retry an already-exhausted job. If no
+async adapter is configured at all, a retryable failure is treated the same as an exhausted retry
+budget (reported once, no retry), matching the sync fallback's best-effort promise.
+
+**At-least-once is preserved for crashes**: response-based retries are self-managed, but an
+*unexpected* exception still propagates so the adapter retries the un-acked job as a safety net.
+Because every attempt reuses the same `webhook-id`, a double-delivery from that safety net is
+idempotent on the receiver side.
+
+### Asking for redelivery (`retry_later!`)
+
+A handler on the **inbound** side can ask the sender to redeliver later without paging, independent
+of the outbound engine above:
+
+```ruby
+class HandleWebhook
+  include Axn::Webhooks::Handler
+  def call
+    Axn::Webhooks.retry_later!(after: 30) unless dependency_ready?  # => 503, Retry-After: 30
+  end
+end
+```
+
+Raising `Axn::Webhooks::RetryLater` (directly, or via the `Axn::Webhooks.retry_later!(after: nil)`
+helper) **always** maps to a **503** — `after:` only controls whether the `Retry-After` header is
+present, distinct from a crash (which is a reported plain 500). This affordance requires **synchronous**
+dispatch: it's rescued around the handler's own `call!`, so a `retry_later!` raised inside an async
+worker is just a worker exception, unrelated to the HTTP response already sent.
+
+**"Without paging" requires `include Axn::Webhooks::Handler`** (in place of plain `include Axn`) —
+it's a thin concern that includes `Axn` and declares `fails_on Axn::Webhooks::RetryLater`, so a
+deferral settles as a quiet failure instead of an unhandled exception. Without it (or an equivalent
+manual `fails_on Axn::Webhooks::RetryLater`), a plain `include Axn` handler calling `retry_later!`
+still 503s the response (`Dispatch` rescues the exception either way), but it **also** reports to
+`Axn.config.on_exception` (e.g. Honeybadger) on every single deferral — the opposite of the
+"without paging" promise.
+
+### Routing: sender-owned config today
+
+**Routing is sender-owned config, not a service.** The event→targets map lives in each *sending*
+app's own `outbound` block (`to:` / `subscribers`), not in this gem. A general-purpose DB-backed
+self-registration store — where receivers register their own endpoint URLs at runtime, no deploy
+required to add a listener — is a real future shape, but it's **intentionally deferred until a real
+use-case justifies it**. The `subscribers`/`to:` lambda is the seam it will slot into with no API
+change: swap the lambda body for a DB lookup and nothing else in this gem needs to move.
 
 ## Development
 
