@@ -25,6 +25,33 @@ RSpec.describe Axn::Webhooks::Response do
     expect(response.headers).to eq("content-type" => "application/xml")
   end
 
+  it "builds a json body from a Hash (JSON-encoded)" do
+    response = described_class.json({ ok: true, count: 2 })
+    expect(response.body).to eq('{"ok":true,"count":2}')
+    expect(response.headers).to eq("content-type" => "application/json")
+  end
+
+  it "builds a json body from an Array (JSON-encoded)" do
+    response = described_class.json([{ text: "A" }, { text: "B" }])
+    expect(response.body).to eq('[{"text":"A"},{"text":"B"}]')
+    expect(response.headers).to eq("content-type" => "application/json")
+  end
+
+  it "passes a pre-serialized String body through unchanged" do
+    response = described_class.json('{"already":"json"}')
+    expect(response.body).to eq('{"already":"json"}')
+    expect(response.headers).to eq("content-type" => "application/json")
+  end
+
+  it "supports a custom status on json" do
+    expect(described_class.json({ ok: true }, status: 422).status).to eq(422)
+  end
+
+  it "lets a caller override the default json Content-Type and add headers" do
+    response = described_class.json({ ok: true }, headers: { "X-Custom" => "v" })
+    expect(response.headers).to eq("content-type" => "application/json", "x-custom" => "v")
+  end
+
   it "lets a caller override the default Content-Type header (case-insensitively; emitted lowercase)" do
     response = described_class.text("hi", headers: { "Content-Type" => "text/csv" })
     expect(response.headers).to eq("content-type" => "text/csv")

@@ -15,6 +15,10 @@ RSpec.describe Axn::Webhooks::Inbound::RespondContext do
     expect(context.xml("<a/>")).to eq(Axn::Webhooks::Response.xml("<a/>"))
   end
 
+  it "builds a json response" do
+    expect(context.json({ ok: true })).to eq(Axn::Webhooks::Response.json({ ok: true }))
+  end
+
   it "instance_execs a respond block so its bare helper calls resolve against this context" do
     block = ->(result) { text("seen: #{result}") }
     expect(context.instance_exec("ok", &block)).to eq(Axn::Webhooks::Response.text("seen: ok"))
