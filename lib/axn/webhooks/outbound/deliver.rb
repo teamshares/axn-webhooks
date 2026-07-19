@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "time"
+
 module Axn
   module Webhooks
     module Outbound
@@ -82,10 +84,19 @@ module Axn
           !!Axn.config._default_async_adapter
         end
 
+        # Retry-After per RFC 7231: either delay-seconds (integer) or an HTTP-date. For the
+        # HTTP-date form, compute the remaining seconds until that instant, clamped to >= 0 (a
+        # past/now date means "no extra delay beyond backoff", not "retry immediately forever").
         def parse_retry_after(value)
           return nil if value.nil? || value.to_s.empty?
 
-          Integer(value, 10) if value.to_s.match?(/\A\d+\z/)
+          return Integer(value, 10) if value.to_s.match?(/\A\d+\z/)
+
+          begin
+            [(Time.httpdate(value) - Time.now).to_i, 0].max
+          rescue ArgumentError
+            nil
+          end
         end
 
         # Report ONCE at exhaustion via axn's configured reporter (Honeybadger at Teamshares),

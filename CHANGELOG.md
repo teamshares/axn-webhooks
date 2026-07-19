@@ -63,6 +63,12 @@
   and handing it to `Deliver` as a bogus delivery `url` — the documented "`to:` accepts a static
   Array OR a lambda" contract was silently broken. The block-level `subscribers` fallback is now
   invoked the same arity-aware way for consistency (a `->(event){...}` still works as before).
+- `Outbound::Deliver#parse_retry_after` now also parses the HTTP-date form of `Retry-After`
+  (RFC 7231, e.g. `"Wed, 21 Oct 2015 07:28:00 GMT"`, sent during maintenance windows), not just
+  integer-seconds. It's parsed via stdlib `Time.httpdate` (`require "time"`, no new runtime
+  dependency) and converted to the remaining seconds, clamped to `>= 0`. Previously an HTTP-date
+  Retry-After failed to parse and silently fell back to the computed backoff, retrying earlier than
+  the server asked for.
   (5xx/429/network error) occurs with no async adapter configured. Previously it unconditionally
   called `self.class.call_async` to reschedule, which raises a `NotImplementedError` (a
   `ScriptError`, not rescued by axn's `StandardError`-only exception boundary) — escaping `Deliver`,

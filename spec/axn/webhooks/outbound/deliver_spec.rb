@@ -96,6 +96,33 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     expect(described_class).to have_received(:call_async).with(hash_including(_async: { wait: 300 }))
   end
 
+  it "honors an HTTP-date Retry-After (RFC 7231) by computing the remaining seconds" do
+    future = Time.now + 200
+    transport = fake_transport(ok(503, "retry-after" => future.httpdate))
+    declare!(transport:, backoff: ->(_n) { 1 })
+    configure_adapter!
+    allow(described_class).to receive(:call_async)
+
+    described_class.call(**kwargs, attempt: 1)
+
+    expect(described_class).to have_received(:call_async) do |**call_kwargs|
+      wait = call_kwargs[:_async][:wait]
+      expect(wait).to be_within(30).of(200)
+      expect(wait).to be > 1 # backoff floor loses to the HTTP-date Retry-After
+    end
+  end
+
+  it "falls back to backoff (no crash) when Retry-After is unparseable garbage" do
+    transport = fake_transport(ok(503, "retry-after" => "not-a-date-or-int"))
+    declare!(transport:, backoff: ->(_n) { 42 })
+    configure_adapter!
+    allow(described_class).to receive(:call_async)
+
+    described_class.call(**kwargs, attempt: 1)
+
+    expect(described_class).to have_received(:call_async).with(hash_including(_async: { wait: 42 }))
+  end
+
   it "reschedules (does not raise) on a retryable network error" do
     transport = fake_transport(Timeout::Error)
     declare!(transport:, backoff: ->(_n) { 60 })
