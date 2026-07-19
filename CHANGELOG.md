@@ -56,6 +56,11 @@
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Fixed
+- `Outbound::Deliver#report_exhaustion` now passes the running `Deliver` INSTANCE (`self`), not the
+  class, as `action:` to `Axn.config.on_exception` — matching axn's own internal convention (the
+  action instance, not its class) and the instance-only state (`action.result`) axn's
+  `on_exception` relies on to enrich the report; the configured reporter (e.g. Honeybadger) also
+  receives the real instance rather than a bare `Class` object.
 - `Outbound::Deliver#call`'s retryable-network rescue is now scoped to ONLY the `post` (HTTP) call,
   not the whole method body. Previously the method-level `rescue *Transport::RETRYABLE_NETWORK_ERRORS`
   also wrapped `retry_or_exhaust!`'s own `call_async` reschedule call — so if the async adapter

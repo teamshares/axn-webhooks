@@ -121,9 +121,14 @@ module Axn
 
         # Report ONCE at exhaustion via axn's configured reporter (Honeybadger at Teamshares),
         # WITHOUT raising — raising would trigger the adapter to retry the already-exhausted job.
+        # `action:` must be the running INSTANCE (`self`), not the class — axn's own internal
+        # callers always pass the instance (see executor.rb), and `on_exception` relies on
+        # instance-only state (e.g. `action.result`) to enrich the report; the configured reporter
+        # itself may also expect a real action instance. `report_exhaustion` is itself an instance
+        # method, so `self` here already IS that instance.
         def report_exhaustion(network_error)
           error = network_error || Axn::Webhooks::Error.new("outbound delivery exhausted for #{event} to #{url}")
-          Axn.config.on_exception(error, action: self.class, context: { event:, url:, webhook_id:, attempt: })
+          Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt: })
         rescue StandardError => e
           Axn::Webhooks.swallow_soft_error("reporting outbound delivery exhaustion", exception: e)
         end

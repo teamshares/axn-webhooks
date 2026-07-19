@@ -168,11 +168,52 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     configure_adapter!
     allow(described_class).to receive(:call_async)
     expect(Axn.config).to receive(:on_exception).at_least(:once)
+                                                .with(anything, hash_including(action: instance_of(described_class)))
 
     result = described_class.call(**kwargs, attempt: 3)
 
     expect(result).not_to be_ok
     expect(described_class).not_to have_received(:call_async)
+  end
+
+  it "passes the running Deliver INSTANCE (not the class) through the REAL on_exception path " \
+     "at exhaustion" do
+    # Regression test for a Codex P2 finding: `report_exhaustion` used to pass `self.class` (the
+    # Deliver CLASS) to `Axn.config.on_exception`, breaking axn's documented contract (axn's own
+    # internal callers, e.g. executor.rb, always pass the action INSTANCE) -- axn's real
+    # `on_exception` uses `action:` to enrich the report (`action.respond_to?(:result) &&
+    # action.result...` to resolve the action's own failure detail) and hands `action:` straight
+    # through to the configured reporter (e.g. Honeybadger), which may reasonably call
+    # instance-only methods (inputs, exposed_data, result, ...) on it. A bare Class object
+    # satisfies none of that. Stubbing `on_exception` (as the test above does) only proves it was
+    # CALLED, not that it was called with the right thing -- this test wires up a REAL lambda
+    # reporter (not a mock) and asserts on what it actually receives, so the assertion is driven by
+    # axn's genuine `on_exception` implementation end-to-end, not a stand-in.
+    #
+    # `on_exception` is a hand-written method (not `attr_accessor`) that takes `(e, action:,
+    # context:)` and dispatches to the configured `@on_exception` callable -- there's no plain
+    # reader, so we must save/restore the ivar directly rather than calling
+    # `Axn.config.on_exception` as a getter (which would raise ArgumentError: no `action:` given).
+    captured = []
+    original_on_exception = Axn.config.instance_variable_get(:@on_exception)
+    Axn.config.on_exception = ->(e, action:, **) { captured << { error: e, action: } }
+
+    begin
+      transport = fake_transport(ok(500))
+      declare!(transport:, max_attempts: 3)
+      configure_adapter!
+      allow(described_class).to receive(:call_async)
+
+      described_class.call(**kwargs, attempt: 3)
+
+      expect(captured.size).to eq(1)
+      expect(captured.first[:error]).to be_a(Axn::Webhooks::Error)
+      expect(captured.first[:error].message).to include("delivery exhausted")
+      # The crux of the fix: an INSTANCE, not the class itself.
+      expect(captured.first[:action]).to be_an_instance_of(described_class)
+    ensure
+      Axn.config.instance_variable_set(:@on_exception, original_on_exception)
+    end
   end
 
   it "lets an unexpected (non-network) transport exception propagate as a loud exception" do
@@ -191,6 +232,7 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     # the REAL retry_or_exhaust! guard, proving it never reaches axn's call_async (which would raise
     # a ScriptError that escapes axn's StandardError-only exception boundary and crashes the caller).
     expect(Axn.config).to receive(:on_exception).at_least(:once)
+                                                .with(anything, hash_including(action: instance_of(described_class)))
 
     result = nil
     expect do
