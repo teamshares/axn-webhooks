@@ -25,8 +25,8 @@ module Axn
         resolution = router.resolve(event)
         return done!("acknowledged") if resolution == :ack
 
-        handler_class, args = resolution
-        return dispatch_async(handler_class, args) if async?(handler_class)
+        handler_class, args, route_async = resolution
+        return dispatch_async(handler_class, args) if async?(handler_class, route_async)
 
         expose handler_result: nil
         begin
@@ -39,12 +39,15 @@ module Axn
 
       private
 
-      # Resolve sync vs async (Decision D): explicit mode wins; a custom respond forces sync;
-      # otherwise async when an adapter is configured for THIS handler, else sync.
-      def async?(handler_class)
+      # Resolve sync vs async per resolved route (Decision D extended, PRO-2952),
+      # most-specific wins: (1) the route's own async: flag; (2) an explicit endpoint
+      # mode:; (3) a declared respond forces sync (Decision D default); (4) :auto —
+      # async when an adapter is configured for THIS handler, else sync.
+      def async?(handler_class, route_async)
+        return route_async unless route_async.nil?
         return true if mode == :async
         return false if mode == :sync
-        return false if respond_declared # mode == :auto, result-returning hook
+        return false if respond_declared
 
         async_adapter_configured?(handler_class)
       end
