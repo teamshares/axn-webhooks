@@ -15,6 +15,7 @@ module Axn
         def call
           config = Axn::Webhooks::Outbound.config
           type = config.wire_type(event)
+          warn_sync_fallback(type) unless async_configured?
 
           config.targets_for(event).each do |url|
             id = Envelope.new_id
@@ -27,16 +28,21 @@ module Axn
 
         # Async when an adapter is configured for Deliver, else a warned best-effort sync fallback
         # (no cross-process retries). Presence check only — never branches on adapter type.
-        def enqueue(**kwargs)
+        def enqueue(**)
           if async_configured?
-            Deliver.call_async(**kwargs)
+            Deliver.call_async(**)
           else
-            Axn.config.logger.warn(
-              "[axn-webhooks] delivering #{kwargs[:event]} synchronously (no async adapter configured) — " \
-              "best-effort, no cross-process retries",
-            )
-            Deliver.call(**kwargs)
+            Deliver.call(**)
           end
+        end
+
+        # Warned ONCE per emit (not once per target) — a high-fan-out event would otherwise spam
+        # one line per subscriber for what is a single configuration fact.
+        def warn_sync_fallback(type)
+          Axn.config.logger.warn(
+            "[axn-webhooks] delivering #{type} synchronously (no async adapter configured) — " \
+            "best-effort, no cross-process retries",
+          )
         end
 
         def async_configured?

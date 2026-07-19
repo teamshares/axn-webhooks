@@ -3,7 +3,17 @@
 require "base64"
 
 RSpec.describe Axn::Webhooks::Outbound::Deliver do
-  after { Axn::Webhooks::Outbound.reset! }
+  after do
+    Axn::Webhooks::Outbound.reset!
+    described_class._async_adapter = nil
+  end
+
+  # Reschedule requires an async adapter to reschedule ONTO (Deliver reschedules itself via
+  # call_async) — mirrors dispatch_async_spec.rb's AdapterHandler setup: set the class_attribute
+  # directly (no real Sidekiq load) and stub call_async so no real adapter runs.
+  def configure_adapter!
+    described_class._async_adapter = :sidekiq
+  end
 
   # A recording fake transport; `script` maps call-index -> Response or a raise.
   def fake_transport(*responses)
@@ -65,6 +75,7 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
   it "reschedules with backoff on a retryable 5xx when attempts remain" do
     transport = fake_transport(ok(503))
     declare!(transport:, backoff: ->(n) { n * 100 })
+    configure_adapter!
     allow(described_class).to receive(:call_async)
 
     described_class.call(**kwargs, attempt: 1)
@@ -77,6 +88,7 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
   it "honors Retry-After when it exceeds the computed backoff" do
     transport = fake_transport(ok(429, "retry-after" => "300"))
     declare!(transport:, backoff: ->(_n) { 60 })
+    configure_adapter!
     allow(described_class).to receive(:call_async)
 
     described_class.call(**kwargs, attempt: 1)
@@ -87,6 +99,7 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
   it "reschedules (does not raise) on a retryable network error" do
     transport = fake_transport(Timeout::Error)
     declare!(transport:, backoff: ->(_n) { 60 })
+    configure_adapter!
     allow(described_class).to receive(:call_async)
 
     result = described_class.call(**kwargs, attempt: 1)
@@ -98,6 +111,7 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
   it "reports once and fails (no reschedule) when retries are exhausted" do
     transport = fake_transport(ok(500))
     declare!(transport:, max_attempts: 3)
+    configure_adapter!
     allow(described_class).to receive(:call_async)
     expect(Axn.config).to receive(:on_exception).at_least(:once)
 
@@ -113,5 +127,24 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
 
     result = described_class.call(**kwargs)
     expect(result.outcome).to be_exception
+  end
+
+  it "fails quietly (no crash) on a retryable 5xx when NO async adapter is configured, " \
+     "instead of raising NotImplementedError from call_async" do
+    transport = fake_transport(ok(503))
+    declare!(transport:)
+    # Deliberately NOT calling configure_adapter! and NOT stubbing call_async — this must exercise
+    # the REAL retry_or_exhaust! guard, proving it never reaches axn's call_async (which would raise
+    # a ScriptError that escapes axn's StandardError-only exception boundary and crashes the caller).
+    expect(Axn.config).to receive(:on_exception).at_least(:once)
+
+    result = nil
+    expect do
+      result = described_class.call(**kwargs, attempt: 1)
+    end.not_to raise_error
+
+    expect(result).not_to be_ok
+    expect(result.outcome).to be_failure
+    expect(result.outcome).not_to be_exception
   end
 end

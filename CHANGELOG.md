@@ -54,6 +54,18 @@
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Fixed
+- `Outbound::Deliver#retry_or_exhaust!` no longer crashes the caller when a retryable failure
+  (5xx/429/network error) occurs with no async adapter configured. Previously it unconditionally
+  called `self.class.call_async` to reschedule, which raises a `NotImplementedError` (a
+  `ScriptError`, not rescued by axn's `StandardError`-only exception boundary) — escaping `Deliver`,
+  escaping `Outbound::Emit`'s per-target fan-out loop, and aborting delivery to any remaining
+  targets. `Deliver` now checks adapter presence first (mirroring inbound `Dispatch`'s own
+  `self.class._async_adapter` / `Axn.config._default_async_adapter` check, never branching on
+  adapter type): with no adapter configured, a retryable failure is now treated like an exhausted
+  retry budget — reported once via `Axn.config.on_exception`, then `fail!`s quietly — matching the
+  documented best-effort, no-cross-process-retries promise of the synchronous fallback path.
+  Also: `Outbound::Emit`'s sync-fallback warning now logs once per `emit` call, not once per
+  resolved target, so a high-fan-out event no longer spams one warn line per subscriber.
 - `Request.from_rack`'s `params` no longer merges query-string params into a form-urlencoded
   body's params. `url` (via `Rack::Request#url`) already includes the query string, so the
   previous merge double-counted query params for URL-signing verifiers doing

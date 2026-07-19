@@ -39,8 +39,10 @@ RSpec.describe "Axn::Webhooks.emit" do
     expect(body["id"]).to eq(calls.first[:webhook_id])
   end
 
-  it "warns when delivering synchronously because no async adapter is configured" do
-    expect(Axn.config.logger).to receive(:warn).with(/synchronous|no async adapter/i).at_least(:once)
+  it "warns ONCE per emit (not once per target) when no async adapter is configured" do
+    # This event fans out to 2 targets (see the `before` block) — the warning is a single
+    # configuration fact, not a per-delivery one, so a high-fan-out event mustn't spam N warn lines.
+    expect(Axn.config.logger).to receive(:warn).with(/synchronous|no async adapter/i).once
     Axn::Webhooks.emit(:lead_signed, data: {})
   end
 end

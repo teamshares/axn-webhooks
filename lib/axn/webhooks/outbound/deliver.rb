@@ -49,14 +49,37 @@ module Axn
         # 5xx, plus the "come back later" 4xx codes.
         def retryable?(status) = status >= 500 || [429].include?(status)
 
+        # Only reschedule when BOTH attempts remain AND an async adapter is actually configured for
+        # Deliver to reschedule itself onto — otherwise `call_async` would raise a ScriptError
+        # (NotImplementedError) that escapes axn's StandardError-only exception boundary entirely,
+        # crashing the caller (e.g. Emit's synchronous best-effort fallback fan-out loop). No
+        # adapter configured is therefore treated the same as an exhausted retry budget: report
+        # once, fail! quietly (no crash, no cross-process retries — matches the documented
+        # best-effort promise of the sync fallback path).
         def retry_or_exhaust!(retry_after: nil, network_error: nil)
-          if attempt >= config.max_attempts
+          if attempt >= config.max_attempts || !async_configured?
             report_exhaustion(network_error)
-            return fail!("delivery exhausted after #{attempt} attempts for #{event} to #{url}")
+            return fail!(terminal_message)
           end
 
           delay = [config.backoff.call(attempt), parse_retry_after(retry_after)].compact.max
           self.class.call_async(url:, webhook_id:, body:, event:, attempt: attempt + 1, _async: { wait: delay })
+        end
+
+        def terminal_message
+          return "delivery exhausted after #{attempt} attempts for #{event} to #{url}" if attempt >= config.max_attempts
+
+          "delivery failed for #{event} to #{url} (no async adapter configured to retry attempt #{attempt + 1})"
+        end
+
+        # Presence check ONLY (never branches on adapter type) — mirrors Dispatch's own
+        # `async_adapter_configured?` exactly, but against `self.class` since Deliver reschedules
+        # ITSELF. An explicit per-class setting (including `false`) always wins over the global
+        # default.
+        def async_configured?
+          return !!self.class._async_adapter unless self.class._async_adapter.nil?
+
+          !!Axn.config._default_async_adapter
         end
 
         def parse_retry_after(value)
