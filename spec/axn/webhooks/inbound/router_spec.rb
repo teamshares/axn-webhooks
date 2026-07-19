@@ -107,6 +107,15 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
     expect(router.resolve(event)).to eq([PaymentOrders::DispatchCompleted, { payment_order_id: 42 }, true])
   end
 
+  it "treats an explicit async: nil as no-opinion (not an error)" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "view_submission" => { call: "HandleWebhook", async: nil } },
+    )
+    expect(router.resolve({ "type" => "view_submission" }))
+      .to eq([HandleWebhook, { event: { "type" => "view_submission" } }, nil])
+  end
+
   it "raises for a non-boolean async: on an entry (loud)" do
     router = described_class.new(
       on: ->(e) { e["type"] },

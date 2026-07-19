@@ -143,6 +143,19 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
       expect(AsyncHandler.calls).to eq([{ event: { "type" => "block_actions" } }])
     end
 
+    it "an entry with async: true enqueues even when endpoint mode: :sync" do
+      router = Axn::Webhooks::Inbound::Router.new(
+        on: ->(e) { e["type"] },
+        to: { "block_actions" => { call: "AsyncHandler", async: true } },
+      )
+      result = Axn::Webhooks::Dispatch.call(
+        request: request('{"type":"block_actions"}'), router:, parse: json_parse, mode: :sync,
+      )
+      expect(result).to be_ok
+      expect(result.handler_result).to be_nil
+      expect(AsyncHandler.calls).to eq([{ event: { "type" => "block_actions" } }])
+    end
+
     it "an entry with async: false runs sync even when endpoint mode: :async" do
       router = Axn::Webhooks::Inbound::Router.new(
         on: ->(e) { e["type"] },

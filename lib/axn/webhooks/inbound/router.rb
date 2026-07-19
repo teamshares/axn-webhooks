@@ -65,7 +65,7 @@ module Axn
           return nil unless entry.key?(:async)
 
           value = entry.fetch(:async)
-          return value if [true, false].include?(value)
+          return value if [true, false, nil].include?(value)
 
           raise Axn::Webhooks::Error, "dispatch entry `async:` must be true or false (got #{value.inspect})"
         end
