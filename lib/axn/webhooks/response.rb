@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json"
+
 module Axn
   module Webhooks
     # A Rails-agnostic HTTP response value: status + body + headers. Produced by
@@ -30,6 +32,12 @@ module Axn
 
       def self.xml(body, status: 200, headers: {})
         new(status:, body:, headers: { "content-type" => "application/xml" }.merge(headers))
+      end
+
+      # A Hash/Array body is JSON-encoded; a String is assumed pre-serialized and passed through.
+      def self.json(body, status: 200, headers: {})
+        body = JSON.generate(body) unless body.is_a?(String)
+        new(status:, body:, headers: { "content-type" => "application/json" }.merge(headers))
       end
 
       def self.service_unavailable(retry_after: nil)

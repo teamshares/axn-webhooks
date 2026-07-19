@@ -99,8 +99,9 @@ Handlers run synchronously or asynchronously depending on `mode:` — see [Async
 
 By default a successful request gets a bare 2xx ack — most vendors want nothing else. Add
 `respond` only for the two real cases that need it: a literal string body, or an
-instruction body the handler computed (e.g. TwiML). The block receives the handler's own
-`Axn::Result` and runs with `ack`/`text`/`xml` available as bare calls:
+instruction body the handler computed (e.g. TwiML, or a JSON instruction body). The block
+receives the handler's own `Axn::Result` and runs with `ack`/`text`/`xml`/`json` available as
+bare calls:
 
 ```ruby
 # DropboxSign requires this exact literal string:
@@ -116,6 +117,13 @@ Axn::Webhooks.inbound :twilio do
                    .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
   dispatch to: "Actions::Twilio::HandleCall", parse: ->(req) { req.params }
   respond { |result| xml(result.twiml) }   # handler exposes :twiml
+end
+
+# JSON instruction body: pass a Hash/Array (JSON-encoded) or a pre-serialized String.
+Axn::Webhooks.inbound :slack do
+  verify { |req| … }
+  dispatch to: "Actions::Slack::HandleInteraction"
+  respond { |result| json(result.response_action, status: 200) }   # handler exposes :response_action
 end
 
 response = Axn::Webhooks::Inbound[:dropbox_sign].to_response(request)  # => Axn::Webhooks::Response
