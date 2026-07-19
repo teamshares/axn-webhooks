@@ -234,7 +234,7 @@ Axn::Webhooks.outbound do
 
   event :lead_signed, to: ["https://example.com/webhooks/lead_signed"]  # static list
   event :lead_closed                                                    # no `to:` -> resolved via `subscribers`
-  event :invoice_paid, type: "invoice.paid", to: [...]                  # override the wire `type`
+  event :invoice_paid, type: "invoice.paid", to: ["https://example.com/webhooks/invoice_paid"]  # override the wire `type`
 
   max_attempts 8                                                # default shown
   backoff ->(attempt) { [30 * (3**(attempt - 1)), 6 * 3600].min } # default shown (seconds; capped at 6h)
@@ -303,7 +303,7 @@ half:
 | -- | -- |
 | **2xx** | success |
 | **5xx, 429, 503 + `Retry-After`, timeout, connection error** | retryable → self-reschedule the next attempt |
-| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet failure, reported once, no retry |
+| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet `fail!`, no retry (a silent business failure surfaced via the `Deliver` result + axn's routine outcome logging, NOT via `on_exception`) |
 | **unexpected exception** (crash / OOM / network raise mid-flight) | propagates → adapter retries the un-acked job (at-least-once safety net) |
 
 **One self-managed retry engine, adapter-agnostic.** On a retryable response, `Deliver` computes its
