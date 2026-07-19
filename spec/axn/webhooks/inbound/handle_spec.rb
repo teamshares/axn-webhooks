@@ -128,4 +128,22 @@ RSpec.describe "Endpoint#to_response retry_later" do
     expect(response.status).to eq(503)
     expect(response.headers["retry-after"]).to eq("60")
   end
+
+  it "maps a bare handler retry_later! (no after:) to 503 with no Retry-After header" do
+    stub_const("BareDeferHandler", Class.new do
+      include Axn
+
+      expects :event, allow_blank: true
+      def call = Axn::Webhooks.retry_later!
+    end)
+
+    Axn::Webhooks.inbound(:vendor) do
+      verify { |_req| true }
+      dispatch to: "BareDeferHandler", mode: :sync
+    end
+
+    response = Axn::Webhooks::Inbound[:vendor].to_response(Axn::Webhooks::Request.new(raw_body: "{}"))
+    expect(response.status).to eq(503)
+    expect(response.headers).not_to have_key("retry-after")
+  end
 end

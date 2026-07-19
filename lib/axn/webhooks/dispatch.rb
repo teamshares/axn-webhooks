@@ -16,6 +16,7 @@ module Axn
       expects :mode, default: :auto
       expects :respond_declared, type: :boolean, default: false
       exposes :handler_result, allow_nil: true
+      exposes :retry_later, type: :boolean, default: false
       exposes :retry_after, allow_nil: true
       error "Webhook dispatch failed"
 
@@ -31,6 +32,7 @@ module Axn
         begin
           expose handler_result: handler_class.call!(**args)
         rescue Axn::Webhooks::RetryLater => e
+          expose retry_later: true
           expose retry_after: e.retry_after
         end
       end
