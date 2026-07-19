@@ -125,3 +125,8 @@
   is consulted only when the event declared no `to:` at all. Previously a declared resolver
   returning `nil` silently fell through to the default audience, sending the webhook to
   subscribers the event's own `to:` explicitly meant to exclude.
+- `Outbound::Deliver` now looks up the `Retry-After` response header case-insensitively instead of
+  assuming the stdlib net/http lowercase-keyed form. `Transport` is a public injectable seam — a
+  custom transport (e.g. Faraday-backed) may return a plain Hash with `"Retry-After"` or
+  `"RETRY-AFTER"` — and HTTP header names are case-insensitive, so the previous exact-key lookup
+  silently missed the server's requested delay on such transports and retried on backoff alone.

@@ -96,6 +96,17 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     expect(described_class).to have_received(:call_async).with(hash_including(_async: { wait: 300 }))
   end
 
+  it "honors Retry-After case-insensitively when a custom transport returns capitalized headers" do
+    transport = fake_transport(ok(503, "Retry-After" => "300"))
+    declare!(transport:, backoff: ->(_n) { 60 })
+    configure_adapter!
+    allow(described_class).to receive(:call_async)
+
+    described_class.call(**kwargs, attempt: 1)
+
+    expect(described_class).to have_received(:call_async).with(hash_including(_async: { wait: 300 }))
+  end
+
   it "honors an HTTP-date Retry-After (RFC 7231) by computing the remaining seconds" do
     future = Time.now + 200
     transport = fake_transport(ok(503, "retry-after" => future.httpdate))

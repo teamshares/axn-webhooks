@@ -22,7 +22,7 @@ module Axn
         def call
           response = post
           return if success?(response.status) # 2xx -> done
-          return retry_or_exhaust!(retry_after: response.headers["retry-after"]) if retryable?(response.status)
+          return retry_or_exhaust!(retry_after: header_value(response.headers, "retry-after")) if retryable?(response.status)
 
           fail!("permanent delivery failure (HTTP #{response.status}) for #{event} to #{url}")
         rescue *Transport::RETRYABLE_NETWORK_ERRORS => e
@@ -82,6 +82,15 @@ module Axn
           return !!self.class._async_adapter unless self.class._async_adapter.nil?
 
           !!Axn.config._default_async_adapter
+        end
+
+        # HTTP header names are case-insensitive, but `Transport` is a public injectable seam — a
+        # custom transport (e.g. Faraday-backed) may return a plain Hash with "Retry-After" or
+        # "RETRY-AFTER" rather than the lowercased keys net/http's `to_hash` produces. Look up by
+        # name case-insensitively instead of assuming lowercase.
+        def header_value(headers, name)
+          headers.each { |k, v| return v if k.to_s.casecmp?(name) }
+          nil
         end
 
         # Retry-After per RFC 7231: either delay-seconds (integer) or an HTTP-date. For the
