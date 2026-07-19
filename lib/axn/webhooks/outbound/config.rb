@@ -25,15 +25,16 @@ module Axn
           fetch(event)[:type] || event.to_s
         end
 
-        # Per-event `to:` wins — a static Array as-is, or a lambda `->(event){…}` invoked
-        # (arity-aware, matching Resolvers.resolve); else the block-level `subscribers` resolver
-        # (also invoked arity-aware); else [].
+        # A DECLARED per-event `to:` always wins, even when it resolves to zero targets — a static
+        # Array as-is (including `[]`), or a lambda `->(event){…}` invoked (arity-aware, matching
+        # Resolvers.resolve) and its result wrapped in Array (nil -> []). The block-level
+        # `subscribers` resolver is ONLY consulted when the event declared no `to:` at all
+        # (spec[:to].nil?) — never as a fallback for a declared resolver returning nil.
         def targets_for(event)
           spec = fetch(event)
-          raw = spec[:to]
-          raw = call_resolver(raw, event) if raw.respond_to?(:call)
-          list = raw || call_resolver(@default_subscribers, event) || []
-          Array(list)
+          return Array(resolve_to(spec[:to], event)) unless spec[:to].nil?
+
+          Array(call_resolver(@default_subscribers, event))
         end
 
         private
@@ -49,6 +50,12 @@ module Axn
           return nil if callable.nil?
 
           callable.arity.zero? ? callable.call : callable.call(event)
+        end
+
+        # `to:` is "declared" whenever spec[:to] is non-nil — a static value (Array, including
+        # `[]`) is returned as-is; a callable is invoked (arity-aware, via call_resolver).
+        def resolve_to(raw, event)
+          raw.respond_to?(:call) ? call_resolver(raw, event) : raw
         end
       end
     end

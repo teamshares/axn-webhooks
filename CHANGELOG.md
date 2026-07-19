@@ -118,3 +118,10 @@
   with an empty-body parse, so `req.params["challenge"]` returned `nil` and a valid `?challenge=`
   GET request 400'd. `GET`/`HEAD` now always read params from the query string; `POST` (and other
   body-carrying methods) keep the form-body-only behavior above.
+- `Outbound::Config#targets_for` no longer falls back to the block-level `subscribers` resolver
+  when an event DECLARES a per-event `to:` resolver that itself resolves to `nil` (e.g. a DB lookup
+  finding no recipients for this event). A declared `to:` — static Array (including `[]`) or
+  callable — now always wins, wrapping its (possibly `nil`) result in `Array(...)`; `subscribers`
+  is consulted only when the event declared no `to:` at all. Previously a declared resolver
+  returning `nil` silently fell through to the default audience, sending the webhook to
+  subscribers the event's own `to:` explicitly meant to exclude.

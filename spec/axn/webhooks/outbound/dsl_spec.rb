@@ -40,6 +40,21 @@ RSpec.describe "Axn::Webhooks.outbound" do
     expect(Axn::Webhooks::Outbound.config.targets_for(:lead_closed)).to eq(["https://resolved/lead_closed"])
   end
 
+  it "does NOT fall back to `subscribers` when a declared per-event `to:` resolver returns nil" do
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      subscribers ->(_event) { ["https://DEFAULT"] }
+      event :x, to: ->(_event) {}
+      event :y
+    end
+    config = Axn::Webhooks::Outbound.config
+
+    # Declared `to:` won even though it resolved to nil -> deliver nowhere, NOT the default audience.
+    expect(config.targets_for(:x)).to eq([])
+    # Undeclared `to:` still falls back to the block-level `subscribers` resolver, unchanged.
+    expect(config.targets_for(:y)).to eq(["https://DEFAULT"])
+  end
+
   it "invokes a per-event `to:` lambda (arity-aware) instead of wrapping the Proc itself" do
     Axn::Webhooks.outbound do
       sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
