@@ -149,3 +149,14 @@
   type: :invoice_paid`) was previously returned unchanged, and `Emit` passes it straight through as
   `event:` to `Deliver`, whose `expects :event, type: String` rejected it — so a Symbol (or other
   non-String) `type:` override made the event undeliverable.
+- `Outbound::Deliver`'s exhaustion report now runs from an `on_failure` callback
+  (`report_exhaustion_if_needed`, gated on a new `@exhaustion_error` ivar set only by
+  `retry_or_exhaust!`'s exhaustion branch) instead of being called inline immediately before
+  `fail!`. Previously `Axn.config.on_exception(error, action: self, ...)` ran BEFORE `fail!` had
+  settled the result, so a reporter reading `action.result` (as axn's own `on_exception` does, and
+  as a real reporter like Honeybadger may) observed a pre-finalized, still-`ok?` result — undercutting
+  the entire point of handing it the action instance. `on_failure` only fires on `fail!` (never on
+  an unhandled exception) and axn dispatches it after `@context.__record_exception` has already
+  marked the context failed, so the reporter now sees the genuine, finalized failure it exists to
+  describe. The gate ensures a permanent-4xx `fail!` (which also triggers `on_failure`, but never
+  sets `@exhaustion_error`) does not report.

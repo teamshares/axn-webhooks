@@ -216,6 +216,54 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     end
   end
 
+  it "reports exhaustion only AFTER fail! has settled the result (codex P2)" do
+    # Regression test for a Codex P2 finding: `report_exhaustion` used to be called INLINE in
+    # `retry_or_exhaust!`, BEFORE `fail!` -- so a reporter reading `action.result` at report time
+    # saw a pre-finalized (still-`ok?`) result, undercutting the entire point of handing it the
+    # action instance. The fix moves the report into an `on_failure` callback, which axn only
+    # dispatches once `@context.__record_exception` has already set `@failure = true` (see
+    # executor.rb#with_exception_handling, which stamps the failure BEFORE dispatching :failure
+    # callbacks) -- so by the time the reporter runs, `action.result` is a genuine failure.
+    #
+    # A real lambda reporter (not a mock) captures `action.result.ok?`/`.failure?` at the moment
+    # it's invoked, so the assertion is driven by axn's actual callback-ordering semantics, not a
+    # stand-in for them.
+    captured = []
+    original_on_exception = Axn.config.instance_variable_get(:@on_exception)
+    Axn.config.on_exception = ->(_e, action:, **) { captured << { ok: action.result.ok?, failure: action.result.outcome.failure? } }
+
+    begin
+      transport = fake_transport(ok(500))
+      declare!(transport:, max_attempts: 3)
+      configure_adapter!
+      allow(described_class).to receive(:call_async)
+
+      result = described_class.call(**kwargs, attempt: 3)
+
+      expect(result).not_to be_ok
+      expect(captured.size).to eq(1)
+      expect(captured.first[:ok]).to be(false)
+      expect(captured.first[:failure]).to be(true)
+    ensure
+      Axn.config.instance_variable_set(:@on_exception, original_on_exception)
+    end
+  end
+
+  it "does NOT report when failing on a permanent 4xx (no exhaustion) (codex P2)" do
+    # The `on_failure`-based report is gated behind `@exhaustion_error` -- a permanent-4xx `fail!`
+    # (see `#call`'s `fail!("permanent delivery failure ...")` branch) never sets that ivar, so the
+    # `on_failure` callback must fire (fail! always triggers on_failure) but decline to report.
+    transport = fake_transport(ok(422))
+    declare!(transport:)
+    allow(described_class).to receive(:call_async)
+    expect(Axn.config).not_to receive(:on_exception)
+
+    result = described_class.call(**kwargs)
+
+    expect(result).not_to be_ok
+    expect(result.outcome).to be_failure
+  end
+
   it "lets an unexpected (non-network) transport exception propagate as a loud exception" do
     transport = fake_transport(ArgumentError.new("boom"))
     declare!(transport:)

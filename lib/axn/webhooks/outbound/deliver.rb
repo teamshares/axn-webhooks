@@ -19,6 +19,16 @@ module Axn
         expects :event, type: String
         expects :attempt, type: Integer, default: 1
 
+        # Only reports when `@exhaustion_error` was set by `retry_or_exhaust!`'s exhaustion branch
+        # (see `report_exhaustion_if_needed`) -- a permanent-4xx `fail!` (in `#call`) also fires
+        # `on_failure` (axn dispatches it for ANY `fail!`), but must NOT page: it never sets that
+        # ivar, so the guard holds. Registering here (rather than reporting inline before `fail!`)
+        # means the report runs once axn has already finalized `action.result` as a failure (see
+        # `with_exception_handling` in axn's executor.rb: `@context.__record_exception` runs before
+        # the `:failure` callback dispatch) -- so a reporter reading `action.result` observes the
+        # settled failure it exists to describe (Codex P2 finding).
+        on_failure :report_exhaustion_if_needed
+
         def call
           # Scoped deliberately to ONLY `post` (not the whole method): a network error talking to
           # the receiver is a retryable delivery failure, but if `retry_or_exhaust!`'s own
@@ -71,7 +81,7 @@ module Axn
         # best-effort promise of the sync fallback path).
         def retry_or_exhaust!(retry_after: nil, network_error: nil)
           if attempt >= config.max_attempts || !async_configured?
-            report_exhaustion(network_error)
+            @exhaustion_error = network_error || Axn::Webhooks::Error.new("outbound delivery exhausted for #{event} to #{url}")
             return fail!(terminal_message)
           end
 
@@ -119,15 +129,27 @@ module Axn
           end
         end
 
+        # Gated `on_failure` handler (registered above, at class-body level): fires on EVERY
+        # `fail!` (including the permanent-4xx branch in `#call`), but only reports when
+        # `retry_or_exhaust!`'s exhaustion branch actually set `@exhaustion_error` — a permanent-4xx
+        # `fail!` never sets it, so this is a no-op there.
+        def report_exhaustion_if_needed
+          return unless @exhaustion_error
+
+          report_exhaustion(@exhaustion_error)
+        end
+
         # Report ONCE at exhaustion via axn's configured reporter (Honeybadger at Teamshares),
         # WITHOUT raising — raising would trigger the adapter to retry the already-exhausted job.
         # `action:` must be the running INSTANCE (`self`), not the class — axn's own internal
         # callers always pass the instance (see executor.rb), and `on_exception` relies on
         # instance-only state (e.g. `action.result`) to enrich the report; the configured reporter
         # itself may also expect a real action instance. `report_exhaustion` is itself an instance
-        # method, so `self` here already IS that instance.
-        def report_exhaustion(network_error)
-          error = network_error || Axn::Webhooks::Error.new("outbound delivery exhausted for #{event} to #{url}")
+        # method, so `self` here already IS that instance. Called from `report_exhaustion_if_needed`
+        # (an `on_failure` callback), which runs AFTER axn has finalized `action.result` as a
+        # failure — see the `on_failure` doc comment above `retry_or_exhaust!` for why that ordering
+        # matters.
+        def report_exhaustion(error)
           Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt: })
         rescue StandardError => e
           Axn::Webhooks.swallow_soft_error("reporting outbound delivery exhaustion", exception: e)
