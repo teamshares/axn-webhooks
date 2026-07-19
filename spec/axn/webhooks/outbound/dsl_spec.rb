@@ -31,6 +31,16 @@ RSpec.describe "Axn::Webhooks.outbound" do
     expect(Axn::Webhooks::Outbound.config.wire_type(:lead_signed)).to eq("lead.signed")
   end
 
+  it "stringifies a non-String per-event wire type override (codex P2)" do
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      event :x, type: :sym_type
+    end
+    result = Axn::Webhooks::Outbound.config.wire_type(:x)
+    expect(result).to eq("sym_type")
+    expect(result).to be_a(String)
+  end
+
   it "falls back to the block-level `subscribers` resolver when an event has no `to:`" do
     Axn::Webhooks.outbound do
       sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"

@@ -144,3 +144,8 @@
   custom transport (e.g. Faraday-backed) may return a plain Hash with `"Retry-After"` or
   `"RETRY-AFTER"` — and HTTP header names are case-insensitive, so the previous exact-key lookup
   silently missed the server's requested delay on such transports and retried on backoff alone.
+- `Outbound::Config#wire_type` now stringifies a per-event `type:` override the same way it already
+  stringifies the default (event-name) branch. A non-String override (e.g. `event :invoice_paid,
+  type: :invoice_paid`) was previously returned unchanged, and `Emit` passes it straight through as
+  `event:` to `Deliver`, whose `expects :event, type: String` rejected it — so a Symbol (or other
+  non-String) `type:` override made the event undeliverable.

@@ -22,7 +22,7 @@ module Axn
         def events = @events.keys
 
         def wire_type(event)
-          fetch(event)[:type] || event.to_s
+          (fetch(event)[:type] || event).to_s
         end
 
         # A DECLARED per-event `to:` always wins, even when it resolves to zero targets — a static
