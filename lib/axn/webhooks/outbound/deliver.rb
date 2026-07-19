@@ -20,13 +20,24 @@ module Axn
         expects :attempt, type: Integer, default: 1
 
         def call
-          response = post
+          # Scoped deliberately to ONLY `post` (not the whole method): a network error talking to
+          # the receiver is a retryable delivery failure, but if `retry_or_exhaust!`'s own
+          # `call_async` raises while ENQUEUING the follow-up job (e.g. a Redis/Sidekiq outage),
+          # that must propagate as a loud exception — not get caught here and misinterpreted as
+          # another delivery network error, which would re-run retry_or_exhaust! a second time in
+          # the same attempt (a duplicate enqueue). Letting it propagate means the current job goes
+          # un-acked and the async adapter's own retry path handles the outage (at-least-once).
+          response = nil
+          begin
+            response = post
+          rescue *Transport::RETRYABLE_NETWORK_ERRORS => e
+            return retry_or_exhaust!(network_error: e)
+          end
+
           return if success?(response.status) # 2xx -> done
           return retry_or_exhaust!(retry_after: header_value(response.headers, "retry-after")) if retryable?(response.status)
 
           fail!("permanent delivery failure (HTTP #{response.status}) for #{event} to #{url}")
-        rescue *Transport::RETRYABLE_NETWORK_ERRORS => e
-          retry_or_exhaust!(network_error: e)
         end
 
         private

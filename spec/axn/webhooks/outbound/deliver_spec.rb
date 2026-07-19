@@ -146,6 +146,22 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     expect(described_class).to have_received(:call_async).with(hash_including(attempt: 2))
   end
 
+  it "propagates (does not swallow into a second reschedule) when call_async itself raises " \
+     "during enqueue, e.g. a Redis/Sidekiq outage" do
+    transport = fake_transport(ok(503))
+    declare!(transport:, backoff: ->(_n) { 60 })
+    configure_adapter!
+    allow(described_class).to receive(:call_async).and_raise(Timeout::Error)
+
+    result = described_class.call(**kwargs, attempt: 1)
+
+    # The enqueue failure must propagate as a loud exception outcome (un-acked job -> adapter
+    # retries) rather than being caught by the retryable-network rescue and retried again in the
+    # SAME attempt (which would be a duplicate enqueue attempt / quiet swallow).
+    expect(described_class).to have_received(:call_async).once
+    expect(result.outcome).to be_exception
+  end
+
   it "reports once and fails (no reschedule) when retries are exhausted" do
     transport = fake_transport(ok(500))
     declare!(transport:, max_attempts: 3)

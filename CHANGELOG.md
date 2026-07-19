@@ -56,6 +56,15 @@
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Fixed
+- `Outbound::Deliver#call`'s retryable-network rescue is now scoped to ONLY the `post` (HTTP) call,
+  not the whole method body. Previously the method-level `rescue *Transport::RETRYABLE_NETWORK_ERRORS`
+  also wrapped `retry_or_exhaust!`'s own `call_async` reschedule call — so if the async adapter
+  (e.g. Redis/Sidekiq) raised a `Timeout::Error`/`IOError` while ENQUEUING the follow-up job, that
+  enqueue failure was misinterpreted as another delivery network error and `retry_or_exhaust!` ran
+  a second time in the same attempt (a duplicate enqueue), instead of propagating. An enqueue
+  failure from `call_async` now always propagates as a loud exception outcome — the current job
+  goes un-acked and the async adapter's own retry path handles the outage (at-least-once), matching
+  the documented crash-safety-net contract for unexpected exceptions.
 - `Outbound::Config#targets_for` now actually invokes a per-event `to:` lambda
   (`event :x, to: ->(event){ [...] }`), arity-aware like the inbound `Resolvers.resolve` (a
   0-arity proc is called with no args, else called with the event). Previously `spec[:to]` being a
