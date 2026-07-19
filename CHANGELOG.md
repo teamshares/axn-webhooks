@@ -56,7 +56,13 @@
 - Removed unnecessary rubocop pragma from dispatch parse example.
 
 ### Fixed
-- `Outbound::Deliver#retry_or_exhaust!` no longer crashes the caller when a retryable failure
+- `Outbound::Config#targets_for` now actually invokes a per-event `to:` lambda
+  (`event :x, to: ->(event){ [...] }`), arity-aware like the inbound `Resolvers.resolve` (a
+  0-arity proc is called with no args, else called with the event). Previously `spec[:to]` being a
+  truthy `Proc` short-circuited `Array(list)`, wrapping the Proc itself in a single-element array
+  and handing it to `Deliver` as a bogus delivery `url` — the documented "`to:` accepts a static
+  Array OR a lambda" contract was silently broken. The block-level `subscribers` fallback is now
+  invoked the same arity-aware way for consistency (a `->(event){...}` still works as before).
   (5xx/429/network error) occurs with no async adapter configured. Previously it unconditionally
   called `self.class.call_async` to reschedule, which raises a `NotImplementedError` (a
   `ScriptError`, not rescued by axn's `StandardError`-only exception boundary) — escaping `Deliver`,

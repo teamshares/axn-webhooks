@@ -25,10 +25,14 @@ module Axn
           fetch(event)[:type] || event.to_s
         end
 
-        # Static Array `to:` wins; else the block-level `subscribers` resolver; else [].
+        # Per-event `to:` wins — a static Array as-is, or a lambda `->(event){…}` invoked
+        # (arity-aware, matching Resolvers.resolve); else the block-level `subscribers` resolver
+        # (also invoked arity-aware); else [].
         def targets_for(event)
           spec = fetch(event)
-          list = spec[:to] || @default_subscribers&.call(event) || []
+          raw = spec[:to]
+          raw = call_resolver(raw, event) if raw.respond_to?(:call)
+          list = raw || call_resolver(@default_subscribers, event) || []
           Array(list)
         end
 
@@ -39,6 +43,12 @@ module Axn
             raise Axn::Webhooks::Error,
                   "unknown outbound event #{event.inspect} (known: #{events.map(&:inspect).join(', ')})"
           end
+        end
+
+        def call_resolver(callable, event)
+          return nil if callable.nil?
+
+          callable.arity.zero? ? callable.call : callable.call(event)
         end
       end
     end

@@ -40,6 +40,25 @@ RSpec.describe "Axn::Webhooks.outbound" do
     expect(Axn::Webhooks::Outbound.config.targets_for(:lead_closed)).to eq(["https://resolved/lead_closed"])
   end
 
+  it "invokes a per-event `to:` lambda (arity-aware) instead of wrapping the Proc itself" do
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      event :lead_signed, to: ->(event) { ["https://u/#{event}"] }
+    end
+    expect(Axn::Webhooks::Outbound.config.targets_for(:lead_signed)).to eq(["https://u/lead_signed"])
+  end
+
+  it "still supports a static Array `to:` alongside a per-event lambda on another event" do
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      event :lead_signed, to: ["https://os.example/hook"]
+      event :lead_closed, to: ->(event) { ["https://u/#{event}"] }
+    end
+    config = Axn::Webhooks::Outbound.config
+    expect(config.targets_for(:lead_signed)).to eq(["https://os.example/hook"])
+    expect(config.targets_for(:lead_closed)).to eq(["https://u/lead_closed"])
+  end
+
   it "raises loudly on an unknown event, listing the known ones" do
     Axn::Webhooks.outbound do
       sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
