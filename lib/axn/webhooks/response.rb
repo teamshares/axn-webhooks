@@ -32,6 +32,11 @@ module Axn
         new(status:, body:, headers: { "content-type" => "application/xml" }.merge(headers))
       end
 
+      def self.service_unavailable(retry_after: nil)
+        headers = retry_after ? { "retry-after" => retry_after.to_s } : {}
+        new(status: 503, headers:)
+      end
+
       def ==(other)
         other.is_a?(self.class) && status == other.status && body == other.body && headers == other.headers
       end
