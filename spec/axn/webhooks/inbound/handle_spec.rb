@@ -111,9 +111,10 @@ end
 RSpec.describe "Endpoint#to_response retry_later" do
   after { Axn::Webhooks::Inbound.reset! }
 
-  it "maps a handler retry_later! to 503 + Retry-After" do
+  it "maps a handler retry_later! to 503 + Retry-After, without reporting via on_exception " \
+     "(the no-paging guarantee, using the recommended Axn::Webhooks::Handler include)" do
     stub_const("DeferHandler", Class.new do
-      include Axn
+      include Axn::Webhooks::Handler
 
       expects :event, allow_blank: true
       def call = Axn::Webhooks.retry_later!(after: 60)
@@ -124,14 +125,17 @@ RSpec.describe "Endpoint#to_response retry_later" do
       dispatch to: "DeferHandler", mode: :sync
     end
 
+    expect(Axn.config).not_to receive(:on_exception)
+
     response = Axn::Webhooks::Inbound[:vendor].to_response(Axn::Webhooks::Request.new(raw_body: "{}"))
     expect(response.status).to eq(503)
     expect(response.headers["retry-after"]).to eq("60")
   end
 
-  it "maps a bare handler retry_later! (no after:) to 503 with no Retry-After header" do
+  it "maps a bare handler retry_later! (no after:) to 503 with no Retry-After header, " \
+     "without reporting via on_exception" do
     stub_const("BareDeferHandler", Class.new do
-      include Axn
+      include Axn::Webhooks::Handler
 
       expects :event, allow_blank: true
       def call = Axn::Webhooks.retry_later!
@@ -142,8 +146,34 @@ RSpec.describe "Endpoint#to_response retry_later" do
       dispatch to: "BareDeferHandler", mode: :sync
     end
 
+    expect(Axn.config).not_to receive(:on_exception)
+
     response = Axn::Webhooks::Inbound[:vendor].to_response(Axn::Webhooks::Request.new(raw_body: "{}"))
     expect(response.status).to eq(503)
     expect(response.headers).not_to have_key("retry-after")
+  end
+
+  it "still 503s a plain include-Axn handler's retry_later!, but pages via on_exception first " \
+     "(regression proof/contrast: this is exactly why Axn::Webhooks::Handler, or a manual " \
+     "`fails_on Axn::Webhooks::RetryLater`, is the recommended pattern)" do
+    stub_const("PlainAxnDeferHandler", Class.new do
+      include Axn # deliberately NOT Axn::Webhooks::Handler — no fails_on RetryLater
+
+      expects :event, allow_blank: true
+      def call = Axn::Webhooks.retry_later!(after: 60)
+    end)
+
+    Axn::Webhooks.inbound(:vendor) do
+      verify { |_req| true }
+      dispatch to: "PlainAxnDeferHandler", mode: :sync
+    end
+
+    expect(Axn.config).to receive(:on_exception).once
+
+    response = Axn::Webhooks::Inbound[:vendor].to_response(Axn::Webhooks::Request.new(raw_body: "{}"))
+    # The 503 mapping still works (Dispatch's rescue catches the re-raised RetryLater regardless
+    # of which axn bucket classified it) — only the paging behavior differs.
+    expect(response.status).to eq(503)
+    expect(response.headers["retry-after"]).to eq("60")
   end
 end

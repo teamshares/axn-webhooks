@@ -327,8 +327,8 @@ A handler on the **inbound** side can ask the sender to redeliver later without 
 of the outbound engine above:
 
 ```ruby
-class Actions::HandleWebhook
-  include Axn
+class HandleWebhook
+  include Axn::Webhooks::Handler
   def call
     Axn::Webhooks.retry_later!(after: 30) unless dependency_ready?  # => 503, Retry-After: 30
   end
@@ -340,6 +340,14 @@ helper) **always** maps to a **503** — `after:` only controls whether the `Ret
 present, distinct from a crash (which is a reported plain 500). This affordance requires **synchronous**
 dispatch: it's rescued around the handler's own `call!`, so a `retry_later!` raised inside an async
 worker is just a worker exception, unrelated to the HTTP response already sent.
+
+**"Without paging" requires `include Axn::Webhooks::Handler`** (in place of plain `include Axn`) —
+it's a thin concern that includes `Axn` and declares `fails_on Axn::Webhooks::RetryLater`, so a
+deferral settles as a quiet failure instead of an unhandled exception. Without it (or an equivalent
+manual `fails_on Axn::Webhooks::RetryLater`), a plain `include Axn` handler calling `retry_later!`
+still 503s the response (`Dispatch` rescues the exception either way), but it **also** reports to
+`Axn.config.on_exception` (e.g. Honeybadger) on every single deferral — the opposite of the
+"without paging" promise.
 
 ### Routing: sender-owned config today
 

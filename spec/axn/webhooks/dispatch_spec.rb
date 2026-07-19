@@ -105,13 +105,16 @@ end
 RSpec.describe "Axn::Webhooks::Dispatch retry_later" do
   after { Axn::Webhooks::Inbound.reset! }
 
-  it "catches a handler RetryLater as a non-exception result exposing retry_after" do
+  it "catches a handler RetryLater as a non-exception (failure) result exposing retry_after, " \
+     "and does NOT report via on_exception (the no-paging guarantee)" do
     stub_const("RetryingHandler", Class.new do
-      include Axn
+      include Axn::Webhooks::Handler
 
       expects :event, allow_blank: true
       def call = Axn::Webhooks.retry_later!(after: 45)
     end)
+
+    expect(Axn.config).not_to receive(:on_exception)
 
     router = Axn::Webhooks::Inbound::Router.new(to: "RetryingHandler")
     result = Axn::Webhooks::Dispatch.call(
@@ -125,13 +128,16 @@ RSpec.describe "Axn::Webhooks::Dispatch retry_later" do
     expect(result.retry_after).to eq(45)
   end
 
-  it "catches a bare handler RetryLater (no after:) as a non-exception result with retry_later true and retry_after nil" do
+  it "catches a bare handler RetryLater (no after:) as a non-exception result with retry_later true " \
+     "and retry_after nil, and does NOT report via on_exception" do
     stub_const("BareRetryingHandler", Class.new do
-      include Axn
+      include Axn::Webhooks::Handler
 
       expects :event, allow_blank: true
       def call = Axn::Webhooks.retry_later!
     end)
+
+    expect(Axn.config).not_to receive(:on_exception)
 
     router = Axn::Webhooks::Inbound::Router.new(to: "BareRetryingHandler")
     result = Axn::Webhooks::Dispatch.call(
@@ -143,5 +149,31 @@ RSpec.describe "Axn::Webhooks::Dispatch retry_later" do
     expect(result.outcome).not_to be_exception
     expect(result.retry_later).to be(true)
     expect(result.retry_after).to be_nil
+  end
+
+  it "still catches (and does NOT page for) a plain include-Axn handler's RetryLater at the Dispatch " \
+     "boundary via call!'s re-raise, but the handler's OWN axn boundary reports it to on_exception " \
+     "first (regression proof: without Axn::Webhooks::Handler's fails_on, retry_later! pages)" do
+    stub_const("PlainAxnRetryingHandler", Class.new do
+      include Axn # deliberately NOT Axn::Webhooks::Handler — no fails_on RetryLater
+
+      expects :event, allow_blank: true
+      def call = Axn::Webhooks.retry_later!(after: 45)
+    end)
+
+    expect(Axn.config).to receive(:on_exception).once
+
+    router = Axn::Webhooks::Inbound::Router.new(to: "PlainAxnRetryingHandler")
+    result = Axn::Webhooks::Dispatch.call(
+      request: Axn::Webhooks::Request.new(raw_body: "{}"),
+      router:, parse: Axn::Webhooks::Parsers.build(:json), mode: :sync
+    )
+
+    # Dispatch's own `rescue Axn::Webhooks::RetryLater` still catches the re-raised exception
+    # (call! re-raises result.exception regardless of which bucket classified it), so the
+    # 503 mapping is unaffected — only the paging behavior differs.
+    expect(result).to be_ok
+    expect(result.retry_later).to be(true)
+    expect(result.retry_after).to eq(45)
   end
 end

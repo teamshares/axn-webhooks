@@ -4,6 +4,7 @@ require "axn"
 require "active_support/deprecation"
 
 require_relative "webhooks/errors"
+require_relative "webhooks/handler"
 require_relative "webhooks/version"
 require_relative "webhooks/request"
 require_relative "webhooks/response"

@@ -154,8 +154,11 @@ the adapter does **not** also retry — no double-counting.)
 codes: verify mismatch → 401 (permanent), handler business `fail!` → 2xx (delivered), missing
 handler / handler crash → 5xx (retryable "deploy-grace" window). This design adds one small inbound
 affordance so a receiver can request redelivery *without* paging — a `retry_later!`-style hook
-mapping to **503 + `Retry-After`** (distinct from a crash, which is a reported 5xx). This inbound
-addition is **in scope for this ticket**; the outbound engine honors 503 regardless of who produced it.
+mapping to **503 + `Retry-After`** (distinct from a crash, which is a reported 5xx). Handlers get the
+"without paging" half by including `Axn::Webhooks::Handler` (or a manual
+`fails_on Axn::Webhooks::RetryLater`) so the deferral settles as a quiet failure instead of an
+unhandled exception reported to `on_exception`. This inbound addition is **in scope for this
+ticket**; the outbound engine honors 503 regardless of who produced it.
 
 ### 5. Observability
 
