@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- `async(call, **opts)` / `sync(call, **opts)` dispatch-map DSL sugar — terse builders for a
+  per-route entry: `async("H")` == `{ call: "H", async: true }`, `sync("H")` == `{ call: "H",
+  async: false }`. Callable directly inside a `dispatch to: { … }` map (the `inbound` block is
+  instance_exec'd against the DSL) and compose with a `with:` extractor. Pure sugar over the
+  existing `async:` entry — no change to resolution.
 - Per-route sync/async on one endpoint (interaction-platform pattern) — a dispatch-map Hash entry
   accepts an optional `async:` boolean (`{ call: "Handler", async: true }`), so one endpoint under
   one `respond` block can multiplex async-ack routes and sync-body routes (Slack `view_submission`

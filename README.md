@@ -169,6 +169,37 @@ A custom `respond` block reads the handler's own result, so those hooks always r
 can't read a result you enqueued) regardless of adapter config — and declaring both an explicit
 `mode: :async` and a custom `respond` raises at registration time.
 
+#### Per-route sync/async on one endpoint
+
+`mode:` is endpoint-wide, but a single fixed URL sometimes needs both disciplines per message —
+the interaction-platform pattern (Slack, Discord, Telegram) multiplexes a synchronous body and
+ack-then-async on one Request URL. Set a per-route `async:` on any explicit-map entry to override
+just that route; the helpers `async(...)` / `sync(...)` build the entry for you (they're plain DSL
+methods, so they're callable right inside the `to:` map):
+
+```ruby
+# Slack interactivity: one URL, one respond block, per-message discipline.
+Axn::Webhooks.inbound :slack do
+  verify :hmac, secret: ENV.fetch("SLACK_SIGNING_SECRET"), signing_string: ->(r) { "v0:#{r.header('X-Slack-Request-Timestamp')}:#{r.raw_body}" }
+  dispatch on: ->(e) { e["type"] },
+           to: {
+             "view_submission" => "Actions::Slack::HandleViewSubmission",       # sync (respond default): returns a response_action body
+             "block_actions"   => async("Actions::Slack::HandleBlockActions"),  # ack now, run async
+           }
+  respond { |result| json(result.response_action) }  # sync route renders JSON; async route auto-acks (bare 2xx)
+end
+```
+
+`async("H")` is sugar for `{ call: "H", async: true }` and `sync("H")` for `{ call: "H", async: false }`;
+both pass extra kwargs through, so they compose with a `with:` extractor: `async("H", with: ->(e) { … })`.
+
+The per-route flag is the most specific rung of the mode decision — precedence, most specific first:
+the entry's `async:`, then an explicit endpoint `mode:`, then a declared `respond` (which keeps sync
+as the per-route **default**), then `:auto` adapter detection. So on a `respond` endpoint a route is
+sync unless you mark it `async` — a route that acks-async simply produces no result and the `respond`
+block acks it (nil result → bare 2xx), while a sync route's result is rendered. A route marked
+`async` whose handler has no adapter is reported as an exception (the same guard as `mode: :async`).
+
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
 
 ### Mounting
