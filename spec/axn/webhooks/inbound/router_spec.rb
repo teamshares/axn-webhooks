@@ -10,7 +10,7 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
 
   it "resolves a single string handler with the whole event" do
     router = described_class.new(to: "HandleWebhook")
-    expect(router.resolve({ "any" => 1 })).to eq([HandleWebhook, { event: { "any" => 1 } }])
+    expect(router.resolve({ "any" => 1 })).to eq([HandleWebhook, { event: { "any" => 1 } }, nil])
   end
 
   it "resolves a keyed handler from an explicit map" do
@@ -19,7 +19,7 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
       to: { "connection.updated" => "Actions::Codat::ConnectionUpdated" },
     )
     expect(router.resolve({ "eventType" => "connection.updated" }))
-      .to eq([Actions::Codat::ConnectionUpdated, { event: { "eventType" => "connection.updated" } }])
+      .to eq([Actions::Codat::ConnectionUpdated, { event: { "eventType" => "connection.updated" } }, nil])
   end
 
   it "extracts scalar handler args via a with: proc" do
@@ -29,7 +29,7 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
                               with: ->(e) { { payment_order_id: e.dig("data", "id") } } } },
     )
     event = { "event" => "reconciled", "data" => { "id" => 42 } }
-    expect(router.resolve(event)).to eq([PaymentOrders::DispatchCompleted, { payment_order_id: 42 }])
+    expect(router.resolve(event)).to eq([PaymentOrders::DispatchCompleted, { payment_order_id: 42 }, nil])
   end
 
   it "derives the class from the key via convention (default transform)" do
@@ -76,5 +76,52 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
 
   it "requires a to: target" do
     expect { described_class.new(to: nil) }.to raise_error(Axn::Webhooks::Error, /to:/)
+  end
+
+  it "surfaces async: true from a map entry as the third tuple element" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "block_actions" => { call: "HandleWebhook", async: true } },
+    )
+    expect(router.resolve({ "type" => "block_actions" }))
+      .to eq([HandleWebhook, { event: { "type" => "block_actions" } }, true])
+  end
+
+  it "surfaces async: false from a map entry as the third tuple element" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "view_submission" => { call: "HandleWebhook", async: false } },
+    )
+    expect(router.resolve({ "type" => "view_submission" }))
+      .to eq([HandleWebhook, { event: { "type" => "view_submission" } }, false])
+  end
+
+  it "combines async: with a with: extractor on the same entry" do
+    router = described_class.new(
+      on: ->(e) { e["event"] },
+      to: { "reconciled" => { call: "PaymentOrders::DispatchCompleted",
+                              with: ->(e) { { payment_order_id: e.dig("data", "id") } },
+                              async: true } },
+    )
+    event = { "event" => "reconciled", "data" => { "id" => 42 } }
+    expect(router.resolve(event)).to eq([PaymentOrders::DispatchCompleted, { payment_order_id: 42 }, true])
+  end
+
+  it "treats an explicit async: nil as no-opinion (not an error)" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "view_submission" => { call: "HandleWebhook", async: nil } },
+    )
+    expect(router.resolve({ "type" => "view_submission" }))
+      .to eq([HandleWebhook, { event: { "type" => "view_submission" } }, nil])
+  end
+
+  it "raises for a non-boolean async: on an entry (loud)" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "block_actions" => { call: "HandleWebhook", async: :yes } },
+    )
+    expect { router.resolve({ "type" => "block_actions" }) }
+      .to raise_error(Axn::Webhooks::Error, /async:/)
   end
 end

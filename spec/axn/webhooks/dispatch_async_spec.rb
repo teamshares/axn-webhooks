@@ -128,4 +128,68 @@ RSpec.describe "Axn::Webhooks::Dispatch async resolution" do
       expect(result.handler_result).to be_ok
     end
   end
+
+  describe "per-route async: flag (PRO-2952)" do
+    it "an entry with async: true enqueues even when respond_declared forces the endpoint sync" do
+      router = Axn::Webhooks::Inbound::Router.new(
+        on: ->(e) { e["type"] },
+        to: { "block_actions" => { call: "AsyncHandler", async: true } },
+      )
+      result = Axn::Webhooks::Dispatch.call(
+        request: request('{"type":"block_actions"}'), router:, parse: json_parse, respond_declared: true,
+      )
+      expect(result).to be_ok
+      expect(result.handler_result).to be_nil
+      expect(AsyncHandler.calls).to eq([{ event: { "type" => "block_actions" } }])
+    end
+
+    it "an entry with async: true enqueues even when endpoint mode: :sync" do
+      router = Axn::Webhooks::Inbound::Router.new(
+        on: ->(e) { e["type"] },
+        to: { "block_actions" => { call: "AsyncHandler", async: true } },
+      )
+      result = Axn::Webhooks::Dispatch.call(
+        request: request('{"type":"block_actions"}'), router:, parse: json_parse, mode: :sync,
+      )
+      expect(result).to be_ok
+      expect(result.handler_result).to be_nil
+      expect(AsyncHandler.calls).to eq([{ event: { "type" => "block_actions" } }])
+    end
+
+    it "an entry with async: false runs sync even when endpoint mode: :async" do
+      router = Axn::Webhooks::Inbound::Router.new(
+        on: ->(e) { e["type"] },
+        to: { "view_submission" => { call: "AdapterHandler", async: false } },
+      )
+      result = Axn::Webhooks::Dispatch.call(
+        request: request('{"type":"view_submission"}'), router:, parse: json_parse, mode: :async,
+      )
+      expect(result.handler_result).to be_ok
+      expect(AdapterHandler).not_to have_received(:call_async)
+    end
+
+    it "an entry with no async: still honors the respond_declared sync default" do
+      router = Axn::Webhooks::Inbound::Router.new(
+        on: ->(e) { e["type"] },
+        to: { "view_submission" => { call: "AdapterHandler" } },
+      )
+      result = Axn::Webhooks::Dispatch.call(
+        request: request('{"type":"view_submission"}'), router:, parse: json_parse, respond_declared: true,
+      )
+      expect(result.handler_result).to be_ok
+      expect(AdapterHandler).not_to have_received(:call_async)
+    end
+
+    it "async: true on an adapter-less Axn handler settles as a reported exception" do
+      router = Axn::Webhooks::Inbound::Router.new(
+        on: ->(e) { e["type"] },
+        to: { "block_actions" => { call: "SyncHandler", async: true } },
+      )
+      result = Axn::Webhooks::Dispatch.call(
+        request: request('{"type":"block_actions"}'), router:, parse: json_parse, respond_declared: true,
+      )
+      expect(result.outcome).to be_exception
+      expect(result.exception).to be_a(Axn::Webhooks::Error)
+    end
+  end
 end

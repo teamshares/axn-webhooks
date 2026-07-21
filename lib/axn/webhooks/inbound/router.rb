@@ -18,7 +18,7 @@ module Axn
           @via = via
         end
 
-        # → [handler_class, kwargs] for a matched handler, or :ack.
+        # → [handler_class, kwargs, route_async] for a matched handler, or :ack.
         def resolve(event)
           return handler_for(@to, event) if @on.nil?
 
@@ -35,15 +35,15 @@ module Axn
 
         def resolve_by_convention(key, event)
           transform = @via || method(:default_transform)
-          [constantize("#{@to}::#{transform.call(key)}"), { event: }]
+          [constantize("#{@to}::#{transform.call(key)}"), { event: }, nil]
         end
 
         def handler_for(entry, event)
           case entry
-          when String then [constantize(entry), { event: }]
+          when String then [constantize(entry), { event: }, nil]
           when Hash
             args = entry.key?(:with) ? entry.fetch(:with).call(event) : { event: }
-            [constantize(entry.fetch(:call)), args]
+            [constantize(entry.fetch(:call)), args, route_async(entry)]
           else
             raise Axn::Webhooks::Error, "invalid dispatch target: #{entry.inspect}"
           end
@@ -57,6 +57,17 @@ module Axn
             @otherwise.call(event) # user callable (e.g. alerting); return value ignored
             :ack
           end
+        end
+
+        # Optional per-route sync/async opt-out from a map entry: true=async, false=sync,
+        # absent=nil (no opinion — Dispatch falls through to endpoint mode / respond default).
+        def route_async(entry)
+          return nil unless entry.key?(:async)
+
+          value = entry.fetch(:async)
+          return value if [true, false, nil].include?(value)
+
+          raise Axn::Webhooks::Error, "dispatch entry `async:` must be true or false (got #{value.inspect})"
         end
 
         def constantize(name) = Object.const_get(name)
