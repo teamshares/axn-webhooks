@@ -23,6 +23,14 @@ RSpec.describe "Axn::Webhooks::Inbound dispatch-map async/sync sugar" do
       expect(dsl.async(klass)).to eq({ call: klass, async: true })
       expect(dsl.sync(klass)).to eq({ call: klass, async: false })
     end
+
+    # The helper's name IS the contract: async() must force async, sync() must force sync, and the
+    # positional handler must win — even when a splatted shared options hash carries :async or :call.
+    it "does not let splatted opts override the fixed mode or the positional handler" do
+      shared = { with: (extractor = ->(e) { e }), async: false, call: "WrongHandler" }
+      expect(dsl.async("RightHandler", **shared)).to eq({ call: "RightHandler", async: true, with: extractor })
+      expect(dsl.sync("RightHandler", **shared)).to eq({ call: "RightHandler", async: false, with: extractor })
+    end
   end
 
   describe "used inside a real inbound block (instance_exec context)" do
