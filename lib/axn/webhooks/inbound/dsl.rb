@@ -40,6 +40,15 @@ module Axn
         def params       = Resolvers.params
         def url          = Resolvers.url
 
+        # Dispatch-map sugar: `async("H")` == `{ call: "H", async: true }`; `sync` forces sync.
+        # Callable inside a `dispatch to: { … }` map because the `inbound` block is instance_exec'd
+        # against this DSL. Extra kwargs (e.g. `with:`) pass through: `async("H", with: ->(e){ … })`.
+        # `**opts` is spread FIRST so the fixed mode and the positional handler always win — a
+        # splatted shared options hash carrying `:async`/`:call` can never silently flip the mode
+        # or retarget the handler (the helper's name is its contract).
+        def async(call, **opts) = { **opts, call:, async: true }
+        def sync(call, **opts)  = { **opts, call:, async: false }
+
         # Internal: build the verifier callable from the captured declaration.
         # For challenge-only endpoints (no dispatch, no verify declared), return a no-op verifier
         # that always succeeds — a challenge-only endpoint just handshakes the GET and 200-acks any

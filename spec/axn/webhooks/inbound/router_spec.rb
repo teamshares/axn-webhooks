@@ -13,6 +13,39 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
     expect(router.resolve({ "any" => 1 })).to eq([HandleWebhook, { event: { "any" => 1 } }, nil])
   end
 
+  it "resolves a single Class handler target (not just a string name)" do
+    router = described_class.new(to: HandleWebhook)
+    expect(router.resolve({ "any" => 1 })).to eq([HandleWebhook, { event: { "any" => 1 } }, nil])
+  end
+
+  it "resolves a Class handler from an explicit map entry" do
+    router = described_class.new(on: ->(e) { e["eventType"] }, to: { "connection.updated" => Actions::Codat::ConnectionUpdated })
+    expect(router.resolve({ "eventType" => "connection.updated" }))
+      .to eq([Actions::Codat::ConnectionUpdated, { event: { "eventType" => "connection.updated" } }, nil])
+  end
+
+  it "resolves a Class in the call: slot of a Hash entry (with async: sugar shape)" do
+    router = described_class.new(on: ->(e) { e["type"] }, to: { "block_actions" => { call: HandleWebhook, async: true } })
+    expect(router.resolve({ "type" => "block_actions" })).to eq([HandleWebhook, { event: { "type" => "block_actions" } }, true])
+  end
+
+  it "re-resolves a named Class target by name on every call (reload-safe, not a captured object)" do
+    stub_const("Reloadable", Class.new)
+    original = Reloadable
+    router = described_class.new(to: Reloadable)
+    expect(router.resolve({}).first).to equal(original)
+
+    stub_const("Reloadable", Class.new) # simulate a Zeitwerk code reload swapping the constant
+    expect(router.resolve({}).first).to equal(Reloadable)
+    expect(router.resolve({}).first).not_to equal(original)
+  end
+
+  it "uses an anonymous Class target as-is (no name to resolve by)" do
+    klass = Class.new
+    router = described_class.new(to: klass)
+    expect(router.resolve({}).first).to equal(klass)
+  end
+
   it "resolves a keyed handler from an explicit map" do
     router = described_class.new(
       on: ->(e) { e["eventType"] },

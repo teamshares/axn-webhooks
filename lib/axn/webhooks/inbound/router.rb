@@ -40,7 +40,7 @@ module Axn
 
         def handler_for(entry, event)
           case entry
-          when String then [constantize(entry), { event: }, nil]
+          when String, Module then [constantize(entry), { event: }, nil]
           when Hash
             args = entry.key?(:with) ? entry.fetch(:with).call(event) : { event: }
             [constantize(entry.fetch(:call)), args, route_async(entry)]
@@ -70,7 +70,15 @@ module Axn
           raise Axn::Webhooks::Error, "dispatch entry `async:` must be true or false (got #{value.inspect})"
         end
 
-        def constantize(name) = Object.const_get(name)
+        # Accepts a class-name String (resolved late) or a Class/Module target. A named Module is
+        # reduced to its name and re-resolved via const_get on EVERY call, so a class object passed
+        # at declaration time stays reload-safe under Rails/Zeitwerk (a captured object would go stale
+        # when the constant is reassigned on reload). An anonymous class (name.nil?) has nothing to
+        # resolve by, so it's used as-is.
+        def constantize(name)
+          name = name.name if name.is_a?(Module) && name.name
+          name.is_a?(Module) ? name : Object.const_get(name)
+        end
 
         def default_transform(key) = key.to_s.split(/[._]/).reject(&:empty?).map(&:capitalize).join
       end
