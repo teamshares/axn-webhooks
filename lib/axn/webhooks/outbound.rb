@@ -38,14 +38,5 @@ module Axn
     def self.emit(event, data: {})
       Outbound::Emit.call!(event:, data:)
     end
-
-    # Local stand-in for the future promoted axn-core soft-error helper (see the outbound spec's
-    # Dependencies): logs a swallowed exception, but raises in development when configured.
-    def self.swallow_soft_error(desc, exception:)
-      raise exception if Axn.config.raise_piping_errors_in_dev && Axn.config.env.development?
-
-      Axn.config.logger.warn("[axn-webhooks] ignoring error while #{desc}: #{exception.class}: #{exception.message}")
-      nil
-    end
   end
 end

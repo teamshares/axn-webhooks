@@ -125,33 +125,4 @@ RSpec.describe "Axn::Webhooks.outbound" do
       expect(Axn::Webhooks::Outbound.config.transport).to equal(custom_transport)
     end
   end
-
-  describe "Axn::Webhooks.swallow_soft_error" do
-    let(:exception) { RuntimeError.new("boom") }
-
-    it "swallows the error, logs a warning, and returns nil when not raising-in-dev" do
-      allow(Axn.config).to receive(:raise_piping_errors_in_dev).and_return(false)
-      expect(Axn.config.logger).to receive(:warn).with(/doing the thing.*RuntimeError.*boom/m)
-
-      result = Axn::Webhooks.swallow_soft_error("doing the thing", exception:)
-      expect(result).to be_nil
-    end
-
-    it "re-raises when raise_piping_errors_in_dev is set AND env is development" do
-      allow(Axn.config).to receive(:raise_piping_errors_in_dev).and_return(true)
-      allow(Axn.config).to receive(:env).and_return(ActiveSupport::StringInquirer.new("development"))
-
-      expect { Axn::Webhooks.swallow_soft_error("doing the thing", exception:) }
-        .to raise_error(exception)
-    end
-
-    it "does not raise when raise_piping_errors_in_dev is set but env is NOT development" do
-      allow(Axn.config).to receive(:raise_piping_errors_in_dev).and_return(true)
-      allow(Axn.config).to receive(:env).and_return(ActiveSupport::StringInquirer.new("production"))
-      expect(Axn.config.logger).to receive(:warn)
-
-      result = Axn::Webhooks.swallow_soft_error("doing the thing", exception:)
-      expect(result).to be_nil
-    end
-  end
 end
