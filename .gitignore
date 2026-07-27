@@ -15,3 +15,7 @@ yarn.lock
 # Bundler --path installs (CI installs gems here; never commit or lint them)
 /vendor/
 spec_rails/dummy_app/vendor/
+
+# Logs: `rake spec_rails` writes the dummy app's log/test.log; /log/ also catches local tooling.
+/log/
+spec_rails/dummy_app/log/
