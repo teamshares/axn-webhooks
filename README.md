@@ -69,8 +69,11 @@ result.ok?  # signature valid?
 
 Add `dispatch` to route the (verified, parsed) event to a handler Axn. The body is parsed as
 JSON by default (string keys) — pass `parse:` for other bodies. Handlers receive the whole
-event as `event:`, or scalar args via a `with:` extractor. Handler targets are class-name
-strings (resolved at request time), not constants.
+event as `event:`, or scalar args via a `with:` extractor. A handler target may be a class-name
+**string** or the **class itself** (`"Actions::Codat::ConnectionUpdated"` or
+`Actions::Codat::ConnectionUpdated`) — both resolve the constant lazily at request time, so either
+form stays reload-safe under Rails/Zeitwerk. Strings are the safe default when declaring endpoints in
+an initializer, since they never force the handler to be autoloadable at boot.
 
 ```ruby
 Axn::Webhooks.inbound :codat do

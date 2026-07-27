@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- Dispatch handler targets now accept the **class itself**, not only a class-name string — `to: Foo`,
+  `to: { "k" => Foo }`, and `async(Foo)`/`sync(Foo)` all work alongside the string forms. A named
+  class is reduced to its name and re-resolved via `const_get` on every request, so a class object
+  passed at declaration time stays reload-safe under Rails/Zeitwerk (no captured-then-stale object);
+  an anonymous class is used as-is. Strings remain the recommended default in initializers (they never
+  force the handler to be autoloadable at boot).
 - `async(call, **opts)` / `sync(call, **opts)` dispatch-map DSL sugar — terse builders for a
   per-route entry: `async("H")` == `{ call: "H", async: true }`, `sync("H")` == `{ call: "H",
   async: false }`. Callable directly inside a `dispatch to: { … }` map (the `inbound` block is
