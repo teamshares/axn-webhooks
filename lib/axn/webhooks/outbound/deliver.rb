@@ -150,9 +150,13 @@ module Axn
         # failure — see the `on_failure` doc comment above `retry_or_exhaust!` for why that ordering
         # matters.
         def report_exhaustion(error)
-          Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt: })
-        rescue StandardError => e
-          Axn::Webhooks.swallow_soft_error("reporting outbound delivery exhaustion", exception: e)
+          # The reporter itself may throw; guard it best-effort (logs+swallows in prod/test, re-raises
+          # in dev only when Axn.config.best_effort_raises_in_dev) so a broken reporter never turns
+          # exhaustion into a raise the async adapter would retry. `action: self` routes the warn to
+          # the running instance, matching axn's own internal best_effort callers.
+          Axn::Extensions.best_effort("reporting outbound delivery exhaustion", action: self) do
+            Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt: })
+          end
         end
       end
     end
