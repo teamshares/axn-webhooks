@@ -69,6 +69,11 @@
 - `dispatch mode:` — the async seam, resolved dynamically: an explicit `:async` delegates to the handler's own `.call_async` (inheriting whatever axn async adapter the app configured — never branches on `:sidekiq`/`:active_job`), an explicit `:sync` runs inline, and the default (`:auto`) runs **async when an adapter is configured for the handler, else sync** — except a custom `respond` (a result-returning hook) always forces sync. An explicit `mode: :async` + custom `respond` is rejected at `inbound` registration time (you can't read a handler result you enqueued). Dispatching `:async` against a handler with no adapter configured (explicitly disabled or never set) is a clean, reported `Axn::Webhooks::Error` (500-bound) rather than an uncaught `NotImplementedError` escaping the axn boundary; adapter presence is a truthiness check, so an explicitly-disabled handler (`_async_adapter == false`) is correctly treated as unconfigured and runs sync under `mode: :auto`.
 
 ### Changed
+- The packaged gem now ships an allowlist of paths (`lib/`, `README.md`, `CHANGELOG.md`,
+  `LICENSE.txt`, and `AGENTS-consuming.md` if ever written) rather than filtering a denylist. Dev
+  artifacts that previously rode along — `AGENTS.md`, the `CLAUDE.md` symlink, and `Rakefile` — are
+  no longer in the released `.gem`; nothing under `lib/` changed, so runtime behavior is unaffected.
+  Matches the shared convention in axn core, where a growing exclude list kept leaking new dev files.
 - Added `rack` (`>= 3.0`, `< 4`) as a runtime dependency. The gem requires Rack 3 (`Response#to_rack`'s
   lowercase header keys are required by Rack 3's SPEC), which means Rails 7.1+ (the first Rails
   whose actionpack allows Rack 3); Rails 7.0 (Rack 2 only) is not supported.
