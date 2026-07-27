@@ -17,6 +17,12 @@ RSpec.describe "Axn::Webhooks::Inbound dispatch-map async/sync sugar" do
       expect(dsl.async("Handler", with: extractor)).to eq({ call: "Handler", async: true, with: extractor })
       expect(dsl.sync("Handler", with: extractor)).to eq({ call: "Handler", async: false, with: extractor })
     end
+
+    it "accepts a Class in the call slot (the Router resolves it at request time)" do
+      klass = Class.new
+      expect(dsl.async(klass)).to eq({ call: klass, async: true })
+      expect(dsl.sync(klass)).to eq({ call: klass, async: false })
+    end
   end
 
   describe "used inside a real inbound block (instance_exec context)" do
