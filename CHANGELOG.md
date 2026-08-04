@@ -113,7 +113,7 @@
   `ScriptError`, not rescued by axn's `StandardError`-only exception boundary) — escaping `Deliver`,
   escaping `Outbound::Emit`'s per-target fan-out loop, and aborting delivery to any remaining
   targets. `Deliver` now checks adapter presence first (mirroring inbound `Dispatch`'s own
-  `self.class._async_adapter` / `Axn.config._default_async_adapter` check, never branching on
+  `self.class._async_adapter` / `Axn.config.default_async?` check, never branching on
   adapter type): with no adapter configured, a retryable failure is now treated like an exhausted
   retry budget — reported once via `Axn.config.on_exception`, then `fail!`s quietly — matching the
   documented best-effort, no-cross-process-retries promise of the synchronous fallback path.
