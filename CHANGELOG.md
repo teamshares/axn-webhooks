@@ -74,7 +74,14 @@
   is inherited). `Axn::Error` is a marker module rather than a base class, so the hierarchy is
   unchanged: `Error` is still a plain `StandardError`, nothing gains ancestry, and every existing
   `rescue Axn::Webhooks::Error` / `rescue Axn::Webhooks::RetryLater` behaves exactly as before.
-  Requires an axn that provides `Axn::Error`.
+- The `axn` dependency floor is now `>= 0.1.0-alpha.5` (was `>= 0.1.0-alpha.4.3`) — the first release
+  carrying the three axn APIs this gem had been tracking off `main`: `Axn::Error`,
+  `Axn.config.default_async?`, and `Axn::Extensions.best_effort`. `Axn::Error` in particular is a
+  load-time dependency (`Axn::Webhooks::Error` includes it), so an older axn raised
+  `uninitialized constant Axn::Error` while requiring the gem rather than failing lazily. The
+  development `Gemfile`'s temporary `github: "teamshares/axn", branch: "main"` pin is dropped
+  accordingly (both the gem's own Gemfile and `spec_rails/dummy_app`'s); axn now resolves from
+  RubyGems.
 - The packaged gem now ships an allowlist of paths (`lib/`, `README.md`, `CHANGELOG.md`,
   `LICENSE.txt`, and `AGENTS-consuming.md` if ever written) rather than filtering a denylist. Dev
   artifacts that previously rode along — `AGENTS.md`, the `CLAUDE.md` symlink, and `Rakefile` — are

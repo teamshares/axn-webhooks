@@ -36,7 +36,9 @@ Gem::Specification.new do |spec|
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
 
-  spec.add_dependency "axn", ">= 0.1.0-alpha.4.3", "< 0.2.0"
+  # Floor is alpha-5: the first release carrying `Axn::Error` (the public-error boundary this gem's
+  # error hierarchy includes at load time), `Axn.config.default_async?`, and `Axn::Extensions.best_effort`.
+  spec.add_dependency "axn", ">= 0.1.0-alpha.5", "< 0.2.0"
   # Requires Rack 3: Response's headers are lowercased per Rack 3's SPEC, and Rack 3's native
   # Array multi-value headers are used. Consumers need Rails 7.1+ (the first Rails whose
   # actionpack allows Rack 3); Rails 7.0 is Rack-2-only and intentionally unsupported.
