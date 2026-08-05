@@ -63,7 +63,7 @@ module Axn
           return !!handler_class._async_adapter # explicit per-handler setting (incl. `async false`) always wins
         end
 
-        !!Axn.config._default_async_adapter
+        Axn.config.default_async?
       end
 
       # Delegates entirely to axn's own async interface; no handler_result (nothing ran

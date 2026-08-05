@@ -2,7 +2,13 @@
 
 module Axn
   module Webhooks
-    class Error < StandardError; end
+    # Rooted in core's public-error boundary (PRO-2997). `Axn::Error` is a marker MODULE, not a base
+    # class — `rescue` matches it by `is_a?` — so the tag costs this hierarchy no ancestry: `Error`
+    # stays a plain `StandardError`, and a consuming app's `rescue Axn::Error` catches webhook errors
+    # alongside core's. The tag is inherited, so `RetryLater` below is covered automatically.
+    class Error < StandardError
+      include Axn::Error
+    end
 
     # Raised by a handler (via Axn::Webhooks.retry_later!) to ask the sender to redeliver later —
     # mapped to 503 + Retry-After by the inbound endpoint. Distinct from a crash (a reported 500):

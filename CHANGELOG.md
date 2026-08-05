@@ -69,6 +69,19 @@
 - `dispatch mode:` — the async seam, resolved dynamically: an explicit `:async` delegates to the handler's own `.call_async` (inheriting whatever axn async adapter the app configured — never branches on `:sidekiq`/`:active_job`), an explicit `:sync` runs inline, and the default (`:auto`) runs **async when an adapter is configured for the handler, else sync** — except a custom `respond` (a result-returning hook) always forces sync. An explicit `mode: :async` + custom `respond` is rejected at `inbound` registration time (you can't read a handler result you enqueued). Dispatching `:async` against a handler with no adapter configured (explicitly disabled or never set) is a clean, reported `Axn::Webhooks::Error` (500-bound) rather than an uncaught `NotImplementedError` escaping the axn boundary; adapter presence is a truthiness check, so an explicitly-disabled handler (`_async_adapter == false`) is correctly treated as unconfigured and runs sync under `mode: :auto`.
 
 ### Changed
+- `Axn::Webhooks::Error` now includes `Axn::Error`, core's public-error boundary, so a consuming app's
+  `rescue Axn::Error` catches this gem's errors alongside core's (and `RetryLater` with them — the tag
+  is inherited). `Axn::Error` is a marker module rather than a base class, so the hierarchy is
+  unchanged: `Error` is still a plain `StandardError`, nothing gains ancestry, and every existing
+  `rescue Axn::Webhooks::Error` / `rescue Axn::Webhooks::RetryLater` behaves exactly as before.
+- The `axn` dependency floor is now `>= 0.1.0-alpha.5` (was `>= 0.1.0-alpha.4.3`) — the first release
+  carrying the three axn APIs this gem had been tracking off `main`: `Axn::Error`,
+  `Axn.config.default_async?`, and `Axn::Extensions.best_effort`. `Axn::Error` in particular is a
+  load-time dependency (`Axn::Webhooks::Error` includes it), so an older axn raised
+  `uninitialized constant Axn::Error` while requiring the gem rather than failing lazily. The
+  development `Gemfile`'s temporary `github: "teamshares/axn", branch: "main"` pin is dropped
+  accordingly (both the gem's own Gemfile and `spec_rails/dummy_app`'s); axn now resolves from
+  RubyGems.
 - The packaged gem now ships an allowlist of paths (`lib/`, `README.md`, `CHANGELOG.md`,
   `LICENSE.txt`, and `AGENTS-consuming.md` if ever written) rather than filtering a denylist. Dev
   artifacts that previously rode along — `AGENTS.md`, the `CLAUDE.md` symlink, and `Rakefile` — are
@@ -113,7 +126,7 @@
   `ScriptError`, not rescued by axn's `StandardError`-only exception boundary) — escaping `Deliver`,
   escaping `Outbound::Emit`'s per-target fan-out loop, and aborting delivery to any remaining
   targets. `Deliver` now checks adapter presence first (mirroring inbound `Dispatch`'s own
-  `self.class._async_adapter` / `Axn.config._default_async_adapter` check, never branching on
+  `self.class._async_adapter` / `Axn.config.default_async?` check, never branching on
   adapter type): with no adapter configured, a retryable failure is now treated like an exhausted
   retry budget — reported once via `Axn.config.on_exception`, then `fail!`s quietly — matching the
   documented best-effort, no-cross-process-retries promise of the synchronous fallback path.

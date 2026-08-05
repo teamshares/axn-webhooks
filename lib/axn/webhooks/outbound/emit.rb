@@ -48,7 +48,7 @@ module Axn
         def async_configured?
           return !!Deliver._async_adapter if Deliver.respond_to?(:_async_adapter) && !Deliver._async_adapter.nil?
 
-          !!Axn.config._default_async_adapter
+          Axn.config.default_async?
         end
       end
     end

@@ -102,7 +102,7 @@ module Axn
         def async_configured?
           return !!self.class._async_adapter unless self.class._async_adapter.nil?
 
-          !!Axn.config._default_async_adapter
+          Axn.config.default_async?
         end
 
         # HTTP header names are case-insensitive, but `Transport` is a public injectable seam — a

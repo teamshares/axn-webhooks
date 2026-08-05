@@ -5,9 +5,6 @@ source "https://rubygems.org"
 # The gem under test — pulls in its own axn dependency and any Railtie/Engine it defines.
 gem "axn-webhooks", path: "../../"
 
-# Track axn's main branch, mirroring the gem's own Gemfile pin.
-gem "axn", github: "teamshares/axn", branch: "main"
-
 gem "rails", ">= 7.1"
 gem "sqlite3", "~> 2.0"
 

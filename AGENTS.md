@@ -13,8 +13,8 @@ Before writing or modifying an Axn action (`include Axn`): run `bundle show axn`
 - TDD: failing test first.
 - Works outside Rails — guard `Rails`/`ActiveRecord`/`ActiveJob` references with `defined?(...)`.
 - `bundle exec rake` (specs + rubocop) before done.
-- `axn` is pinned to `branch: "main"` in the Gemfile; `Gemfile.lock` is gitignored and CI resolves
-  fresh. Re-run tests after `bundle update axn` if it may have moved.
+- `axn` resolves from RubyGems via the gemspec floor (no git pin); `Gemfile.lock` is gitignored and
+  CI resolves fresh. Bump the gemspec floor when adopting a newly-released axn API.
 
 ## Changes & compatibility
 
