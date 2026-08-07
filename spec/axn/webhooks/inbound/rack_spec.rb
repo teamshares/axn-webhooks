@@ -85,12 +85,34 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#call (Rack app)" do
     expect(status).to eq(405)
   end
 
-  it "returns a clean 500 (never raises) for a malformed env BuildRequest can't parse" do
+  it "returns a clean 500 (never raises) when BuildRequest can't parse the env" do
     Axn::Webhooks.inbound(:vendor) { verify { |_req| true } }
-    broken_env = { "REQUEST_METHOD" => "POST" } # no rack.input at all
+    # Stubbed rather than hand-built: since rack.input is optional under Rack 3, an env sparse
+    # enough to break parsing no longer exists. The invariant under test is the mapping — a
+    # BuildRequest failure becomes a 500 instead of escaping as a raise.
+    allow(Axn::Webhooks::Request).to receive(:from_rack).and_raise(KeyError, "malformed env")
+
+    env = Rack::MockRequest.env_for("/webhooks/vendor", method: "POST", input: "")
     status, = nil
-    expect { status, = Axn::Webhooks::Inbound[:vendor].call(broken_env) }.not_to raise_error
+    expect { status, = Axn::Webhooks::Inbound[:vendor].call(env) }.not_to raise_error
     expect(status).to eq(500)
+  end
+
+  it "answers a bodyless GET challenge whose env omits rack.input entirely" do
+    # Regression: rack.input is optional under Rack 3, and Rack::MockRequest.env_for omits it for a
+    # bodyless request — so every Rails request spec (and any conformant Rack 3 server) hit a 500 on
+    # the Nylas/Meta GET handshake. See Request.from_rack.
+    Axn::Webhooks.inbound(:vendor) do
+      verify { |_req| true }
+      challenge ->(req) { req.params["challenge"] }
+    end
+
+    env = Rack::MockRequest.env_for("/webhooks/vendor?challenge=accepted", method: "GET")
+    expect(env).not_to have_key("rack.input")
+
+    status, _headers, body = Axn::Webhooks::Inbound[:vendor].call(env)
+    expect(status).to eq(200)
+    expect(body).to eq(["accepted"])
   end
 
   it "challenge-only endpoint returns bare 200 ack on POST (intentional: no dispatch means no processing)" do

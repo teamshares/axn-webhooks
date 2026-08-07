@@ -29,11 +29,17 @@ module Axn
       # best-effort courtesy for anything downstream: our own pipeline only ever needs raw_body, so
       # a non-rewindable rack.input (e.g. a bare Rack::Builder mount on a streaming server, with no
       # Rack::RewindableInput::Middleware in front) is tolerated rather than raising mid-request.
+      #
+      # rack.input is OPTIONAL under Rack 3 (it was mandatory in Rack 2), so a bodyless request may
+      # omit the key entirely — Rack::MockRequest.env_for does exactly that, which is what a Rails
+      # integration/request spec builds. Treat a missing input as an empty body rather than a
+      # malformed env: the GET challenge handshake (Nylas, Meta) is bodyless by definition, so
+      # fetching here 500s the very handshake `challenge` exists to serve.
       def self.from_rack(env)
-        input = env.fetch("rack.input")
-        raw_body = input.read || ""
+        input = env["rack.input"]
+        raw_body = input&.read || ""
         begin
-          input.rewind
+          input&.rewind
         rescue StandardError
           nil # rewind is a courtesy; a non-rewindable/non-seekable stream (pipe/socket) is fine — raw_body is already captured
         end
