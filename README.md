@@ -32,6 +32,30 @@ Axn::Webhooks::Signature.hmac(
 
 It always uses a constant-time comparison and supports multi-signature (key-rotation) headers.
 
+### Replay protection
+
+Pass `timestamp:` and `tolerance:` to guard against replayed requests — `hmac` returns `false` if
+the timestamp is more than `tolerance` seconds from now, in either direction. Vendors that send
+epoch **milliseconds** (not seconds) — e.g. Lob — pass `unit:`:
+
+```ruby
+Axn::Webhooks::Signature.hmac(
+  secret:, payload:, signature:,
+  timestamp: request.header("X-Timestamp"),  # epoch ms
+  tolerance: 300,
+  unit:      :ms,                            # :seconds (default) | :ms | :milliseconds | :microseconds
+)
+```
+
+The same `unit:` option is available on `verify :hmac`'s `replay:` hash:
+
+```ruby
+Axn::Webhooks.inbound :lob do
+  verify :hmac, secret: ENV.fetch("LOB_WEBHOOK_SECRET"), signature: header("X-Lob-Signature"),
+                replay: { timestamp: header("X-Lob-Signature-Timestamp"), within: 300, unit: :ms }
+end
+```
+
 ## Inbound endpoints
 
 Declare each vendor webhook in one place (e.g. a Rails initializer). The symbol you pass to

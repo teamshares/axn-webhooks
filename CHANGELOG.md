@@ -102,6 +102,7 @@
   explicit `mode: :async`. Mutually exclusive with `respond` (raises at registration if both are
   declared). Fixes the README's DropboxSign example, which was wrong for any consuming app with
   an axn async adapter configured.
+- `unit:` option on `replay:` (`verify :hmac`) and on `Signature.hmac`/`.within_tolerance?` directly — `:seconds` (default), `:ms`/`:milliseconds`, or `:microseconds`. Vendors sending epoch milliseconds (Lob) or finer resolutions no longer need a hand-rolled `timestamp[0, 10]`-style slice to fake seconds; the raw epoch value is divided by the unit's divisor before the tolerance comparison. A `Time` timestamp ignores `unit:` (already unambiguous); an unrecognized `unit:` raises `ArgumentError` immediately, regardless of timestamp type.
 
 ### Changed
 - `Axn::Webhooks::Error` now includes `Axn::Error`, core's public-error boundary, so a consuming app's

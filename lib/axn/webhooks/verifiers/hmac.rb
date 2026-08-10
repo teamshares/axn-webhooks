@@ -18,6 +18,7 @@ module Axn
             prefix:,
             timestamp:,
             tolerance: replay&.fetch(:within),
+            unit: replay&.fetch(:unit, :seconds) || :seconds,
           )
         end
       end

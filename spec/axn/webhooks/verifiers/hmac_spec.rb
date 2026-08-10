@@ -68,6 +68,28 @@ RSpec.describe "verify :hmac strategy" do
     expect(Axn::Webhooks::Inbound[:webhook].verify(req)).to be_ok
   end
 
+  it "accepts a fresh epoch-ms timestamp when replay protection specifies unit: :ms (Lob-style)" do
+    fresh_ms = (Time.now.to_i * 1_000).to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:lob_ms) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300, unit: :ms }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh_ms })
+    expect(Axn::Webhooks::Inbound[:lob_ms].verify(req)).to be_ok
+  end
+
+  it "rejects a stale epoch-ms timestamp when replay protection specifies unit: :ms" do
+    stale_ms = ((Time.now - 10_000).to_i * 1_000).to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:lob_ms_stale) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300, unit: :ms }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => stale_ms })
+    expect(Axn::Webhooks::Inbound[:lob_ms_stale].verify(req)).not_to be_ok
+  end
+
   it "raises a loud developer error when a required option is missing" do
     expect { Axn::Webhooks.inbound(:x) { verify :hmac, secret: "s" } } # no signature:
       .to raise_error(ArgumentError, /signature/)
