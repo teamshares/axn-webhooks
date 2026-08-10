@@ -12,5 +12,19 @@ RSpec.describe Axn::Webhooks::Inbound::DSL do
       dsl.static_respond(&block)
       expect(dsl.__static_respond__).to eq(block)
     end
+
+    it "rejects a block that declares a parameter (e.g. a copy-pasted respond block)" do
+      dsl = described_class.new
+      expect do
+        dsl.static_respond { |result| text(result.to_s) }
+      end.to raise_error(Axn::Webhooks::Error, /must take no arguments/)
+    end
+
+    it "rejects a lambda with a parameter" do
+      dsl = described_class.new
+      expect do
+        dsl.static_respond(&->(result) { text(result.to_s) })
+      end.to raise_error(Axn::Webhooks::Error, /must take no arguments/)
+    end
   end
 end

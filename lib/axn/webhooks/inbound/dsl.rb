@@ -32,6 +32,13 @@ module Axn
         # Endpoint#default_ack. Mutually exclusive with `respond` (Endpoint#initialize raises if
         # both are declared) and never forces sync dispatch (Dispatch#async? never reads it).
         def static_respond(&block)
+          if block && !block.parameters.empty?
+            raise Axn::Webhooks::Error,
+                  "inbound endpoint's static_respond block must take no arguments (it never reads the " \
+                  "handler's result, unlike respond) — got a parameter; use `respond` instead if you need " \
+                  "to read the handler's result"
+          end
+
           @static_respond_block = block
         end
 
