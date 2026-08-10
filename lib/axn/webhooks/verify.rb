@@ -9,7 +9,7 @@ module Axn
       include Axn
       include Axn::Webhooks::VendorFacet
 
-      expects :request, type: Axn::Webhooks::Request
+      expects :request, type: Axn::Webhooks::Request, sensitive: true
       expects :verifier
       error "Webhook signature verification failed"
 

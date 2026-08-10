@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Fixed
+- **Security:** `Request#inspect` no longer renders `raw_body`/`headers` in full. The inbound
+  pipeline's own axns (`BuildRequest`, `Verify`, `Dispatch`, `Challenge`) auto-log their
+  `request:`/`env:` fields at `:info` by default, and `Request` relied on `Object#inspect`, which
+  dumped every instance variable — so a webhook's complete raw body (and headers, including the
+  vendor signature) was logged multiple times per request with no way for a consuming app to
+  suppress it (`sensitive:` only covers fields *the consumer* declares, not the gem's own internal
+  ones). `Request#inspect`/`#pretty_print` now redact both fields, and the gem's own `request:`/
+  `env:` declarations are additionally marked `sensitive: true` as defense in depth.
 - `Request.from_rack` now rewinds `rack.input` **before** reading it, not only after. Rack 3's
   `Rack::Request#POST` no longer rewinds after parsing a form-urlencoded body, and Rails' default
   middleware stack runs `Rack::MethodOverride` (which calls `#POST` looking for `_method`) ahead of
