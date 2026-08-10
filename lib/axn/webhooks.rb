@@ -21,6 +21,7 @@ require_relative "webhooks/inbound/parsers"
 require_relative "webhooks/inbound/build_request"
 require_relative "webhooks/inbound/respond_context"
 require_relative "webhooks/respond"
+require_relative "webhooks/static_respond"
 require_relative "webhooks/dispatch"
 require_relative "webhooks/outbound"
 
