@@ -87,6 +87,13 @@
 - `Axn::Webhooks::Response` — a Rails-agnostic HTTP response value (status/body/headers) with `.ack`/`.text`/`.xml` factories, produced by the staged HTTP outcome mapping and rendered against Rack in a later phase.
 - `respond` DSL declaration + `Axn::Webhooks::Inbound::RespondContext` — captures a block mapping a genuine handler success to a `Response`; the block runs with `ack`/`text`/`xml` available as bare calls.
 - `dispatch mode:` — the async seam, resolved dynamically: an explicit `:async` delegates to the handler's own `.call_async` (inheriting whatever axn async adapter the app configured — never branches on `:sidekiq`/`:active_job`), an explicit `:sync` runs inline, and the default (`:auto`) runs **async when an adapter is configured for the handler, else sync** — except a custom `respond` (a result-returning hook) always forces sync. An explicit `mode: :async` + custom `respond` is rejected at `inbound` registration time (you can't read a handler result you enqueued). Dispatching `:async` against a handler with no adapter configured (explicitly disabled or never set) is a clean, reported `Axn::Webhooks::Error` (500-bound) rather than an uncaught `NotImplementedError` escaping the axn boundary; adapter presence is a truthiness check, so an explicitly-disabled handler (`_async_adapter == false`) is correctly treated as unconfigured and runs sync under `mode: :auto`.
+- `Axn::Webhooks::Inbound::DSL#static_respond` — a webhook response body that does not read the
+  handler's result (its block takes no arguments, unlike `respond`), so it renders on every
+  non-error dispatch outcome: sync success, async enqueue, `otherwise: :ack`, and business
+  `fail!`. Unlike `respond`, declaring it never forces sync dispatch and is compatible with
+  explicit `mode: :async`. Mutually exclusive with `respond` (raises at registration if both are
+  declared). Fixes the README's DropboxSign example, which was wrong for any consuming app with
+  an axn async adapter configured.
 
 ### Changed
 - `Axn::Webhooks::Error` now includes `Axn::Error`, core's public-error boundary, so a consuming app's
