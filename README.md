@@ -47,6 +47,11 @@ Axn::Webhooks::Signature.hmac(
 )
 ```
 
+`unit:` only describes the resolution of the incoming `timestamp:` — `tolerance:`/`within:` is
+always in seconds, regardless of `unit:`. A `Time` timestamp ignores `unit:` entirely (it's already
+unambiguous). An unrecognized `unit:` raises `ArgumentError` immediately, even when `timestamp:`
+happens to be a `Time` — the unit lookup happens before the timestamp is inspected.
+
 The same `unit:` option is available on `verify :hmac`'s `replay:` hash:
 
 ```ruby

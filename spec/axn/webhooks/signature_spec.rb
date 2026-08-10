@@ -144,6 +144,19 @@ RSpec.describe Axn::Webhooks::Signature do
       expect(described_class.within_tolerance?(timestamp: ts_us, tolerance: 300, now:, unit: :microseconds)).to be(true)
     end
 
+    it "floors (does not round) the sub-second remainder when converting ms->s" do
+      # 299.999s ago is still within tolerance: 300 -- accepted.
+      ts_ms_within = (now.to_i * 1_000) - 299_999
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts_ms_within, tolerance: 300, now:,
+                                  unit: :ms)).to be(true)
+
+      # 300.001s ago -- a mere 1ms past the boundary -- floors up to a full 301s and is rejected.
+      # Rounding (rather than flooring) would incorrectly round this down to 300s and accept it.
+      ts_ms_outside = (now.to_i * 1_000) - 300_001
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts_ms_outside, tolerance: 300, now:,
+                                  unit: :ms)).to be(false)
+    end
+
     it "defaults unit to :seconds when omitted (regression)" do
       ts = (now - 60).to_i
       expect(described_class.within_tolerance?(timestamp: ts, tolerance: 300, now:)).to be(true)

@@ -79,19 +79,31 @@ RSpec.describe "verify :hmac strategy" do
     expect(Axn::Webhooks::Inbound[:lob_ms].verify(req)).to be_ok
   end
 
-  it "rejects a stale epoch-ms timestamp when replay protection specifies unit: :ms" do
-    stale_ms = ((Time.now - 10_000).to_i * 1_000).to_s
+  it "rejects an epoch-ms timestamp just outside tolerance, proving the ms->s conversion is applied " \
+     "before the comparison (not merely stale under any interpretation)" do
+    # 301s ago is only rejected under a `within: 300` tolerance if the ms->s conversion actually ran;
+    # a far-stale timestamp (e.g. 10_000s) would fail regardless of whether `unit:` was wired correctly.
+    just_stale_ms = ((Time.now - 301).to_i * 1_000).to_s
     sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
     Axn::Webhooks.inbound(:lob_ms_stale) do
       verify :hmac, secret: "shh", signature: header("X-Sig"),
                     replay: { timestamp: header("X-Ts"), within: 300, unit: :ms }
     end
-    req = request(headers: { "X-Sig" => sig, "X-Ts" => stale_ms })
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => just_stale_ms })
     expect(Axn::Webhooks::Inbound[:lob_ms_stale].verify(req)).not_to be_ok
   end
 
   it "raises a loud developer error when a required option is missing" do
     expect { Axn::Webhooks.inbound(:x) { verify :hmac, secret: "s" } } # no signature:
       .to raise_error(ArgumentError, /signature/)
+  end
+
+  it "raises a loud developer error for an unrecognized key in replay: (e.g. a typo'd unit:)" do
+    expect do
+      Axn::Webhooks.inbound(:y) do
+        verify :hmac, secret: "s", signature: header("X-Sig"),
+                      replay: { timestamp: header("X-Ts"), within: 300, unti: :ms }
+      end
+    end.to raise_error(ArgumentError, /unti/)
   end
 end

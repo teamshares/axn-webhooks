@@ -7,6 +7,11 @@ module Axn
       # and delegates to the constant-time Signature primitive.
       register(:hmac) do |secret:, signature:, signing_string: :raw_body, digest: :sha256,
                           encoding: :hex, prefix: nil, replay: nil|
+        if replay
+          unknown = replay.keys - %i[timestamp within unit]
+          raise ArgumentError, "unsupported replay: key(s): #{unknown.map(&:inspect).join(', ')}" if unknown.any?
+        end
+
         lambda do |request|
           timestamp = replay && Resolvers.resolve(replay.fetch(:timestamp), request)
           Signature.hmac(
@@ -18,7 +23,7 @@ module Axn
             prefix:,
             timestamp:,
             tolerance: replay&.fetch(:within),
-            unit: replay&.fetch(:unit, :seconds) || :seconds,
+            unit: replay&.[](:unit) || :seconds,
           )
         end
       end
