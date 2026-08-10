@@ -98,6 +98,46 @@ RSpec.describe "Axn::Webhooks::Inbound static_respond" do
       expect(response.body).to eq("Hello API Event Received")
     end
 
+    it "does not render the static body on a handler crash (still maps to 500)" do
+      Axn::Webhooks.inbound(:vendor) do
+        verify { |_req| true }
+        dispatch to: "Handlers::Boom"
+        static_respond { text("Hello API Event Received") }
+      end
+      response = Axn::Webhooks::Inbound[:vendor].to_response(req("{}"))
+      expect(response.status).to eq(500)
+      expect(response.body).not_to eq("Hello API Event Received")
+    end
+
+    it "does not render the static body on a verify failure (still 401)" do
+      Axn::Webhooks.inbound(:vendor) do
+        verify { |_req| false }
+        dispatch to: "Handlers::Created"
+        static_respond { text("Hello API Event Received") }
+      end
+      response = Axn::Webhooks::Inbound[:vendor].to_response(req("{}"))
+      expect(response.status).to eq(401)
+      expect(response.body).not_to eq("Hello API Event Received")
+    end
+
+    it "does not render the static body on retry_later! (still 503)" do
+      stub_const("Handlers::RetriesLater", Class.new do
+        include Axn::Webhooks::Handler
+
+        expects :event, allow_blank: true
+        def call = Axn::Webhooks.retry_later!(after: 45)
+      end)
+      Axn::Webhooks.inbound(:vendor) do
+        verify { |_req| true }
+        dispatch to: "Handlers::RetriesLater"
+        static_respond { text("Hello API Event Received") }
+      end
+      response = Axn::Webhooks::Inbound[:vendor].to_response(req("{}"))
+      expect(response.status).to eq(503)
+      expect(response.headers["retry-after"]).to eq("45")
+      expect(response.body).not_to eq("Hello API Event Received")
+    end
+
     it "renders the static body when mode: :async enqueues successfully" do
       Axn::Webhooks.inbound(:vendor) do
         verify { |_req| true }

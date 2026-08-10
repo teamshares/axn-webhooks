@@ -20,8 +20,8 @@ module Axn
 
         # respond { |handler_result| text("...") } — maps a genuine handler success to a
         # Response. Every other outcome (ack, business fail!, verify failure/exception, or a
-        # no-dispatch endpoint) always gets the default bare ack, regardless of this declaration
-        # — see Endpoint#to_response.
+        # no-dispatch endpoint) always gets the default bare ack (or a declared `static_respond`
+        # body — see below), regardless of this declaration — see Endpoint#to_response.
         def respond(&block)
           @respond_block = block
         end
