@@ -7,17 +7,24 @@ module Axn
       # the (verified, parsed) event to a handler Axn, and maps the pipeline's outcome to an
       # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
-        def initialize(name:, verifier:, dispatch: nil, respond: nil, challenge: nil)
+        def initialize(name:, verifier:, dispatch: nil, respond: nil, static_respond: nil, challenge: nil)
           if dispatch && dispatch[:mode] == :async && respond
             raise Axn::Webhooks::Error,
                   "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
                   "can't produce a handler_result for it to read — use `mode: :sync` (or omit mode) or drop the respond block"
           end
 
+          if respond && static_respond
+            raise Axn::Webhooks::Error,
+                  "inbound endpoint `#{name}` declares both `respond` and `static_respond` — declare only one; " \
+                  "`respond` reads the handler's result, `static_respond` doesn't and renders on every non-error outcome"
+          end
+
           @name = name.to_sym
           @verifier = verifier
           @dispatch = dispatch
           @respond = respond
+          @static_respond = static_respond
           @challenge = challenge
         end
 
