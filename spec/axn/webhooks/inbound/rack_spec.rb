@@ -124,4 +124,37 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#call (Rack app)" do
     expect(headers).to eq({})
     expect(response_body).to eq([""])
   end
+
+  it "never logs a webhook body sentinel through the pipeline, with no consumer handler involved (PRO-3091)" do
+    # Regression for the raw-request-body leak: BuildRequest, Verify, and Dispatch each auto-log
+    # their `request:`/`env:` field at :info by default, and Request's (formerly default) #inspect
+    # rendered raw_body/headers in full — so a webhook body was logged 3x with no way for a
+    # consumer to suppress it (sensitive: only applies to fields THEY declare, not the gem's own).
+    #
+    # The sentinel sits as the body's first key deliberately: axn truncates long context lines at
+    # 150 chars, so a sentinel placed later would make this pass even with the leak still present.
+    #
+    # `otherwise: :ack` resolves without invoking any handler class, so the assertion is scoped
+    # entirely to the gem's own internal declarations (BuildRequest/Verify/Dispatch) — no consumer
+    # code is in the picture, marked sensitive or otherwise.
+    secret = "shh"
+    Axn::Webhooks.inbound(:vendor) do
+      verify :hmac, secret:, signature: header("X-Sig")
+      dispatch on: ->(e) { e["type"] }, to: {}, otherwise: :ack
+    end
+
+    sentinel = "PROBE_SENTINEL_BODY_1234"
+    body = %({"sentinel":"#{sentinel}","type":"created","data":{"id":1}})
+
+    log_io = StringIO.new
+    original_logger = Axn.config.logger
+    Axn.config.logger = Logger.new(log_io)
+    begin
+      status, = Axn::Webhooks::Inbound[:vendor].call(signed_env(body, secret:))
+      expect(status).to eq(200)
+      expect(log_io.string).not_to include(sentinel)
+    ensure
+      Axn.config.logger = original_logger
+    end
+  end
 end

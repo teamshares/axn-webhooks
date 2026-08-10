@@ -10,8 +10,8 @@ module Axn
         include Axn
         include Axn::Webhooks::VendorFacet
 
-        expects :env
-        exposes :request, type: Axn::Webhooks::Request
+        expects :env, sensitive: true
+        exposes :request, type: Axn::Webhooks::Request, sensitive: true
         error "Webhook Rack request parsing failed"
 
         def call

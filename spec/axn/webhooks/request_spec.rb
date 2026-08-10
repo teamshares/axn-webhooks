@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "pp"
+
 RSpec.describe Axn::Webhooks::Request do
   subject(:request) do
     described_class.new(
@@ -49,6 +51,33 @@ RSpec.describe Axn::Webhooks::Request do
   it "exposes raw_body frozen to prevent accidental mutation" do
     expect(request.raw_body).to be_frozen
     expect { request.raw_body << "!" }.to raise_error(FrozenError)
+  end
+
+  describe "#inspect" do
+    # PRO-3091: Request#inspect (Object's default) rendered raw_body and headers in full, so every
+    # log line / exception report that inspects a Request — not just this pipeline's own log
+    # lines — leaked attacker-controlled webhook payloads (bank account numbers, API credentials,
+    # mailing addresses) into production logs. This is the durable fix: redact at the source.
+    it "never renders raw_body or header values" do
+      expect(request.inspect).not_to include('{"a":1}')
+      expect(request.inspect).not_to include("abc")
+    end
+
+    it "still identifies the request (method, url, body size)" do
+      expect(request.inspect).to include("POST", "https://example.com/webhooks/merge", "7")
+    end
+  end
+
+  describe "#pretty_print" do
+    # `pp`/PP does NOT go through #inspect by default — it walks instance variables directly via
+    # Kernel#pretty_print — so redacting #inspect alone leaves `pp request` (and anything that
+    # calls it, e.g. some exception reporters) leaking the same fields.
+    it "never renders raw_body or header values" do
+      io = StringIO.new
+      PP.pp(request, io)
+      expect(io.string).not_to include('{"a":1}')
+      expect(io.string).not_to include("abc")
+    end
   end
 
   describe ".from_rack" do

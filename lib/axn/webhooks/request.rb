@@ -23,6 +23,20 @@ module Axn
         @headers[name.to_s.downcase]
       end
 
+      # `raw_body` and `headers` are attacker-controlled webhook payloads of unknown sensitivity
+      # (bank account numbers, API credentials, mailing addresses have all shown up in the wild) —
+      # never render them. This is the one place that matters: axn's auto-logging, exception
+      # reports, and any other caller that inspects a Request all go through #inspect.
+      def inspect
+        "#<#{self.class.name} #{http_method} #{url} raw_body=[REDACTED] (#{raw_body.bytesize}b) headers=[REDACTED]>"
+      end
+
+      # `pp`/PP does not call #inspect by default (Kernel#pretty_print walks instance variables
+      # directly), so without this override `pp request` would leak the same fields #inspect redacts.
+      def pretty_print(printer)
+        printer.text(inspect)
+      end
+
       # Build a Request from a Rack env, capturing the exact pristine body bytes — this (not a
       # controller's already-parsed params) is why the spec chose a Rack mount over a controller
       # concern (see "## Packaging" in the design spec).
