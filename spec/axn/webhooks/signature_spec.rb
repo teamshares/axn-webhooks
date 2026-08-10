@@ -122,5 +122,72 @@ RSpec.describe Axn::Webhooks::Signature do
       ts = (now - 301).to_i
       expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts, tolerance: 300, now:)).to be(false)
     end
+
+    it "accepts an epoch-ms timestamp within tolerance when unit: :ms" do
+      ts_ms = (now - 60).to_i * 1_000
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts_ms, tolerance: 300, now:, unit: :ms)).to be(true)
+    end
+
+    it "rejects an epoch-ms timestamp outside tolerance when unit: :ms" do
+      ts_ms = (now - 600).to_i * 1_000
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts_ms, tolerance: 300, now:, unit: :ms)).to be(false)
+    end
+
+    it "treats :ms and :milliseconds identically" do
+      ts_ms = ((now - 60).to_i * 1_000).to_s
+      expect(described_class.within_tolerance?(timestamp: ts_ms, tolerance: 300, now:, unit: :ms)).to be(true)
+      expect(described_class.within_tolerance?(timestamp: ts_ms, tolerance: 300, now:, unit: :milliseconds)).to be(true)
+    end
+
+    it "supports :microseconds" do
+      ts_us = (now - 60).to_i * 1_000_000
+      expect(described_class.within_tolerance?(timestamp: ts_us, tolerance: 300, now:, unit: :microseconds)).to be(true)
+    end
+
+    it "floors (does not round) the sub-second remainder when converting ms->s" do
+      # 299.999s ago is still within tolerance: 300 -- accepted.
+      ts_ms_within = (now.to_i * 1_000) - 299_999
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts_ms_within, tolerance: 300, now:,
+                                  unit: :ms)).to be(true)
+
+      # 300.001s ago -- a mere 1ms past the boundary -- floors up to a full 301s and is rejected.
+      # Rounding (rather than flooring) would incorrectly round this down to 300s and accept it.
+      ts_ms_outside = (now.to_i * 1_000) - 300_001
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: ts_ms_outside, tolerance: 300, now:,
+                                  unit: :ms)).to be(false)
+    end
+
+    it "defaults unit to :seconds when omitted (regression)" do
+      ts = (now - 60).to_i
+      expect(described_class.within_tolerance?(timestamp: ts, tolerance: 300, now:)).to be(true)
+    end
+
+    it "ignores unit for a Time timestamp (already unambiguous)" do
+      expect(described_class.within_tolerance?(timestamp: now - 60, tolerance: 300, now:, unit: :ms)).to be(true)
+    end
+
+    it "raises ArgumentError for an unsupported unit" do
+      expect do
+        described_class.within_tolerance?(timestamp: (now - 60).to_i, tolerance: 300, now:, unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+    end
+
+    it "raises ArgumentError for an unsupported unit via .hmac even when the signature is nil/empty" do
+      expect do
+        described_class.hmac(secret:, payload:, signature: nil, timestamp: (now - 60).to_i, tolerance: 300, now:,
+                             unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+
+      expect do
+        described_class.hmac(secret:, payload:, signature: "", timestamp: (now - 60).to_i, tolerance: 300, now:,
+                             unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+    end
+
+    it "raises ArgumentError for an unsupported unit via .hmac even when tolerance is absent" do
+      expect do
+        described_class.hmac(secret:, payload:, signature: hex, unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+    end
   end
 end

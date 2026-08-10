@@ -68,8 +68,70 @@ RSpec.describe "verify :hmac strategy" do
     expect(Axn::Webhooks::Inbound[:webhook].verify(req)).to be_ok
   end
 
+  it "accepts a fresh epoch-ms timestamp when replay protection specifies unit: :ms (Lob-style)" do
+    fresh_ms = (Time.now.to_i * 1_000).to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:lob_ms) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300, unit: :ms }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh_ms })
+    expect(Axn::Webhooks::Inbound[:lob_ms].verify(req)).to be_ok
+  end
+
+  it "rejects an epoch-ms timestamp just outside tolerance, proving the ms->s conversion is applied " \
+     "before the comparison (not merely stale under any interpretation)" do
+    # 301s ago is only rejected under a `within: 300` tolerance if the ms->s conversion actually ran;
+    # a far-stale timestamp (e.g. 10_000s) would fail regardless of whether `unit:` was wired correctly.
+    just_stale_ms = ((Time.now - 301).to_i * 1_000).to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:lob_ms_stale) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300, unit: :ms }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => just_stale_ms })
+    expect(Axn::Webhooks::Inbound[:lob_ms_stale].verify(req)).not_to be_ok
+  end
+
   it "raises a loud developer error when a required option is missing" do
     expect { Axn::Webhooks.inbound(:x) { verify :hmac, secret: "s" } } # no signature:
       .to raise_error(ArgumentError, /signature/)
+  end
+
+  it "raises a loud developer error for an unrecognized key in replay: (e.g. a typo'd unit:)" do
+    expect do
+      Axn::Webhooks.inbound(:y) do
+        verify :hmac, secret: "s", signature: header("X-Sig"),
+                      replay: { timestamp: header("X-Ts"), within: 300, unti: :ms }
+      end
+    end.to raise_error(ArgumentError, /unti/)
+  end
+
+  it "accepts a replay: hash with indifferent (string) access, not just symbol keys" do
+    fresh = Time.now.to_i.to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:indifferent) do
+      replay = ActiveSupport::HashWithIndifferentAccess.new(timestamp: header("X-Ts"), within: 300, unit: :seconds)
+      verify :hmac, secret: "shh", signature: header("X-Sig"), replay:
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh })
+    expect(Axn::Webhooks::Inbound[:indifferent].verify(req)).to be_ok
+  end
+
+  it "surfaces a loud exception when replay: explicitly sets an invalid unit: (e.g. nil from an unset env var)" do
+    fresh = Time.now.to_i.to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:explicit_nil_unit) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300, unit: nil }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh })
+
+    result = Axn::Webhooks::Inbound[:explicit_nil_unit].verify(req)
+
+    expect(result).not_to be_ok
+    expect(result.outcome).to be_exception
+    expect(result.exception).to be_a(ArgumentError)
+    expect(result.exception.message).to match(/unsupported unit/)
   end
 end
