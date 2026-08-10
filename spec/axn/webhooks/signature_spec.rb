@@ -183,5 +183,11 @@ RSpec.describe Axn::Webhooks::Signature do
                              unit: :fortnights)
       end.to raise_error(ArgumentError, /unsupported unit/)
     end
+
+    it "raises ArgumentError for an unsupported unit via .hmac even when tolerance is absent" do
+      expect do
+        described_class.hmac(secret:, payload:, signature: hex, unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+    end
   end
 end

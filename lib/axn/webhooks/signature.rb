@@ -18,9 +18,9 @@ module Axn
       # returns true if ANY matches. Never raises on hostile input.
       def hmac(secret:, payload:, signature:, digest: :sha256, encoding: :hex, prefix: nil,
                timestamp: nil, tolerance: nil, now: nil, unit: :seconds)
-        # Validate the replay window (and unit:) before the signature short-circuit below, so a
-        # misconfigured unit: always raises loudly — not only for requests that happen to carry
-        # a non-empty signature.
+        # Validate unit: unconditionally — a misconfigured unit: is a config error independent of
+        # whether replay protection is active or the request happens to carry a signature.
+        validate_unit!(unit)
         return false if tolerance && !within_tolerance?(timestamp:, tolerance:, now: now || Time.now, unit:)
         return false if signature.nil? || signature.to_s.empty?
 
@@ -80,7 +80,7 @@ module Axn
       private_class_method :candidates
 
       def coerce_epoch(timestamp, unit)
-        divisor = UNITS.fetch(unit) { raise ArgumentError, "unsupported unit: #{unit.inspect}" }
+        divisor = validate_unit!(unit)
 
         case timestamp
         when Time    then timestamp.to_i
@@ -89,6 +89,13 @@ module Axn
         end
       end
       private_class_method :coerce_epoch
+
+      # Returns unit's divisor, or raises. Shared by `hmac` (validates eagerly, independent of
+      # tolerance/signature) and `coerce_epoch` (needs the divisor itself).
+      def validate_unit!(unit)
+        UNITS.fetch(unit) { raise ArgumentError, "unsupported unit: #{unit.inspect}" }
+      end
+      private_class_method :validate_unit!
     end
   end
 end
