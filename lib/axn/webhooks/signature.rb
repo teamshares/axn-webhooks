@@ -18,8 +18,11 @@ module Axn
       # returns true if ANY matches. Never raises on hostile input.
       def hmac(secret:, payload:, signature:, digest: :sha256, encoding: :hex, prefix: nil,
                timestamp: nil, tolerance: nil, now: nil, unit: :seconds)
-        return false if signature.nil? || signature.to_s.empty?
+        # Validate the replay window (and unit:) before the signature short-circuit below, so a
+        # misconfigured unit: always raises loudly — not only for requests that happen to carry
+        # a non-empty signature.
         return false if tolerance && !within_tolerance?(timestamp:, tolerance:, now: now || Time.now, unit:)
+        return false if signature.nil? || signature.to_s.empty?
 
         expected = compute(secret:, payload:, digest:, encoding:)
         candidates(signature, prefix:).any? { |candidate| secure_compare(candidate, expected) }

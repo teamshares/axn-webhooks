@@ -171,5 +171,17 @@ RSpec.describe Axn::Webhooks::Signature do
         described_class.within_tolerance?(timestamp: (now - 60).to_i, tolerance: 300, now:, unit: :fortnights)
       end.to raise_error(ArgumentError, /unsupported unit/)
     end
+
+    it "raises ArgumentError for an unsupported unit via .hmac even when the signature is nil/empty" do
+      expect do
+        described_class.hmac(secret:, payload:, signature: nil, timestamp: (now - 60).to_i, tolerance: 300, now:,
+                             unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+
+      expect do
+        described_class.hmac(secret:, payload:, signature: "", timestamp: (now - 60).to_i, tolerance: 300, now:,
+                             unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+    end
   end
 end
