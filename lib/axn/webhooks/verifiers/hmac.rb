@@ -8,7 +8,10 @@ module Axn
       register(:hmac) do |secret:, signature:, signing_string: :raw_body, digest: :sha256,
                           encoding: :hex, prefix: nil, replay: nil|
         if replay
-          unknown = replay.keys - %i[timestamp within unit]
+          # Compare stringified keys so a HashWithIndifferentAccess (string keys) isn't
+          # misclassified as entirely unsupported.
+          allowed = %w[timestamp within unit]
+          unknown = replay.keys.reject { |key| allowed.include?(key.to_s) }
           raise ArgumentError, "unsupported replay: key(s): #{unknown.map(&:inspect).join(', ')}" if unknown.any?
         end
 

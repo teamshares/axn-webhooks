@@ -106,4 +106,15 @@ RSpec.describe "verify :hmac strategy" do
       end
     end.to raise_error(ArgumentError, /unti/)
   end
+
+  it "accepts a replay: hash with indifferent (string) access, not just symbol keys" do
+    fresh = Time.now.to_i.to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:indifferent) do
+      replay = ActiveSupport::HashWithIndifferentAccess.new(timestamp: header("X-Ts"), within: 300, unit: :seconds)
+      verify :hmac, secret: "shh", signature: header("X-Sig"), replay:
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh })
+    expect(Axn::Webhooks::Inbound[:indifferent].verify(req)).to be_ok
+  end
 end
