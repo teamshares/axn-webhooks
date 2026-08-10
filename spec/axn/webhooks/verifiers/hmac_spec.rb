@@ -117,4 +117,21 @@ RSpec.describe "verify :hmac strategy" do
     req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh })
     expect(Axn::Webhooks::Inbound[:indifferent].verify(req)).to be_ok
   end
+
+  it "surfaces a loud exception when replay: explicitly sets an invalid unit: (e.g. nil from an unset env var)" do
+    fresh = Time.now.to_i.to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:explicit_nil_unit) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300, unit: nil }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh })
+
+    result = Axn::Webhooks::Inbound[:explicit_nil_unit].verify(req)
+
+    expect(result).not_to be_ok
+    expect(result.outcome).to be_exception
+    expect(result.exception).to be_a(ArgumentError)
+    expect(result.exception.message).to match(/unsupported unit/)
+  end
 end

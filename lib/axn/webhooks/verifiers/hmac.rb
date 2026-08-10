@@ -26,7 +26,9 @@ module Axn
             prefix:,
             timestamp:,
             tolerance: replay&.fetch(:within),
-            unit: replay&.[](:unit) || :seconds,
+            # Default only when `unit:` is absent — an explicit `unit: nil`/`false` (e.g. an
+            # unset env var) must still hit Signature's ArgumentError, not silently become :seconds.
+            unit: replay&.key?(:unit) ? replay[:unit] : :seconds,
           )
         end
       end
