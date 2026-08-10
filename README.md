@@ -101,19 +101,11 @@ Handlers run synchronously or asynchronously depending on `mode:` — see [Async
 ### Respond with a custom body
 
 By default a successful request gets a bare 2xx ack — most vendors want nothing else. Add
-`respond` only for the two real cases that need it: a literal string body, or an
-instruction body the handler computed (e.g. TwiML, or a JSON instruction body). The block
-receives the handler's own `Axn::Result` and runs with `ack`/`text`/`xml`/`json` available as
-bare calls:
+`respond` when the body itself depends on what the handler computed — an instruction body like
+TwiML, or a JSON instruction body. The block receives the handler's own `Axn::Result` and runs
+with `ack`/`text`/`xml`/`json` available as bare calls:
 
 ```ruby
-# DropboxSign requires this exact literal string:
-Axn::Webhooks.inbound :dropbox_sign do
-  verify { |req| … }
-  dispatch to: "Actions::DropboxSign::HandleWebhook"
-  respond { |_result| text("Hello API Event Received") }
-end
-
 # Twilio call-control: the handler computes TwiML; respond renders it.
 Axn::Webhooks.inbound :twilio do
   verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
@@ -128,15 +120,37 @@ Axn::Webhooks.inbound :slack do
   dispatch to: "Actions::Slack::HandleInteraction"
   respond { |result| json(result.response_action, status: 200) }   # handler exposes :response_action
 end
+```
+
+`respond` only runs for a genuine handler success — an unmatched event acked via
+`otherwise: :ack`, a handler's own business `fail!`, and a verify failure or crash all get
+their own fixed status (see below) regardless of any declared `respond`. For a literal body
+that doesn't need to read the handler's result — a fixed string the vendor requires no matter
+how dispatch resolves — see `static_respond` below.
+
+#### static_respond
+
+For a body that must render regardless of how dispatch resolves — including async enqueue,
+`otherwise: :ack`, and business `fail!` — use `static_respond` instead. Unlike `respond`, its
+block takes **no arguments** (it never reads the handler's result), so declaring it does not
+force sync dispatch and is compatible with explicit `mode: :async`:
+
+```ruby
+# DropboxSign requires this exact literal string, and DropboxSign's handler must run async
+# (it makes outbound API calls) — static_respond renders regardless of dispatch outcome:
+Axn::Webhooks.inbound :dropbox_sign do
+  verify { |req| … }
+  dispatch to: "Actions::DropboxSign::HandleWebhook"   # stays async under mode: :auto
+  static_respond { text("Hello API Event Received") }
+end
 
 response = Axn::Webhooks::Inbound[:dropbox_sign].to_response(request)  # => Axn::Webhooks::Response
 response.status   # => 200
 response.body     # => "Hello API Event Received"
 ```
 
-`respond` only runs for a genuine handler success — an unmatched event acked via
-`otherwise: :ack`, a handler's own business `fail!`, and a verify failure or crash all get
-their own fixed status (see below) regardless of any declared `respond`.
+`respond` and `static_respond` are mutually exclusive — declaring both on one endpoint raises at
+registration time.
 
 ### The staged HTTP outcome mapping
 
@@ -150,6 +164,10 @@ outcome to an HTTP status:
 | Dispatch | unknown-but-expected event (`otherwise: :ack`) | 2xx ack |
 | Handle | the handler's own business `fail!` ("we don't care") | 2xx ack (logged) |
 | Handle | success | the declared `respond` body, or a bare 2xx ack |
+
+A declared `static_respond` renders on every row above except the 401 row and the 500 row — and,
+not shown in the table above, a `retry_later!` 503 — including `otherwise: :ack`, business
+`fail!`, and a genuine handler success with no `respond` declared.
 
 ### Async dispatch
 
@@ -171,6 +189,10 @@ end
 A custom `respond` block reads the handler's own result, so those hooks always run **sync** (you
 can't read a result you enqueued) regardless of adapter config — and declaring both an explicit
 `mode: :async` and a custom `respond` raises at registration time.
+
+`static_respond`, by contrast, never reads a result, so it never forces sync and is compatible
+with an explicit `mode: :async` — it's the right choice for a vendor like DropboxSign that needs
+both a literal ack body and an async handler.
 
 #### Per-route sync/async on one endpoint
 

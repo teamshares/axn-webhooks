@@ -33,6 +33,7 @@ module Axn
           verifier: dsl.__verifier__,
           dispatch: dsl.__dispatch__,
           respond: dsl.__respond__,
+          static_respond: dsl.__static_respond__,
           challenge: dsl.__challenge__,
         ),
       )

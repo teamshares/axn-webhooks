@@ -7,17 +7,24 @@ module Axn
       # the (verified, parsed) event to a handler Axn, and maps the pipeline's outcome to an
       # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
-        def initialize(name:, verifier:, dispatch: nil, respond: nil, challenge: nil)
+        def initialize(name:, verifier:, dispatch: nil, respond: nil, static_respond: nil, challenge: nil)
           if dispatch && dispatch[:mode] == :async && respond
             raise Axn::Webhooks::Error,
                   "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
                   "can't produce a handler_result for it to read — use `mode: :sync` (or omit mode) or drop the respond block"
           end
 
+          if respond && static_respond
+            raise Axn::Webhooks::Error,
+                  "inbound endpoint `#{name}` declares both `respond` and `static_respond` — declare only one; " \
+                  "`respond` reads the handler's result, `static_respond` doesn't and renders on every non-error outcome"
+          end
+
           @name = name.to_sym
           @verifier = verifier
           @dispatch = dispatch
           @respond = respond
+          @static_respond = static_respond
           @challenge = challenge
         end
 
@@ -46,7 +53,7 @@ module Axn
         def to_response(request)
           verified = verify(request)
           return Response.new(status: 401) unless verified.ok?
-          return Response.ack unless @dispatch
+          return default_ack unless @dispatch
 
           dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
                                      mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
@@ -87,13 +94,24 @@ module Axn
         def response_for(dispatched)
           return Response.service_unavailable(retry_after: dispatched.retry_after) if dispatched.retry_later
           return Response.new(status: 500) if dispatched.outcome.exception?
-          return Response.ack if dispatched.outcome.failure?    # handler fail! -> quiet 2xx, already logged
-          return Response.ack if dispatched.handler_result.nil? # otherwise: :ack -> bare ack, nothing to render
-          return Response.ack unless @respond
+          return default_ack if dispatched.outcome.failure?    # handler fail! -> quiet ack (or static body)
+          return default_ack if dispatched.handler_result.nil? # otherwise: :ack / async enqueue -> ack (or static body)
+          return default_ack unless @respond
 
           # Run the user's respond block inside the Respond axn so a raise in it (e.g. reading a
           # missing exposure) becomes a reported 500, not an exception escaping the HTTP mapper.
           responded = Respond.call(handler_result: dispatched.handler_result, responder: @respond, vendor: @name)
+          responded.ok? ? responded.response : Response.new(status: 500)
+        end
+
+        # The bare-ack default, or the declared static_respond body in its place. Every branch
+        # above that used to hardcode `Response.ack` (dispatch.failure?, nil handler_result, no
+        # respond declared, no dispatch at all) now goes through here — static_respond, unlike
+        # respond, has no handler_result to read, so it renders on all of them uniformly.
+        def default_ack
+          return Response.ack unless @static_respond
+
+          responded = StaticRespond.call(responder: @static_respond, vendor: @name)
           responded.ok? ? responded.response : Response.new(status: 500)
         end
       end

@@ -20,10 +20,26 @@ module Axn
 
         # respond { |handler_result| text("...") } — maps a genuine handler success to a
         # Response. Every other outcome (ack, business fail!, verify failure/exception, or a
-        # no-dispatch endpoint) always gets the default bare ack, regardless of this declaration
-        # — see Endpoint#to_response.
+        # no-dispatch endpoint) always gets the default bare ack (or a declared `static_respond`
+        # body — see below), regardless of this declaration — see Endpoint#to_response.
         def respond(&block)
           @respond_block = block
+        end
+
+        # static_respond { text("...") } — a body that does NOT read the handler result (block
+        # takes zero args, unlike respond's `|handler_result|`), so it renders on every non-error
+        # outcome: sync success, async enqueue, otherwise: :ack, and business fail! — see
+        # Endpoint#default_ack. Mutually exclusive with `respond` (Endpoint#initialize raises if
+        # both are declared) and never forces sync dispatch (Dispatch#async? never reads it).
+        def static_respond(&block)
+          if block && !block.parameters.empty?
+            raise Axn::Webhooks::Error,
+                  "inbound endpoint's static_respond block must take no arguments (it never reads the " \
+                  "handler's result, unlike respond) — got a parameter; use `respond` instead if you need " \
+                  "to read the handler's result"
+          end
+
+          @static_respond_block = block
         end
 
         # challenge ->(req){ req.params["challenge"] }                          — Nylas
@@ -90,6 +106,9 @@ module Axn
 
         # Internal: the captured respond block, or nil if none declared.
         def __respond__ = @respond_block
+
+        # Internal: the captured static_respond block, or nil if none declared.
+        def __static_respond__ = @static_respond_block
 
         # Internal: the captured { resolver:, guard: } challenge declaration, or nil if none.
         def __challenge__ = @challenge_spec
