@@ -26,6 +26,15 @@ module Axn
           @respond_block = block
         end
 
+        # static_respond { text("...") } — a body that does NOT read the handler result (block
+        # takes zero args, unlike respond's `|handler_result|`), so it renders on every non-error
+        # outcome: sync success, async enqueue, otherwise: :ack, and business fail! — see
+        # Endpoint#default_ack. Mutually exclusive with `respond` (Endpoint#initialize raises if
+        # both are declared) and never forces sync dispatch (Dispatch#async? never reads it).
+        def static_respond(&block)
+          @static_respond_block = block
+        end
+
         # challenge ->(req){ req.params["challenge"] }                          — Nylas
         # challenge ->(req){ req.params["hub.challenge"] }, if: ->(req){ ... }  — Meta
         def challenge(resolver, if: nil)
@@ -90,6 +99,9 @@ module Axn
 
         # Internal: the captured respond block, or nil if none declared.
         def __respond__ = @respond_block
+
+        # Internal: the captured static_respond block, or nil if none declared.
+        def __static_respond__ = @static_respond_block
 
         # Internal: the captured { resolver:, guard: } challenge declaration, or nil if none.
         def __challenge__ = @challenge_spec
