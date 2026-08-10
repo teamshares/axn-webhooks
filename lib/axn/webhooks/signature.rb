@@ -9,6 +9,7 @@ module Axn
     # Both inbound `verify` and (future) outbound `sign` build on this. ALWAYS constant-time.
     module Signature
       DIGESTS = { sha256: "SHA256", sha1: "SHA1", md5: "MD5" }.freeze
+      UNITS = { seconds: 1, ms: 1_000, milliseconds: 1_000, microseconds: 1_000_000 }.freeze
 
       module_function
 
@@ -16,9 +17,9 @@ module Axn
       # `signature` may hold several whitespace/comma-separated candidates (key rotation);
       # returns true if ANY matches. Never raises on hostile input.
       def hmac(secret:, payload:, signature:, digest: :sha256, encoding: :hex, prefix: nil,
-               timestamp: nil, tolerance: nil, now: nil)
+               timestamp: nil, tolerance: nil, now: nil, unit: :seconds)
         return false if signature.nil? || signature.to_s.empty?
-        return false if tolerance && !within_tolerance?(timestamp:, tolerance:, now: now || Time.now)
+        return false if tolerance && !within_tolerance?(timestamp:, tolerance:, now: now || Time.now, unit:)
 
         expected = compute(secret:, payload:, digest:, encoding:)
         candidates(signature, prefix:).any? { |candidate| secure_compare(candidate, expected) }
@@ -39,8 +40,8 @@ module Axn
       end
 
       # True when `timestamp` is present, parseable, and within ±tolerance seconds of `now`.
-      def within_tolerance?(timestamp:, tolerance:, now: nil)
-        epoch = coerce_epoch(timestamp)
+      def within_tolerance?(timestamp:, tolerance:, now: nil, unit: :seconds)
+        epoch = coerce_epoch(timestamp, unit)
         return false if epoch.nil?
 
         ((now || Time.now).to_i - epoch).abs <= tolerance.to_i
@@ -75,11 +76,13 @@ module Axn
       end
       private_class_method :candidates
 
-      def coerce_epoch(timestamp)
+      def coerce_epoch(timestamp, unit)
+        divisor = UNITS.fetch(unit) { raise ArgumentError, "unsupported unit: #{unit.inspect}" }
+
         case timestamp
         when Time    then timestamp.to_i
-        when Integer then timestamp
-        when String  then (Integer(timestamp, 10) if timestamp.match?(/\A-?\d+\z/))
+        when Integer then timestamp / divisor
+        when String  then (Integer(timestamp, 10) / divisor if timestamp.match?(/\A-?\d+\z/))
         end
       end
       private_class_method :coerce_epoch
