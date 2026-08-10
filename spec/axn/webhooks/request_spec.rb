@@ -157,6 +157,37 @@ RSpec.describe Axn::Webhooks::Request do
       expect(request.raw_body).to eq('{"a":1}')
     end
 
+    it "rewinds a rack.input an upstream middleware already consumed (Rack 3 + Rack::MethodOverride)" do
+      # Rack 3's Rack::Request#POST no longer rewinds after parsing a form-urlencoded body, and
+      # Rails runs Rack::MethodOverride (which calls #POST) ahead of the router. So a mounted
+      # endpoint receives an input positioned at EOF for every form POST — Twilio and Slack, i.e.
+      # precisely the vendors whose signature is computed over params/body.
+      body = "From=%2B15551234567&Body=hi"
+      input = StringIO.new(body)
+      input.read # simulate the upstream consumer leaving it at EOF
+      expect(input.eof?).to be(true)
+
+      request = described_class.from_rack(
+        rack_env("rack.input" => input, "CONTENT_TYPE" => "application/x-www-form-urlencoded"),
+      )
+
+      expect(request.raw_body).to eq(body)
+      expect(request.params).to eq("From" => "+15551234567", "Body" => "hi")
+    end
+
+    it "treats a MISSING rack.input as an empty body (Rack 3 makes it optional)" do
+      # Rack 2 required rack.input on every request; Rack 3 does not, so a bodyless request may
+      # omit it entirely — Rack::MockRequest.env_for (and therefore every Rails request spec) does.
+      # Fetching it would 500 the bodyless GET challenge handshake that `challenge` exists to serve.
+      env = rack_env("REQUEST_METHOD" => "GET", "QUERY_STRING" => "challenge=xyz")
+      env.delete("rack.input")
+
+      request = nil
+      expect { request = described_class.from_rack(env) }.not_to raise_error
+      expect(request.raw_body).to eq("")
+      expect(request.params).to eq("challenge" => "xyz")
+    end
+
     it "tolerates a rack.input whose #rewind responds but RAISES (non-seekable pipe/socket)" do
       # Some rack.input-like streams (e.g. a pipe or socket) DO respond_to?(:rewind) but raise
       # Errno::ESPIPE (or similar) when actually called, because the underlying descriptor isn't

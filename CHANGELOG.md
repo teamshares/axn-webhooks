@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+- `Request.from_rack` now rewinds `rack.input` **before** reading it, not only after. Rack 3's
+  `Rack::Request#POST` no longer rewinds after parsing a form-urlencoded body, and Rails' default
+  middleware stack runs `Rack::MethodOverride` (which calls `#POST` looking for `_method`) ahead of
+  the router — so a mounted endpoint received an input already at EOF for **every form-encoded
+  POST**, silently emptying both `raw_body` and `params`. That broke dispatch *and* signature
+  verification for exactly the vendors that post forms (Twilio, Slack), while JSON vendors were
+  unaffected (MethodOverride only parses forms), which is why no existing spec caught it. The
+  dummy Rails app now runs `Rack::MethodOverride` explicitly — `config.api_only` had dropped it, so
+  the app under test was not representative of a real Rails host.
+- `Request.from_rack` no longer requires `rack.input` to be present. It was mandatory under Rack 2
+  but is **optional** under Rack 3, so a bodyless request may omit the key entirely — which
+  `Rack::MockRequest.env_for` does, and therefore so does every Rails request/integration spec. The
+  hard `env.fetch("rack.input")` turned that into a `KeyError` → reported exception → **500 on the
+  bodyless GET challenge handshake**, i.e. the exact Nylas/Meta flow `challenge` exists to serve. A
+  missing input is now read as an empty body. The pre-existing "malformed env" spec asserted the old
+  behavior via `{ "REQUEST_METHOD" => "POST" }`; since no hand-built env is sparse enough to break
+  parsing anymore, it now stubs `from_rack` to raise so it still pins the real invariant (a
+  BuildRequest failure maps to a clean 500 rather than escaping as a raise).
+
 ### Added
 - Dispatch handler targets now accept the **class itself**, not only a class-name string — `to: Foo`,
   `to: { "k" => Foo }`, and `async(Foo)`/`sync(Foo)` all work alongside the string forms. A named

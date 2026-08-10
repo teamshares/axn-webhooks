@@ -23,20 +23,27 @@ module Axn
         @headers[name.to_s.downcase]
       end
 
-      # Build a Request from a Rack env. Reads rack.input ONCE, capturing the exact pristine bytes,
-      # before rewinding — this (not a controller's already-parsed params) is why the spec chose a
-      # Rack mount over a controller concern (see "## Packaging" in the design spec). The rewind is
-      # best-effort courtesy for anything downstream: our own pipeline only ever needs raw_body, so
-      # a non-rewindable rack.input (e.g. a bare Rack::Builder mount on a streaming server, with no
-      # Rack::RewindableInput::Middleware in front) is tolerated rather than raising mid-request.
+      # Build a Request from a Rack env, capturing the exact pristine body bytes — this (not a
+      # controller's already-parsed params) is why the spec chose a Rack mount over a controller
+      # concern (see "## Packaging" in the design spec).
+      #
+      # rack.input is OPTIONAL under Rack 3 (it was mandatory in Rack 2), so a bodyless request may
+      # omit the key entirely — Rack::MockRequest.env_for does exactly that, which is what a Rails
+      # integration/request spec builds. Treat a missing input as an empty body rather than a
+      # malformed env: the GET challenge handshake (Nylas, Meta) is bodyless by definition, so
+      # fetching here would 500 the very handshake `challenge` exists to serve.
+      #
+      # We rewind BEFORE reading, not only after. Under Rack 3, `Rack::Request#POST` no longer
+      # rewinds rack.input after parsing a form-urlencoded body — and Rails' default middleware
+      # stack runs `Rack::MethodOverride` (which calls `#POST` looking for `_method`) ahead of the
+      # router. So by the time a mounted endpoint runs, the input of every form-encoded POST is
+      # already at EOF and reads as "". That silently empties raw_body AND params for exactly the
+      # vendors that post forms (Twilio, Slack), breaking dispatch and signature verification alike.
       def self.from_rack(env)
-        input = env.fetch("rack.input")
-        raw_body = input.read || ""
-        begin
-          input.rewind
-        rescue StandardError
-          nil # rewind is a courtesy; a non-rewindable/non-seekable stream (pipe/socket) is fine — raw_body is already captured
-        end
+        input = env["rack.input"]
+        rewind(input)
+        raw_body = input&.read || ""
+        rewind(input) # courtesy for anything downstream of us
 
         content_type = env["CONTENT_TYPE"]
         new(
@@ -47,6 +54,17 @@ module Axn
           http_method: env["REQUEST_METHOD"],
         )
       end
+
+      # Best-effort: a non-rewindable/non-seekable stream (pipe/socket, or a bare Rack::Builder mount
+      # with no Rack::RewindableInput::Middleware in front) is tolerated rather than raising
+      # mid-request. Nothing upstream can have consumed such a stream either, so a single forward
+      # read still yields the pristine body.
+      def self.rewind(input)
+        input&.rewind
+      rescue StandardError
+        nil
+      end
+      private_class_method :rewind
 
       # HTTP_* env keys -> header names ("HTTP_X_SIG" -> "X-Sig"-ish; case doesn't matter, #header
       # looks up case-insensitively). CONTENT_TYPE/CONTENT_LENGTH are Rack's two documented
