@@ -2,6 +2,7 @@
 
 require "rack"
 require "rack/utils"
+require "stringio"
 
 module Axn
   module Webhooks
@@ -118,28 +119,38 @@ module Axn
           # form-hash caching (and of whatever position upstream middleware left rack.input in).
           Rack::Utils.parse_nested_query(raw_body)
         elsif content_type&.start_with?("multipart/form-data")
-          parse_multipart(env)
+          parse_multipart(env, raw_body)
         else
           Rack::Utils.parse_nested_query(env["QUERY_STRING"])
         end
       end
       private_class_method :extract_params
 
-      # Rack owns multipart parsing (boundary handling differs across Rack 3 minors), so delegate.
+      # Rack owns multipart parsing (boundary handling differs across Rack 3 minors), so delegate —
+      # but feed it a StringIO over the bytes we already captured, never the live rack.input.
+      # `Rack::Request#POST` reads its input, and reading the real stream a SECOND time is exactly
+      # what `from_rack` is built to avoid: a bare Rack/streaming host (no
+      # Rack::RewindableInput::Middleware) hands us an input that is readable but NOT rewindable, so
+      # the second read would see EOF and yield `{}` — reintroducing the empty-params bug this
+      # branch exists to fix, on every non-Rails host. Parsing the captured body also keeps us
+      # independent of wherever upstream middleware left the stream (Rack 3's MethodOverride leaves
+      # form POSTs at EOF) and leaves the caller's input untouched for anything downstream.
       #
-      # `#POST` reads rack.input, hence the rewind afterwards — `from_rack` already rewound before
-      # its own `raw_body` read, so input is at 0 when we get here, but it would be left at EOF for
-      # anything downstream of the mount.
+      # CONTENT_LENGTH is restated because it must describe the substitute input, and the env is
+      # duped because `#POST` memoizes into rack.request.form_hash/form_input — a cache keyed to our
+      # synthetic StringIO has no business leaking into the caller's env.
       #
       # A malformed body must yield `{}`, not raise: this runs on an UNVERIFIED request, so any
       # parse error Rack raises (Rack::Multipart::EmptyContentError and friends) would let a hostile
       # sender crash the pipeline before `verify` ever gets to reject them.
-      def self.parse_multipart(env)
-        Rack::Request.new(env).POST
+      def self.parse_multipart(env, raw_body)
+        parse_env = env.merge(
+          "rack.input" => StringIO.new(raw_body),
+          "CONTENT_LENGTH" => raw_body.bytesize.to_s,
+        )
+        Rack::Request.new(parse_env).POST
       rescue StandardError
         {}
-      ensure
-        rewind(env["rack.input"])
       end
       private_class_method :parse_multipart
 

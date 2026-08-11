@@ -274,13 +274,53 @@ RSpec.describe Axn::Webhooks::Request do
         expect(request.url).to end_with("?extra=1")
       end
 
-      it "leaves rack.input rewound for downstream middleware" do
-        # Rack::Request#POST reads rack.input to parse the body; leaving it at EOF would break
-        # anything downstream of the mount that reads the body again.
+      it "leaves rack.input untouched and rewound for downstream middleware" do
+        # We parse a StringIO over the already-captured raw_body, never the live stream, so the
+        # original input is left exactly where from_rack's own rewind put it.
         body = multipart_body("json" => '{"a":1}')
         env = multipart_env(body)
         described_class.from_rack(env)
         expect(env["rack.input"].read).to eq(body)
+      end
+
+      it "parses a NON-REWINDABLE rack.input (bare Rack / streaming server)" do
+        # from_rack explicitly supports an input that's readable but not rewindable — raw_body is
+        # captured on the single forward read. Parsing multipart by reading rack.input a SECOND
+        # time would hit EOF there and silently yield {}, i.e. exactly the empty-params bug this
+        # branch exists to fix, just relocated to every non-Rails host.
+        body = multipart_body("json" => '{"a":1}')
+        non_rewindable_input = Class.new do
+          def initialize(body) = @io = StringIO.new(body)
+          def read(...) = @io.read(...)
+        end.new(body)
+
+        request = described_class.from_rack(multipart_env(body, "rack.input" => non_rewindable_input))
+
+        expect(request.raw_body).to eq(body)
+        expect(request.params).to eq("json" => '{"a":1}')
+      end
+
+      it "parses an input an upstream middleware already consumed to EOF" do
+        # Same hazard from the other direction: Rack 3's Rack::MethodOverride leaves form POSTs at
+        # EOF. from_rack rewinds before its own read, so raw_body is intact — params must be too.
+        body = multipart_body("json" => '{"a":1}')
+        input = StringIO.new(body)
+        input.read
+        expect(input.eof?).to be(true)
+
+        request = described_class.from_rack(multipart_env(body, "rack.input" => input))
+
+        expect(request.params).to eq("json" => '{"a":1}')
+      end
+
+      it "does not write its parse cache into the caller's env" do
+        # Rack::Request#POST memoizes into rack.request.form_hash/form_input. Ours is keyed to the
+        # synthetic StringIO, so leaking it would make a downstream #POST either re-parse anyway or
+        # trust a hash it didn't build. Parse against a dup instead.
+        env = multipart_env(multipart_body("json" => '{"a":1}'))
+        before = env.keys
+        described_class.from_rack(env)
+        expect(env.keys).to eq(before)
       end
 
       it "yields {} for a malformed/truncated body instead of raising" do

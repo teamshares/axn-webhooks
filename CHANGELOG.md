@@ -11,9 +11,12 @@
   `Base64(hex(HMAC-MD5(api_key, json_field)))`, and the payload is `JSON.parse(params["json"])` —
   so **every live Dropbox Sign delivery 401'd**. A spec that posted the same fields urlencoded
   passed, which is why nothing caught it. Multipart parsing is delegated to `Rack::Request#POST`
-  (which handles both encodings across Rack 3 minors), with `rack.input` rewound afterwards and a
-  malformed body yielding `{}` rather than raising — a hostile *unverified* request must not be
-  able to crash the pipeline before `verify` runs. The existing contract is unchanged: `params` is
+  (which handles both encodings across Rack 3 minors), fed a `StringIO` over the already-captured
+  `raw_body` rather than the live `rack.input` — re-reading the real stream would yield `{}` on a
+  bare Rack/streaming host, whose input is readable but *not* rewindable, and would leave the input
+  at EOF for anything downstream. A malformed body yields `{}` rather than raising: a hostile
+  *unverified* request must not be able to crash the pipeline before `verify` runs. The existing
+  contract is unchanged: `params` is
   the request's primary param source, never a query+form merge, and GET/HEAD always read the query
   string.
 - **Security:** `Request#inspect` no longer renders `raw_body`/`headers` in full. The inbound
