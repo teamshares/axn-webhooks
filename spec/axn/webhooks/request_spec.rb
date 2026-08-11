@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "pp"
+require "tempfile"
 
 RSpec.describe Axn::Webhooks::Request do
   subject(:request) do
@@ -231,6 +232,168 @@ RSpec.describe Axn::Webhooks::Request do
       request = nil
       expect { request = described_class.from_rack(rack_env("rack.input" => raising_input)) }.not_to raise_error
       expect(request.raw_body).to eq('{"a":1}')
+    end
+
+    describe "multipart/form-data bodies" do
+      # PRO-3111: `extract_params` only recognized application/x-www-form-urlencoded as a form body,
+      # so a multipart POST fell through to the QUERY_STRING branch and `params` came back empty.
+      # Dropbox Sign posts the entire event as a single multipart `json` field and its verification
+      # reads that field twice (Content-MD5 over it, then JSON.parse of it) — so every live delivery
+      # 401'd. Invisible to a spec that posts the same fields urlencoded, hence these.
+      let(:boundary) { "----AxnWebhooksBoundary9dK3" }
+
+      def multipart_body(fields)
+        fields.map do |name, value|
+          "--#{boundary}\r\nContent-Disposition: form-data; name=\"#{name}\"\r\n\r\n#{value}\r\n"
+        end.join + "--#{boundary}--\r\n"
+      end
+
+      def multipart_env(body, **overrides)
+        rack_env(
+          "rack.input" => StringIO.new(body),
+          "CONTENT_TYPE" => "multipart/form-data; boundary=#{boundary}",
+          "CONTENT_LENGTH" => body.bytesize.to_s,
+          **overrides,
+        )
+      end
+
+      it "exposes the form fields on params (Dropbox Sign's single `json` field)" do
+        body = multipart_body("json" => '{"a":1}')
+        request = described_class.from_rack(multipart_env(body))
+
+        expect(request.params).to eq("json" => '{"a":1}')
+        expect(request.raw_body).to eq(body) # verify still sees the untouched raw bytes
+      end
+
+      it "sets params to the form fields only, NOT merged with the query" do
+        # Same invariant as the urlencoded branch: `url` already carries the query string, so
+        # merging it into params would double-count it for URL-signing verifiers.
+        body = multipart_body("json" => '{"a":1}')
+        request = described_class.from_rack(multipart_env(body, "QUERY_STRING" => "extra=1"))
+
+        expect(request.params).to eq("json" => '{"a":1}')
+        expect(request.url).to end_with("?extra=1")
+      end
+
+      it "leaves rack.input untouched and rewound for downstream middleware" do
+        # We parse a StringIO over the already-captured raw_body, never the live stream, so the
+        # original input is left exactly where from_rack's own rewind put it.
+        body = multipart_body("json" => '{"a":1}')
+        env = multipart_env(body)
+        described_class.from_rack(env)
+        expect(env["rack.input"].read).to eq(body)
+      end
+
+      it "parses a NON-REWINDABLE rack.input (bare Rack / streaming server)" do
+        # from_rack explicitly supports an input that's readable but not rewindable — raw_body is
+        # captured on the single forward read. Parsing multipart by reading rack.input a SECOND
+        # time would hit EOF there and silently yield {}, i.e. exactly the empty-params bug this
+        # branch exists to fix, just relocated to every non-Rails host.
+        body = multipart_body("json" => '{"a":1}')
+        non_rewindable_input = Class.new do
+          def initialize(body) = @io = StringIO.new(body)
+          def read(...) = @io.read(...)
+        end.new(body)
+
+        request = described_class.from_rack(multipart_env(body, "rack.input" => non_rewindable_input))
+
+        expect(request.raw_body).to eq(body)
+        expect(request.params).to eq("json" => '{"a":1}')
+      end
+
+      it "parses an input an upstream middleware already consumed to EOF" do
+        # Same hazard from the other direction: Rack 3's Rack::MethodOverride leaves form POSTs at
+        # EOF. from_rack rewinds before its own read, so raw_body is intact — params must be too.
+        body = multipart_body("json" => '{"a":1}')
+        input = StringIO.new(body)
+        input.read
+        expect(input.eof?).to be(true)
+
+        request = described_class.from_rack(multipart_env(body, "rack.input" => input))
+
+        expect(request.params).to eq("json" => '{"a":1}')
+      end
+
+      describe "file parts (rack.tempfiles)" do
+        # Rack spills every file part to a Tempfile and registers it on the env it parsed, and
+        # Rack::TempfileReaper (in Rails' default stack) closes/unlinks that list when the response
+        # body is closed. Rack 3 *assigns* `env["rack.tempfiles"] = info.tmp_files` rather than
+        # appending — so parsing against our dup left the caller's list untouched (empty, not
+        # merely stale) and the reaper closed nothing. Every file-bearing delivery would then hold
+        # an fd and an on-disk file until GC finalized it.
+        let(:file_body) do
+          "--#{boundary}\r\n" \
+            "Content-Disposition: form-data; name=\"attachment\"; filename=\"doc.pdf\"\r\n" \
+            "Content-Type: application/pdf\r\n\r\n" \
+            "%PDF-1.4 pretend bytes\r\n" \
+            "--#{boundary}--\r\n"
+        end
+
+        it "registers the tempfile on the CALLER's env, so TempfileReaper can reap it" do
+          env = multipart_env(file_body)
+          request = described_class.from_rack(env)
+
+          tempfile = request.params.dig("attachment", :tempfile)
+          expect(tempfile).to be_a(Tempfile)
+          expect(env["rack.tempfiles"]).to include(tempfile)
+        end
+
+        it "appends to the reaper's pre-seeded list in place, rather than replacing it" do
+          # Rack::TempfileReaper does `env[RACK_TEMPFILES] ||= []` on the way in and reaps that
+          # key on the way out. Anything already in the list (an upstream middleware's tempfile)
+          # must survive our parse.
+          upstream = Tempfile.new("upstream")
+          env = multipart_env(file_body, "rack.tempfiles" => [upstream])
+          seeded = env["rack.tempfiles"]
+
+          request = described_class.from_rack(env)
+
+          expect(env["rack.tempfiles"]).to equal(seeded) # same object the reaper holds
+          expect(env["rack.tempfiles"]).to contain_exactly(upstream, request.params.dig("attachment", :tempfile))
+        ensure
+          upstream&.close!
+        end
+
+        it "leaves the env's tempfile list alone when the body has no file parts" do
+          env = multipart_env(multipart_body("json" => '{"a":1}'))
+          described_class.from_rack(env)
+          expect(env).not_to have_key("rack.tempfiles")
+        end
+      end
+
+      it "does not write its parse cache into the caller's env" do
+        # Rack::Request#POST memoizes into rack.request.form_hash/form_input. Ours is keyed to the
+        # synthetic StringIO, so leaking it would make a downstream #POST either re-parse anyway or
+        # trust a hash it didn't build. Parse against a dup instead — the tempfile list (above) is
+        # the one thing deliberately propagated back, because it needs reaping.
+        env = multipart_env(multipart_body("json" => '{"a":1}'))
+        before = env.keys
+        described_class.from_rack(env)
+        expect(env.keys).to eq(before)
+        expect(env.keys.grep(/\Arack\.request\./)).to be_empty
+      end
+
+      it "yields {} for a malformed/truncated body instead of raising" do
+        # A hostile *unverified* request must not be able to crash the pipeline before `verify`
+        # runs — Rack's multipart parser raises (EmptyContentError and friends) on garbage.
+        truncated = "--#{boundary}\r\nContent-Disposition: form-data; name=\"json\""
+
+        request = nil
+        expect { request = described_class.from_rack(multipart_env(truncated)) }.not_to raise_error
+        expect(request.params).to eq({})
+        expect(request.raw_body).to eq(truncated)
+      end
+
+      it "yields {} for an empty body" do
+        request = described_class.from_rack(multipart_env(""))
+        expect(request.params).to eq({})
+      end
+
+      it "uses QUERY_STRING for a GET with a multipart Content-Type" do
+        env = multipart_env("", "REQUEST_METHOD" => "GET", "QUERY_STRING" => "challenge=xyz")
+        request = described_class.from_rack(env)
+        expect(request.params).to eq("challenge" => "xyz")
+      end
     end
 
     it "uses QUERY_STRING for a GET with a form-urlencoded Content-Type and empty body (challenge regression)" do

@@ -2,6 +2,7 @@
 
 require "rack"
 require "rack/utils"
+require "stringio"
 
 module Axn
   module Webhooks
@@ -103,16 +104,73 @@ module Axn
       #
       # - form-urlencoded body on a request that carries one (Twilio's SMS/voice POST) -> params =
       #   form fields only; the query (if any) is still reachable via `url`.
+      # - multipart/form-data body -> same, parsed by Rack (Dropbox Sign posts the whole event as a
+      #   single `json` field, and its verifier reads that field twice: Content-MD5 over it, then
+      #   JSON.parse of it).
       # - everything else (GET/HEAD query, JSON POST, etc.) -> params = query string (e.g. the
       #   Nylas/Meta GET challenge, read via `req.params["challenge"]`). GET/HEAD never carry a
       #   body, so even a form-urlencoded default Content-Type header on a GET (common on
       #   challenge requests) must not shadow the query string with an empty-body parse.
       def self.extract_params(env, raw_body, content_type)
-        method = env["REQUEST_METHOD"]
-        form_body = content_type&.start_with?("application/x-www-form-urlencoded") && !%w[GET HEAD].include?(method)
-        Rack::Utils.parse_nested_query(form_body ? raw_body : env["QUERY_STRING"])
+        return Rack::Utils.parse_nested_query(env["QUERY_STRING"]) if %w[GET HEAD].include?(env["REQUEST_METHOD"])
+
+        if content_type&.start_with?("application/x-www-form-urlencoded")
+          # Parsed from raw_body rather than via Rack, so this branch stays independent of Rack's
+          # form-hash caching (and of whatever position upstream middleware left rack.input in).
+          Rack::Utils.parse_nested_query(raw_body)
+        elsif content_type&.start_with?("multipart/form-data")
+          parse_multipart(env, raw_body)
+        else
+          Rack::Utils.parse_nested_query(env["QUERY_STRING"])
+        end
       end
       private_class_method :extract_params
+
+      # Rack owns multipart parsing (boundary handling differs across Rack 3 minors), so delegate —
+      # but feed it a StringIO over the bytes we already captured, never the live rack.input.
+      # `Rack::Request#POST` reads its input, and reading the real stream a SECOND time is exactly
+      # what `from_rack` is built to avoid: a bare Rack/streaming host (no
+      # Rack::RewindableInput::Middleware) hands us an input that is readable but NOT rewindable, so
+      # the second read would see EOF and yield `{}` — reintroducing the empty-params bug this
+      # branch exists to fix, on every non-Rails host. Parsing the captured body also keeps us
+      # independent of wherever upstream middleware left the stream (Rack 3's MethodOverride leaves
+      # form POSTs at EOF) and leaves the caller's input untouched for anything downstream.
+      #
+      # CONTENT_LENGTH is restated because it must describe the substitute input, and the env is
+      # duped because `#POST` memoizes into rack.request.form_hash/form_input — a cache keyed to our
+      # synthetic StringIO has no business leaking into the caller's env.
+      #
+      # A malformed body must yield `{}`, not raise: this runs on an UNVERIFIED request, so any
+      # parse error Rack raises (Rack::Multipart::EmptyContentError and friends) would let a hostile
+      # sender crash the pipeline before `verify` ever gets to reject them.
+      def self.parse_multipart(env, raw_body)
+        parse_env = env.merge(
+          "rack.input" => StringIO.new(raw_body),
+          "CONTENT_LENGTH" => raw_body.bytesize.to_s,
+        )
+        Rack::Request.new(parse_env).POST.tap { adopt_tempfiles(env, parse_env) }
+      rescue StandardError
+        {}
+      end
+      private_class_method :parse_multipart
+
+      # File parts get spilled to Tempfiles, and Rack::TempfileReaper (in Rails' default stack)
+      # closes/unlinks whatever it finds under "rack.tempfiles" when the response body closes. Rack
+      # *assigns* that key (`env[RACK_TEMPFILES] = info.tmp_files`) rather than appending, so
+      # parsing against our dup would leave the caller's list empty — not merely stale — and the
+      # reaper would close nothing, holding an fd and an on-disk file per file-bearing delivery
+      # until GC finalized it. Hand the tempfiles back to the env the reaper actually reads.
+      #
+      # Appended in place when a list already exists: the reaper seeds `env[RACK_TEMPFILES] ||= []`
+      # on the way in, and an upstream middleware's tempfiles must survive our parse.
+      def self.adopt_tempfiles(env, parse_env)
+        tempfiles = parse_env["rack.tempfiles"]
+        return if tempfiles.nil? || tempfiles.empty?
+
+        existing = env["rack.tempfiles"]
+        existing.is_a?(Array) ? existing.concat(tempfiles) : env["rack.tempfiles"] = tempfiles
+      end
+      private_class_method :adopt_tempfiles
 
       # Delegates to Rack's own URL builder, which correctly assembles scheme + host +
       # SCRIPT_NAME (mount prefix) + PATH_INFO + query. A hand-rolled version that used

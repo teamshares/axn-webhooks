@@ -94,6 +94,34 @@ result = Axn::Webhooks::Inbound[:codat].verify(request)  # => Axn::Result
 result.ok?  # signature valid?
 ```
 
+### The request object
+
+Verifiers, `parse:`, and `challenge` blocks all receive an `Axn::Webhooks::Request` — a
+Rails-agnostic view of the inbound request, so the same endpoint works behind a Rack mount, a
+controller, or a plain test constructor:
+
+| | |
+|---|---|
+| `raw_body` | the exact bytes the vendor signed (frozen; never re-encoded) |
+| `header(name)` | case-insensitive header lookup |
+| `params` | the request's **primary** param source (see below) |
+| `url` | full URL including scheme, host, mount prefix, and query string |
+| `http_method` | upcased (`"POST"`, `"GET"`, …) |
+
+`params` is one source, never a query+form merge — `url` already carries the query string, and
+merging both would double-count query params for URL-signing verifiers (Twilio's
+`validate(req.url, req.params, sig)` HMACs it once via the url already):
+
+- **POST with a form body** — `application/x-www-form-urlencoded` (Twilio) or
+  `multipart/form-data` (Dropbox Sign, which posts the whole event in a single `json` field) →
+  the form fields. A malformed multipart body yields `{}` rather than raising, so an unverified
+  sender can't crash the pipeline ahead of `verify`.
+- **Everything else** — JSON POST, and any GET/HEAD (the Nylas/Meta challenge handshake) → the
+  query string.
+
+`inspect`/`pp` redact `raw_body` and headers, since webhook payloads routinely carry bank
+account numbers, credentials, and addresses that must not reach logs or exception reports.
+
 ### Dispatch to a handler
 
 Add `dispatch` to route the (verified, parsed) event to a handler Axn. The body is parsed as
