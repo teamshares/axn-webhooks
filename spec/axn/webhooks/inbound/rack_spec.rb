@@ -71,6 +71,31 @@ RSpec.describe "Axn::Webhooks::Inbound::Endpoint#call (Rack app)" do
     expect(body).to eq(["xyz"])
   end
 
+  it "verifies and dispatches a multipart/form-data POST end-to-end (Dropbox Sign shape)" do
+    # PRO-3111: Dropbox Sign posts the whole event as a single multipart `json` field, and its
+    # verification reads that field twice — once to HMAC, once to parse. Before the fix `params`
+    # came back empty for multipart, so every live delivery 401'd; a spec posting the same field
+    # urlencoded passed, so only an actual multipart request pins this.
+    boundary = "----AxnWebhooksBoundary9dK3"
+    event = '{"type":"created","data":{"id":99}}'
+    body = "--#{boundary}\r\nContent-Disposition: form-data; name=\"json\"\r\n\r\n#{event}\r\n--#{boundary}--\r\n"
+    secret = "shh"
+
+    Axn::Webhooks.inbound(:vendor) do
+      verify { |req| OpenSSL::HMAC.hexdigest("SHA256", secret, req.params["json"].to_s) == req.header("X-Sig") }
+      dispatch on: ->(e) { e["type"] }, to: { "created" => "Handlers::Created" },
+               parse: ->(req) { JSON.parse(req.params["json"]) }
+    end
+
+    env = Rack::MockRequest.env_for(
+      "/webhooks/vendor", method: "POST", input: body,
+                          "CONTENT_TYPE" => "multipart/form-data; boundary=#{boundary}",
+                          "HTTP_X_SIG" => OpenSSL::HMAC.hexdigest("SHA256", secret, event)
+    )
+    status, = Axn::Webhooks::Inbound[:vendor].call(env)
+    expect(status).to eq(200)
+  end
+
   it "405s a GET with no declared challenge" do
     Axn::Webhooks.inbound(:vendor) { verify { |_req| true } }
     env = Rack::MockRequest.env_for("/webhooks/vendor", method: "GET", input: "")

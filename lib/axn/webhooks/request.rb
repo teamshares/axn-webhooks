@@ -103,16 +103,45 @@ module Axn
       #
       # - form-urlencoded body on a request that carries one (Twilio's SMS/voice POST) -> params =
       #   form fields only; the query (if any) is still reachable via `url`.
+      # - multipart/form-data body -> same, parsed by Rack (Dropbox Sign posts the whole event as a
+      #   single `json` field, and its verifier reads that field twice: Content-MD5 over it, then
+      #   JSON.parse of it).
       # - everything else (GET/HEAD query, JSON POST, etc.) -> params = query string (e.g. the
       #   Nylas/Meta GET challenge, read via `req.params["challenge"]`). GET/HEAD never carry a
       #   body, so even a form-urlencoded default Content-Type header on a GET (common on
       #   challenge requests) must not shadow the query string with an empty-body parse.
       def self.extract_params(env, raw_body, content_type)
-        method = env["REQUEST_METHOD"]
-        form_body = content_type&.start_with?("application/x-www-form-urlencoded") && !%w[GET HEAD].include?(method)
-        Rack::Utils.parse_nested_query(form_body ? raw_body : env["QUERY_STRING"])
+        return Rack::Utils.parse_nested_query(env["QUERY_STRING"]) if %w[GET HEAD].include?(env["REQUEST_METHOD"])
+
+        if content_type&.start_with?("application/x-www-form-urlencoded")
+          # Parsed from raw_body rather than via Rack, so this branch stays independent of Rack's
+          # form-hash caching (and of whatever position upstream middleware left rack.input in).
+          Rack::Utils.parse_nested_query(raw_body)
+        elsif content_type&.start_with?("multipart/form-data")
+          parse_multipart(env)
+        else
+          Rack::Utils.parse_nested_query(env["QUERY_STRING"])
+        end
       end
       private_class_method :extract_params
+
+      # Rack owns multipart parsing (boundary handling differs across Rack 3 minors), so delegate.
+      #
+      # `#POST` reads rack.input, hence the rewind afterwards — `from_rack` already rewound before
+      # its own `raw_body` read, so input is at 0 when we get here, but it would be left at EOF for
+      # anything downstream of the mount.
+      #
+      # A malformed body must yield `{}`, not raise: this runs on an UNVERIFIED request, so any
+      # parse error Rack raises (Rack::Multipart::EmptyContentError and friends) would let a hostile
+      # sender crash the pipeline before `verify` ever gets to reject them.
+      def self.parse_multipart(env)
+        Rack::Request.new(env).POST
+      rescue StandardError
+        {}
+      ensure
+        rewind(env["rack.input"])
+      end
+      private_class_method :parse_multipart
 
       # Delegates to Rack's own URL builder, which correctly assembles scheme + host +
       # SCRIPT_NAME (mount prefix) + PATH_INFO + query. A hand-rolled version that used

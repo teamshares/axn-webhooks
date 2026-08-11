@@ -233,6 +233,79 @@ RSpec.describe Axn::Webhooks::Request do
       expect(request.raw_body).to eq('{"a":1}')
     end
 
+    describe "multipart/form-data bodies" do
+      # PRO-3111: `extract_params` only recognized application/x-www-form-urlencoded as a form body,
+      # so a multipart POST fell through to the QUERY_STRING branch and `params` came back empty.
+      # Dropbox Sign posts the entire event as a single multipart `json` field and its verification
+      # reads that field twice (Content-MD5 over it, then JSON.parse of it) — so every live delivery
+      # 401'd. Invisible to a spec that posts the same fields urlencoded, hence these.
+      let(:boundary) { "----AxnWebhooksBoundary9dK3" }
+
+      def multipart_body(fields)
+        fields.map do |name, value|
+          "--#{boundary}\r\nContent-Disposition: form-data; name=\"#{name}\"\r\n\r\n#{value}\r\n"
+        end.join + "--#{boundary}--\r\n"
+      end
+
+      def multipart_env(body, **overrides)
+        rack_env(
+          "rack.input" => StringIO.new(body),
+          "CONTENT_TYPE" => "multipart/form-data; boundary=#{boundary}",
+          "CONTENT_LENGTH" => body.bytesize.to_s,
+          **overrides,
+        )
+      end
+
+      it "exposes the form fields on params (Dropbox Sign's single `json` field)" do
+        body = multipart_body("json" => '{"a":1}')
+        request = described_class.from_rack(multipart_env(body))
+
+        expect(request.params).to eq("json" => '{"a":1}')
+        expect(request.raw_body).to eq(body) # verify still sees the untouched raw bytes
+      end
+
+      it "sets params to the form fields only, NOT merged with the query" do
+        # Same invariant as the urlencoded branch: `url` already carries the query string, so
+        # merging it into params would double-count it for URL-signing verifiers.
+        body = multipart_body("json" => '{"a":1}')
+        request = described_class.from_rack(multipart_env(body, "QUERY_STRING" => "extra=1"))
+
+        expect(request.params).to eq("json" => '{"a":1}')
+        expect(request.url).to end_with("?extra=1")
+      end
+
+      it "leaves rack.input rewound for downstream middleware" do
+        # Rack::Request#POST reads rack.input to parse the body; leaving it at EOF would break
+        # anything downstream of the mount that reads the body again.
+        body = multipart_body("json" => '{"a":1}')
+        env = multipart_env(body)
+        described_class.from_rack(env)
+        expect(env["rack.input"].read).to eq(body)
+      end
+
+      it "yields {} for a malformed/truncated body instead of raising" do
+        # A hostile *unverified* request must not be able to crash the pipeline before `verify`
+        # runs — Rack's multipart parser raises (EmptyContentError and friends) on garbage.
+        truncated = "--#{boundary}\r\nContent-Disposition: form-data; name=\"json\""
+
+        request = nil
+        expect { request = described_class.from_rack(multipart_env(truncated)) }.not_to raise_error
+        expect(request.params).to eq({})
+        expect(request.raw_body).to eq(truncated)
+      end
+
+      it "yields {} for an empty body" do
+        request = described_class.from_rack(multipart_env(""))
+        expect(request.params).to eq({})
+      end
+
+      it "uses QUERY_STRING for a GET with a multipart Content-Type" do
+        env = multipart_env("", "REQUEST_METHOD" => "GET", "QUERY_STRING" => "challenge=xyz")
+        request = described_class.from_rack(env)
+        expect(request.params).to eq("challenge" => "xyz")
+      end
+    end
+
     it "uses QUERY_STRING for a GET with a form-urlencoded Content-Type and empty body (challenge regression)" do
       # GET challenge requests (Nylas/Meta-style) often carry a default
       # application/x-www-form-urlencoded Content-Type header alongside an empty body and the

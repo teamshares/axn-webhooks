@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Fixed
+- `Request#params` now parses `multipart/form-data` bodies. `extract_params` recognized only
+  `application/x-www-form-urlencoded` as a form body, so a multipart POST fell through to the
+  query-string branch and `params` came back empty (`raw_body` was correct either way — only
+  `params` was wrong). Dropbox Sign posts the entire event as a single multipart `json` field and
+  its verification reads that field twice — `Content-MD5` is
+  `Base64(hex(HMAC-MD5(api_key, json_field)))`, and the payload is `JSON.parse(params["json"])` —
+  so **every live Dropbox Sign delivery 401'd**. A spec that posted the same fields urlencoded
+  passed, which is why nothing caught it. Multipart parsing is delegated to `Rack::Request#POST`
+  (which handles both encodings across Rack 3 minors), with `rack.input` rewound afterwards and a
+  malformed body yielding `{}` rather than raising — a hostile *unverified* request must not be
+  able to crash the pipeline before `verify` runs. The existing contract is unchanged: `params` is
+  the request's primary param source, never a query+form merge, and GET/HEAD always read the query
+  string.
 - **Security:** `Request#inspect` no longer renders `raw_body`/`headers` in full. The inbound
   pipeline's own axns (`BuildRequest`, `Verify`, `Dispatch`, `Challenge`) auto-log their
   `request:`/`env:` fields at `:info` by default, and `Request` relied on `Object#inspect`, which
