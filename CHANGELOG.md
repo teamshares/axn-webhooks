@@ -14,7 +14,9 @@
   (which handles both encodings across Rack 3 minors), fed a `StringIO` over the already-captured
   `raw_body` rather than the live `rack.input` — re-reading the real stream would yield `{}` on a
   bare Rack/streaming host, whose input is readable but *not* rewindable, and would leave the input
-  at EOF for anything downstream. A malformed body yields `{}` rather than raising: a hostile
+  at EOF for anything downstream. File parts are spilled to `Tempfile`s by Rack, which *assigns*
+  (not appends) `env["rack.tempfiles"]` — so those are handed back to the caller's env, where
+  `Rack::TempfileReaper` can actually reap them. A malformed body yields `{}` rather than raising: a hostile
   *unverified* request must not be able to crash the pipeline before `verify` runs. The existing
   contract is unchanged: `params` is
   the request's primary param source, never a query+form merge, and GET/HEAD always read the query

@@ -148,11 +148,29 @@ module Axn
           "rack.input" => StringIO.new(raw_body),
           "CONTENT_LENGTH" => raw_body.bytesize.to_s,
         )
-        Rack::Request.new(parse_env).POST
+        Rack::Request.new(parse_env).POST.tap { adopt_tempfiles(env, parse_env) }
       rescue StandardError
         {}
       end
       private_class_method :parse_multipart
+
+      # File parts get spilled to Tempfiles, and Rack::TempfileReaper (in Rails' default stack)
+      # closes/unlinks whatever it finds under "rack.tempfiles" when the response body closes. Rack
+      # *assigns* that key (`env[RACK_TEMPFILES] = info.tmp_files`) rather than appending, so
+      # parsing against our dup would leave the caller's list empty — not merely stale — and the
+      # reaper would close nothing, holding an fd and an on-disk file per file-bearing delivery
+      # until GC finalized it. Hand the tempfiles back to the env the reaper actually reads.
+      #
+      # Appended in place when a list already exists: the reaper seeds `env[RACK_TEMPFILES] ||= []`
+      # on the way in, and an upstream middleware's tempfiles must survive our parse.
+      def self.adopt_tempfiles(env, parse_env)
+        tempfiles = parse_env["rack.tempfiles"]
+        return if tempfiles.nil? || tempfiles.empty?
+
+        existing = env["rack.tempfiles"]
+        existing.is_a?(Array) ? existing.concat(tempfiles) : env["rack.tempfiles"] = tempfiles
+      end
+      private_class_method :adopt_tempfiles
 
       # Delegates to Rack's own URL builder, which correctly assembles scheme + host +
       # SCRIPT_NAME (mount prefix) + PATH_INFO + query. A hand-rolled version that used

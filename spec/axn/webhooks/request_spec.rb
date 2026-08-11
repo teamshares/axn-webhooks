@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "pp"
+require "tempfile"
 
 RSpec.describe Axn::Webhooks::Request do
   subject(:request) do
@@ -313,14 +314,63 @@ RSpec.describe Axn::Webhooks::Request do
         expect(request.params).to eq("json" => '{"a":1}')
       end
 
+      describe "file parts (rack.tempfiles)" do
+        # Rack spills every file part to a Tempfile and registers it on the env it parsed, and
+        # Rack::TempfileReaper (in Rails' default stack) closes/unlinks that list when the response
+        # body is closed. Rack 3 *assigns* `env["rack.tempfiles"] = info.tmp_files` rather than
+        # appending — so parsing against our dup left the caller's list untouched (empty, not
+        # merely stale) and the reaper closed nothing. Every file-bearing delivery would then hold
+        # an fd and an on-disk file until GC finalized it.
+        let(:file_body) do
+          "--#{boundary}\r\n" \
+            "Content-Disposition: form-data; name=\"attachment\"; filename=\"doc.pdf\"\r\n" \
+            "Content-Type: application/pdf\r\n\r\n" \
+            "%PDF-1.4 pretend bytes\r\n" \
+            "--#{boundary}--\r\n"
+        end
+
+        it "registers the tempfile on the CALLER's env, so TempfileReaper can reap it" do
+          env = multipart_env(file_body)
+          request = described_class.from_rack(env)
+
+          tempfile = request.params.dig("attachment", :tempfile)
+          expect(tempfile).to be_a(Tempfile)
+          expect(env["rack.tempfiles"]).to include(tempfile)
+        end
+
+        it "appends to the reaper's pre-seeded list in place, rather than replacing it" do
+          # Rack::TempfileReaper does `env[RACK_TEMPFILES] ||= []` on the way in and reaps that
+          # key on the way out. Anything already in the list (an upstream middleware's tempfile)
+          # must survive our parse.
+          upstream = Tempfile.new("upstream")
+          env = multipart_env(file_body, "rack.tempfiles" => [upstream])
+          seeded = env["rack.tempfiles"]
+
+          request = described_class.from_rack(env)
+
+          expect(env["rack.tempfiles"]).to equal(seeded) # same object the reaper holds
+          expect(env["rack.tempfiles"]).to contain_exactly(upstream, request.params.dig("attachment", :tempfile))
+        ensure
+          upstream&.close!
+        end
+
+        it "leaves the env's tempfile list alone when the body has no file parts" do
+          env = multipart_env(multipart_body("json" => '{"a":1}'))
+          described_class.from_rack(env)
+          expect(env).not_to have_key("rack.tempfiles")
+        end
+      end
+
       it "does not write its parse cache into the caller's env" do
         # Rack::Request#POST memoizes into rack.request.form_hash/form_input. Ours is keyed to the
         # synthetic StringIO, so leaking it would make a downstream #POST either re-parse anyway or
-        # trust a hash it didn't build. Parse against a dup instead.
+        # trust a hash it didn't build. Parse against a dup instead — the tempfile list (above) is
+        # the one thing deliberately propagated back, because it needs reaping.
         env = multipart_env(multipart_body("json" => '{"a":1}'))
         before = env.keys
         described_class.from_rack(env)
         expect(env.keys).to eq(before)
+        expect(env.keys.grep(/\Arack\.request\./)).to be_empty
       end
 
       it "yields {} for a malformed/truncated body instead of raising" do
