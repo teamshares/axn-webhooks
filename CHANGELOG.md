@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Fixed
+- `dispatch to:`/map entries can now target an `Axn::Factory.build(...)` product.
+  `Axn::Factory` gives every generated class a debug `.name` (`"AnonymousAxn_<object_id>"`) so its
+  instances can be identified in logs, but `Router#constantize` used `name.nil?` to decide whether a
+  Module target was truly anonymous (and thus must be used as-is) versus a named class safe to
+  re-resolve via `const_get` for Zeitwerk reload-safety. A factory product's name is a non-nil String
+  that was never assigned to a constant, so it took the re-resolve branch and blew up with
+  `NameError: uninitialized constant AnonymousAxn_62968` — the one construct the anonymous-class
+  branch exists for could never reach it. The test is now "does this name actually resolve to a
+  constant" (`Object.const_defined?`), not "is it nil" — a real named class still re-resolves by name
+  every call, while an unresolvable name (truly anonymous, or a factory's debug name) is used as-is.
 - `Request#params` now parses `multipart/form-data` bodies. `extract_params` recognized only
   `application/x-www-form-urlencoded` as a form body, so a multipart POST fell through to the
   query-string branch and `params` came back empty (`raw_body` was correct either way — only
