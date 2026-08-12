@@ -65,6 +65,35 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
     expect(router.resolve(event)).to eq([PaymentOrders::DispatchCompleted, { payment_order_id: 42 }, nil])
   end
 
+  # Rename-only sugar: the whole event under a different kwarg name, for endpoints whose parsed
+  # object isn't naturally an "event" (e.g. a Slack interaction `payload`).
+  it "passes the whole event under a renamed kwarg via a with: Symbol" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "block_actions" => { call: "HandleWebhook", with: :payload } },
+    )
+    event = { "type" => "block_actions" }
+    expect(router.resolve(event)).to eq([HandleWebhook, { payload: event }, nil])
+  end
+
+  it "combines async: with a with: Symbol on the same entry" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "message_action" => { call: "HandleWebhook", with: :payload, async: true } },
+    )
+    event = { "type" => "message_action" }
+    expect(router.resolve(event)).to eq([HandleWebhook, { payload: event }, true])
+  end
+
+  it "raises for a with: that is neither a Symbol nor callable (loud)" do
+    router = described_class.new(
+      on: ->(e) { e["type"] },
+      to: { "block_actions" => { call: "HandleWebhook", with: "payload" } },
+    )
+    expect { router.resolve({ "type" => "block_actions" }) }
+      .to raise_error(Axn::Webhooks::Error, /with:/)
+  end
+
   it "derives the class from the key via convention (default transform)" do
     router = described_class.new(on: ->(e) { e["eventType"] }, to: "Actions::Codat")
     expect(router.resolve({ "eventType" => "connection.updated" }).first)
