@@ -71,13 +71,16 @@ module Axn
         end
 
         # Accepts a class-name String (resolved late) or a Class/Module target. A named Module is
-        # reduced to its name and re-resolved via const_get on EVERY call, so a class object passed
-        # at declaration time stays reload-safe under Rails/Zeitwerk (a captured object would go stale
-        # when the constant is reassigned on reload). An anonymous class (name.nil?) has nothing to
-        # resolve by, so it's used as-is.
-        def constantize(name)
-          name = name.name if name.is_a?(Module) && name.name
-          name.is_a?(Module) ? name : Object.const_get(name)
+        # re-resolved via const_get on EVERY call, so a class object passed at declaration time stays
+        # reload-safe under Rails/Zeitwerk (a captured object would go stale when the constant is
+        # reassigned on reload). A target whose name doesn't actually resolve to a constant — a truly
+        # anonymous class (name.nil?), or an Axn::Factory product (whose debug name is a String but was
+        # never assigned to a constant) — has nothing to re-resolve by, so it's used as-is.
+        def constantize(target)
+          return Object.const_get(target) unless target.is_a?(Module)
+
+          name = target.name
+          name && Object.const_defined?(name) ? Object.const_get(name) : target
         end
 
         def default_transform(key) = key.to_s.split(/[._]/).reject(&:empty?).map(&:capitalize).join

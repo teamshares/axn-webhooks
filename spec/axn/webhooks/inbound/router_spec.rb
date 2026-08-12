@@ -46,6 +46,17 @@ RSpec.describe Axn::Webhooks::Inbound::Router do
     expect(router.resolve({}).first).to equal(klass)
   end
 
+  it "uses an Axn::Factory-built handler as-is (debug name doesn't resolve via const_get)" do
+    echo = Axn::Factory.build(
+      expects: { challenge: { type: String } },
+      expose_return_as: :response_body,
+      axn_name: "Actions::Slack::EchoUrlVerification",
+    ) { { challenge: } }
+
+    router = described_class.new(to: { "x" => { call: echo } }, on: ->(e) { e["type"] })
+    expect(router.resolve({ "type" => "x" }).first).to equal(echo)
+  end
+
   it "resolves a keyed handler from an explicit map" do
     router = described_class.new(
       on: ->(e) { e["eventType"] },
