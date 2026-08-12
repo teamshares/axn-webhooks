@@ -59,6 +59,16 @@
   BuildRequest failure maps to a clean 500 rather than escaping as a raise).
 
 ### Added
+- A dispatch entry's `with:` now accepts a **Symbol** as the rename-only shape — `with: :payload` is
+  `{ payload: event }`, the whole parsed event under a different kwarg name, where the lambda form
+  read as a stutter (`with: ->(event) { { data: event } }` names the same value twice). For endpoints
+  whose parsed object isn't naturally an "event": a Slack interaction is a `payload`, and on the
+  events endpoint "event" is already taken by `event["event"]`. Composes with `async()`/`sync()`
+  (`async("H", with: :payload)`) and changes nothing about the callable form or the `event:` default.
+  A `with:` that is neither a Symbol nor callable now raises `Axn::Webhooks::Error` at resolve time
+  instead of `NoMethodError`-ing on `.call`. Note this hands the whole raw event to the handler, so on
+  an **async** route it lands in the job args (Redis, retry sets, the Sidekiq UI) — prune with a
+  callable instead when the payload carries secrets or PII.
 - Dispatch handler targets now accept the **class itself**, not only a class-name string — `to: Foo`,
   `to: { "k" => Foo }`, and `async(Foo)`/`sync(Foo)` all work alongside the string forms. A named
   class is reduced to its name and re-resolved via `const_get` on every request, so a class object

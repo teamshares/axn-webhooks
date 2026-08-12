@@ -126,7 +126,8 @@ account numbers, credentials, and addresses that must not reach logs or exceptio
 
 Add `dispatch` to route the (verified, parsed) event to a handler Axn. The body is parsed as
 JSON by default (string keys) — pass `parse:` for other bodies. Handlers receive the whole
-event as `event:`, or scalar args via a `with:` extractor. A handler target may be a class-name
+event as `event:`, or scalar args via a `with:` extractor (`with: :payload` is the rename-only
+shorthand: the whole event, under that kwarg name instead of `event:`). A handler target may be a class-name
 **string** or the **class itself** (`"Actions::Codat::ConnectionUpdated"` or
 `Actions::Codat::ConnectionUpdated`) — both resolve the constant lazily at request time, so either
 form stays reload-safe under Rails/Zeitwerk. Strings are the safe default when declaring endpoints in
@@ -273,7 +274,8 @@ end
 ```
 
 `async("H")` is sugar for `{ call: "H", async: true }` and `sync("H")` for `{ call: "H", async: false }`;
-both pass extra kwargs through, so they compose with a `with:` extractor: `async("H", with: ->(e) { … })`.
+both pass extra kwargs through, so they compose with a `with:` extractor: `async("H", with: ->(e) { … })`,
+`sync("H", with: :payload)`.
 
 The per-route flag is the most specific rung of the mode decision — precedence, most specific first:
 the entry's `async:`, then an explicit endpoint `mode:`, then a declared `respond` (which keeps sync

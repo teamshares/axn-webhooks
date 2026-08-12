@@ -42,11 +42,25 @@ module Axn
           case entry
           when String, Module then [constantize(entry), { event: }, nil]
           when Hash
-            args = entry.key?(:with) ? entry.fetch(:with).call(event) : { event: }
-            [constantize(entry.fetch(:call)), args, route_async(entry)]
+            [constantize(entry.fetch(:call)), args_for(entry, event), route_async(entry)]
           else
             raise Axn::Webhooks::Error, "invalid dispatch target: #{entry.inspect}"
           end
+        end
+
+        # Handler kwargs from a map entry: no `with:` passes the whole event as `event:`, a Symbol
+        # passes it under that name instead (for endpoints whose parsed object isn't naturally an
+        # "event" — e.g. a Slack interaction `payload`), and a callable projects it to whatever it
+        # returns. Non-callables raise here rather than NoMethodError-ing on `.call`.
+        def args_for(entry, event)
+          return { event: } unless entry.key?(:with)
+
+          extractor = entry.fetch(:with)
+          return { extractor => event } if extractor.is_a?(Symbol)
+
+          raise Axn::Webhooks::Error, "dispatch entry `with:` must be a Symbol or a callable (got #{extractor.inspect})" unless extractor.respond_to?(:call)
+
+          extractor.call(event)
         end
 
         def unmatched(key, event)

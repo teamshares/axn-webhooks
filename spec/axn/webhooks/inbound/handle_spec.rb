@@ -70,6 +70,28 @@ RSpec.describe "Axn::Webhooks endpoint#handle (verify + dispatch)" do
     expect(result.handler_result.from).to eq("+15550001111")
   end
 
+  it "satisfies a handler that expects the event under a renamed kwarg (with: Symbol)" do
+    stub_const("Handlers::Interaction",
+               Class.new do
+                 include Axn
+
+                 expects :payload
+                 exposes :action_id
+
+                 def call = expose(action_id: payload.dig("actions", 0, "action_id"))
+               end)
+    Axn::Webhooks.inbound(:slack) do
+      verify { |_req| true }
+      dispatch on: ->(e) { e["type"] },
+               to: { "block_actions" => { call: "Handlers::Interaction", with: :payload } }
+    end
+
+    body = '{"type":"block_actions","actions":[{"action_id":"company_select"}]}'
+    result = Axn::Webhooks::Inbound[:slack].handle(Axn::Webhooks::Request.new(raw_body: body))
+    expect(result).to be_ok
+    expect(result.handler_result.action_id).to eq("company_select")
+  end
+
   it "returns the verify result for a verify-only endpoint (no dispatch)" do
     Axn::Webhooks.inbound(:probe) { verify { |_req| true } }
     result = Axn::Webhooks::Inbound[:probe].handle(Axn::Webhooks::Request.new(raw_body: ""))
