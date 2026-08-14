@@ -27,6 +27,7 @@ RSpec.describe "outbound signing <-> inbound verification round-trip" do
     )
 
     verifier = Axn::Webhooks::Verifiers.build(strategy: :standard_webhooks, opts: { secret: }, block: nil)
-    expect(verifier.call(request)).to be(true)
+    # A built-in strategy returns a Signature::Check, not a bare boolean (PRO-3141).
+    expect(verifier.call(request)).to be_ok
   end
 end

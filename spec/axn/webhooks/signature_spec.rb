@@ -65,6 +65,105 @@ RSpec.describe Axn::Webhooks::Signature do
     end
   end
 
+  describe ".hmac_check" do
+    let(:now) { Time.at(1_700_000_000) }
+
+    it "accepts, with no reason and no skew" do
+      check = described_class.hmac_check(secret:, payload:, signature: hex)
+      expect(check).to be_ok
+      expect(check.reason).to be_nil
+      expect(check.skew).to be_nil
+    end
+
+    it "names a tampered signature :signature_mismatch" do
+      bad = hex.sub(/.\z/, hex[-1] == "0" ? "1" : "0")
+      check = described_class.hmac_check(secret:, payload:, signature: bad)
+      expect(check).not_to be_ok
+      expect(check.reason).to eq(:signature_mismatch)
+    end
+
+    it "names a nil / empty signature :signature_missing, distinctly from a mismatch" do
+      expect(described_class.hmac_check(secret:, payload:, signature: nil).reason).to eq(:signature_missing)
+      expect(described_class.hmac_check(secret:, payload:, signature: "").reason).to eq(:signature_missing)
+    end
+
+    it "names a stale-but-validly-signed request :replay_window, carrying the signed skew" do
+      check = described_class.hmac_check(secret:, payload:, signature: hex, timestamp: (now - 600).to_i,
+                                         tolerance: 300, now:)
+      expect(check).not_to be_ok
+      expect(check.reason).to eq(:replay_window)
+      expect(check.skew).to eq(600)
+    end
+
+    it "signs skew negative for a future-dated timestamp" do
+      check = described_class.hmac_check(secret:, payload:, signature: hex, timestamp: (now + 600).to_i,
+                                         tolerance: 300, now:)
+      expect(check.reason).to eq(:replay_window)
+      expect(check.skew).to eq(-600)
+    end
+
+    it "names a pinned unit: that doesn't fit via suggested_unit, alongside the skew it produced" do
+      # An epoch-ms timestamp read as seconds dates the request ~1.8 TRILLION seconds in the FUTURE
+      # (hence a negative skew). Post-PRO-3142 this only happens under an explicitly pinned unit:,
+      # since the AUTO default would infer :ms — so suggested_unit names the misconfiguration.
+      check = described_class.hmac_check(secret:, payload:, signature: hex, timestamp: now.to_i * 1_000,
+                                         tolerance: 300, now:, unit: :seconds)
+      expect(check.reason).to eq(:replay_window)
+      expect(check.skew).to be < -1_000_000_000_000
+      expect(check.suggested_unit).to eq(:ms)
+    end
+
+    it "leaves suggested_unit nil for a genuine replay (no scale rescues it)" do
+      check = described_class.hmac_check(secret:, payload:, signature: hex, timestamp: (now - 600).to_i,
+                                         tolerance: 300, now:)
+      expect(check.reason).to eq(:replay_window)
+      expect(check.suggested_unit).to be_nil
+    end
+
+    it "infers the unit by default, so a fresh epoch-ms timestamp is not a replay at all" do
+      check = described_class.hmac_check(secret:, payload:, signature: hex, timestamp: now.to_i * 1_000,
+                                         tolerance: 300, now:)
+      expect(check).to be_ok
+    end
+
+    it "names a missing / unparseable timestamp :replay_timestamp_invalid, not :replay_window" do
+      expect(described_class.hmac_check(secret:, payload:, signature: hex, timestamp: nil, tolerance: 300, now:).reason)
+        .to eq(:replay_timestamp_invalid)
+      expect(described_class.hmac_check(secret:, payload:, signature: hex, timestamp: "nope", tolerance: 300,
+                                        now:).reason)
+        .to eq(:replay_timestamp_invalid)
+    end
+
+    it "checks the replay window before the signature, so a stale request reports the replay cause" do
+      check = described_class.hmac_check(secret:, payload:, signature: "deadbeef", timestamp: (now - 600).to_i,
+                                         tolerance: 300, now:)
+      expect(check.reason).to eq(:replay_window)
+    end
+
+    it "raises ArgumentError for an unsupported unit, like .hmac" do
+      expect { described_class.hmac_check(secret:, payload:, signature: hex, unit: :fortnights) }
+        .to raise_error(ArgumentError, /unsupported unit/)
+    end
+  end
+
+  describe ".skew" do
+    let(:now) { Time.at(1_700_000_000) }
+
+    it "is positive for a past timestamp and negative for a future one" do
+      expect(described_class.skew(timestamp: (now - 90).to_i, now:)).to eq(90)
+      expect(described_class.skew(timestamp: (now + 90).to_i, now:)).to eq(-90)
+    end
+
+    it "applies unit: before subtracting" do
+      expect(described_class.skew(timestamp: (now - 90).to_i * 1_000, now:, unit: :ms)).to eq(90)
+    end
+
+    it "is nil for a missing or unparseable timestamp" do
+      expect(described_class.skew(timestamp: nil, now:)).to be_nil
+      expect(described_class.skew(timestamp: "nope", now:)).to be_nil
+    end
+  end
+
   describe ".secure_compare" do
     it "is true only for identical strings" do
       expect(described_class.secure_compare("abc", "abc")).to be(true)

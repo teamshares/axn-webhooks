@@ -32,6 +32,27 @@ Axn::Webhooks::Signature.hmac(
 
 It always uses a constant-time comparison and supports multi-signature (key-rotation) headers.
 
+`hmac` answers *whether* a request verified. `hmac_check` answers *why* it didn't — same check,
+returning an `Axn::Webhooks::Signature::Check` instead of a boolean (`hmac` is literally
+`hmac_check(...).ok?`, so there is only ever one replay window and one comparison):
+
+```ruby
+check = Axn::Webhooks::Signature.hmac_check(secret:, payload:, signature:, timestamp:, tolerance: 300)
+check.ok?            # => false
+check.reason         # => :replay_window
+check.skew           # => 10_000  (seconds, signed: positive = in the past; only for :replay_window)
+check.suggested_unit # => nil     (a Symbol only when a pinned `unit:` is what missed the window)
+```
+
+`mismatched_unit` answers that last question on its own — the scale that *would* have put a
+timestamp inside the window, or `nil` when the configured `unit:` already fits, the timestamp is
+missing/unparseable, or no scale rescues it. Side-effect-free, so a caller decides what to do with it
+(`hmac_check` uses it to fill `suggested_unit`):
+
+```ruby
+Axn::Webhooks::Signature.mismatched_unit(timestamp:, tolerance: 300, unit: :seconds)  # => :ms
+```
+
 ### Replay protection
 
 Pass `timestamp:` and `tolerance:` to guard against replayed requests — `hmac` returns `false` if
@@ -112,6 +133,44 @@ Verify a request (dispatch/respond and HTTP mounting land in later phases):
 result = Axn::Webhooks::Inbound[:codat].verify(request)  # => Axn::Result
 result.ok?  # signature valid?
 ```
+
+### Why verification failed
+
+A rejected request is always a bare 401 on the wire, but the *cause* is on the result and on the
+call's log/metric line as a bounded `reason` dimension — so verify failures can be grouped and
+alerted on separately rather than all reading as "signature mismatch":
+
+```ruby
+result.reason  # => :replay_window
+result.skew    # => 10_000  (seconds, signed: positive = the timestamp is in the past)
+result.error   # => "Webhook signature verification failed: replay window exceeded (timestamp skew 10000s)"
+```
+
+| `reason` | What it means | Usually caused by |
+| -- | -- | -- |
+| `:replay_window` | Validly-formed timestamp, outside the window. Carries `skew`. | A genuine replay or real clock drift — since `unit:` [infers the scale](#replay-protection), a wrong unit can only cause this if one was explicitly pinned |
+| `:replay_timestamp_invalid` | The timestamp is absent or unparseable | A typo'd `replay: { timestamp: header(…) }` name, or a vendor that stopped sending it |
+| `:signature_missing` | No signature header at all | A typo'd `signature:` header name, or an unsigned sender |
+| `:signature_mismatch` | The HMAC genuinely didn't match | Wrong/rotated secret, or the wrong `signing_string` |
+
+A `:replay_window` rejection additionally carries **`suggested_unit`** — the scale that *would* have
+put the timestamp inside the window (`Signature.mismatched_unit`), stamped as its own dimension:
+
+```ruby
+result.reason         # => :replay_window
+result.suggested_unit # => :ms     -- nil for a genuine replay
+result.error          # => "…: replay window exceeded (timestamp skew -1784947346919s) — would fit as unit: :ms"
+```
+
+Since `unit:` [infers the scale per timestamp](#replay-protection) by default, this is only ever
+non-nil when a `unit:` was explicitly pinned and doesn't fit. Its **presence** splits the
+misconfigured half of `:replay_window` from the genuine half — a group-by that says "this endpoint's
+pinned `unit:` is wrong" rather than "someone is replaying us" — and its **value** names the fix.
+
+The built-in `:hmac` and `:standard_webhooks` strategies report all four reasons above. A **custom `verify` block**
+keeps the documented `->(request) { Boolean }` contract — a falsey return is reported as
+`:signature_mismatch`. To name its own cause, a custom block may return a
+`Axn::Webhooks::Signature::Check` (e.g. by delegating to `Signature.hmac_check`) instead of a boolean.
 
 ### The request object
 
@@ -236,7 +295,7 @@ outcome to an HTTP status:
 
 | Stage | Outcome | Status |
 | -- | -- | -- |
-| Verify | signature mismatch, or the verifier itself crashes | 401 |
+| Verify | a rejected signature (see [Why verification failed](#why-verification-failed)), or the verifier itself crashes | 401 |
 | Dispatch | missing/unresolvable handler, unmatched event with no `otherwise:`, or a handler crash | 500 (reported to `Axn.config.on_exception`) |
 | Dispatch | the body doesn't parse | `unparseable_status` — **200** by default (still reported) |
 | Dispatch | unknown-but-expected event (`otherwise: :ack`) | 2xx ack |
@@ -393,6 +452,11 @@ When set, every `verify`/`dispatch`/`respond`/`challenge` call for a registered 
 with the endpoint's registered name as that Datadog/OTel facet — `:dimension` for a bounded,
 low-cardinality grouping (Teamshares' choice); `:tag` for the higher-cardinality path. Ships `false`
 (no stamping) so a standalone consumer opts in explicitly.
+
+This setting governs the **vendor** facet only. `Verify`'s
+[`reason` dimension](#why-verification-failed) is stamped unconditionally: it's a closed four-value
+enum rather than a per-endpoint identity, so there's no cardinality decision to defer to the
+consumer — group by `reason`, filter by `vendor`.
 
 ## Outbound (sending webhooks)
 
