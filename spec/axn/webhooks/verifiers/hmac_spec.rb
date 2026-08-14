@@ -93,6 +93,34 @@ RSpec.describe "verify :hmac strategy" do
     expect(Axn::Webhooks::Inbound[:lob_ms_stale].verify(req)).not_to be_ok
   end
 
+  it "accepts both of Lob's senders under one replay: config, with no unit: at all (PRO-3142)" do
+    # Lob delivers through two senders that disagree on the unit: Svix sends 10-digit seconds,
+    # the dashboard's debug send sends 13-digit ms. No static unit: is correct for that vendor.
+    fresh_s  = Time.now.to_i.to_s
+    fresh_ms = (Time.now.to_i * 1_000).to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:lob_two_senders) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300 }
+    end
+
+    %w[seconds ms].zip([fresh_s, fresh_ms]).each do |_label, ts|
+      req = request(headers: { "X-Sig" => sig, "X-Ts" => ts })
+      expect(Axn::Webhooks::Inbound[:lob_two_senders].verify(req)).to be_ok
+    end
+  end
+
+  it "honours an explicit unit: as a lockdown, rejecting the other sender's scale" do
+    fresh_ms = (Time.now.to_i * 1_000).to_s
+    sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+    Axn::Webhooks.inbound(:pinned_seconds) do
+      verify :hmac, secret: "shh", signature: header("X-Sig"),
+                    replay: { timestamp: header("X-Ts"), within: 300, unit: :seconds }
+    end
+    req = request(headers: { "X-Sig" => sig, "X-Ts" => fresh_ms })
+    expect(Axn::Webhooks::Inbound[:pinned_seconds].verify(req)).not_to be_ok
+  end
+
   it "raises a loud developer error when a required option is missing" do
     expect { Axn::Webhooks.inbound(:x) { verify :hmac, secret: "s" } } # no signature:
       .to raise_error(ArgumentError, /signature/)
