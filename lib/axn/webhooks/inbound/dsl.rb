@@ -12,9 +12,12 @@ module Axn
         end
 
         # dispatch to: "Handler" | dispatch on: ->(e){…}, to: {map}, otherwise:, via: | parse: | mode:
+        # `unparseable_status:` overrides Axn::Webhooks.config.unparseable_status for THIS endpoint —
+        # it belongs here, next to `parse:`, because it only describes what happens when that parse
+        # fails, and because the right value is a fact about one vendor's retry policy (PRO-3143).
         # rubocop:disable Naming/MethodParameterName
-        def dispatch(to: nil, on: nil, otherwise: nil, via: nil, parse: :json, mode: :auto)
-          @dispatch_spec = { to:, on:, otherwise:, via:, parse:, mode: }
+        def dispatch(to: nil, on: nil, otherwise: nil, via: nil, parse: :json, mode: :auto, unparseable_status: nil)
+          @dispatch_spec = { to:, on:, otherwise:, via:, parse:, mode:, unparseable_status: }
         end
         # rubocop:enable Naming/MethodParameterName
 
@@ -100,8 +103,14 @@ module Axn
             raise Axn::Webhooks::Error, "dispatch mode: must be :sync, :async, or :auto (got #{spec[:mode].inspect})"
           end
 
+          unless spec[:unparseable_status].nil? || Response.valid_status?(spec[:unparseable_status])
+            raise Axn::Webhooks::Error,
+                  "dispatch unparseable_status: must be an Integer HTTP status between 200 and 599 " \
+                  "(got #{spec[:unparseable_status].inspect})"
+          end
+
           router = Router.new(to: spec[:to], on: spec[:on], otherwise: spec[:otherwise], via: spec[:via])
-          { router:, parse: Parsers.build(spec[:parse]), mode: spec[:mode] }
+          { router:, parse: Parsers.build(spec[:parse]), mode: spec[:mode], unparseable_status: spec[:unparseable_status] }
         end
 
         # Internal: the captured respond block, or nil if none declared.

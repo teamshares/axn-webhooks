@@ -40,10 +40,20 @@ module Axn
         new(status:, body:, headers: { "content-type" => "application/json" }.merge(headers))
       end
 
+      # A plausible HTTP status: an Integer inside the range HTTP defines. Shared by the
+      # `unparseable_status` config setting and the per-endpoint `dispatch unparseable_status:`, so
+      # both reject the same values against the same bound.
+      def self.valid_status?(value) = value.is_a?(Integer) && (200..599).cover?(value)
+
       def self.service_unavailable(retry_after: nil)
         headers = retry_after ? { "retry-after" => retry_after.to_s } : {}
         new(status: 503, headers:)
       end
+
+      # The same body and headers under a different status. The unparseable-body mapping needs it: a
+      # declared `static_respond` block picked its status for the success path, but the gem owns the
+      # outcome->status mapping, so the body a vendor keys on survives and only the status is restamped.
+      def with_status(status) = self.class.new(status:, body:, headers:)
 
       def ==(other)
         other.is_a?(self.class) && status == other.status && body == other.body && headers == other.headers

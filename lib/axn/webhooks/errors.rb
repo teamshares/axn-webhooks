@@ -22,6 +22,15 @@ module Axn
       end
     end
 
+    # Raised by `Dispatch` when the parse step can't turn a verified request's body into an event —
+    # wrapping whatever the parser raised (the original stays reachable as `cause`), or raised directly
+    # by a custom `parse:` proc that knows its own format is malformed. Terminal by construction: a
+    # redelivery of the same bytes will never parse either, so `Inbound::Endpoint` maps it to the
+    # configured `unparseable_status` (a 2xx by default) instead of a retry-inviting 500 (PRO-3143).
+    # Deliberately NOT in any `fails_on` — it stays an axn exception outcome, so `on_exception` still
+    # reports that a vendor is sending garbage. Report, then ack.
+    class UnparseableBody < Error; end
+
     def self.retry_later!(after: nil)
       raise RetryLater.new(retry_after: after)
     end

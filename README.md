@@ -237,14 +237,16 @@ outcome to an HTTP status:
 | Stage | Outcome | Status |
 | -- | -- | -- |
 | Verify | signature mismatch, or the verifier itself crashes | 401 |
-| Dispatch | missing/unresolvable handler, unmatched event with no `otherwise:`, a parse error, or a handler crash | 500 (reported to `Axn.config.on_exception`) |
+| Dispatch | missing/unresolvable handler, unmatched event with no `otherwise:`, or a handler crash | 500 (reported to `Axn.config.on_exception`) |
+| Dispatch | the body doesn't parse | `unparseable_status` — **200** by default (still reported) |
 | Dispatch | unknown-but-expected event (`otherwise: :ack`) | 2xx ack |
 | Handle | the handler's own business `fail!` ("we don't care") | 2xx ack (logged) |
 | Handle | success | the declared `respond` body, or a bare 2xx ack |
 
 A declared `static_respond` renders on every row above except the 401 row and the 500 row — and,
 not shown in the table above, a `retry_later!` 503 — including `otherwise: :ack`, business
-`fail!`, and a genuine handler success with no `respond` declared.
+`fail!`, a genuine handler success with no `respond` declared, and an unparseable body (where it
+renders under the configured status rather than its own).
 
 ### Async dispatch
 
@@ -347,6 +349,39 @@ An `if:` guard rejection (e.g. a bad Meta `hub.verify_token`) is a **403**; a mi
 value is a **400**; a `challenge`/`if:` proc that raises is reported and mapped to **500**. (Slack's
 in-band `url_verification` handshake is NOT this — it's a normal `dispatch` entry, since Slack sends
 it as a POST event, not a GET.)
+
+### Unparseable bodies (`unparseable_status`)
+
+A verified request whose body doesn't parse is **terminal, not retryable** — a redelivery of the same
+bytes will never parse either. So the parse step reports (you want to know a vendor is sending
+garbage) and then **acks**:
+
+```ruby
+Axn::Webhooks.configure { |c| c.unparseable_status = 400 }             # global; default 200
+
+Axn::Webhooks.inbound :lob do
+  verify :hmac, secret: ENV.fetch("LOB_WEBHOOK_SECRET"), signature: header("Lob-Signature")
+  dispatch to: "Actions::Lob::HandleWebhook", unparseable_status: 200  # per-endpoint override
+end
+```
+
+Whatever the `parse:` step raises is wrapped in `Axn::Webhooks::UnparseableBody` (the original stays
+reachable as `cause`) and reported to `Axn.config.on_exception` exactly once — it's a real exception
+outcome, just not one the vendor should act on. Because the whole step is wrapped rather than a list
+of known JSON errors, a custom XML/form/protobuf `parse:` proc gets the same treatment without
+knowing about this gem's error classes.
+
+The default is **200** rather than the semantically tidier 400 because 2xx is the only answer every
+vendor reads as "stop redelivering": Lob retries non-2xx for 5 days and then disables the endpoint,
+Stripe, Slack and Shopify all retry non-2xx too, and the last two also disable an endpoint after
+sustained failures. Set `400` for a vendor that does honor 4xx as terminal (nicer status codes in
+their delivery dashboard), or `500` to restore the old retry-inviting behavior. A declared
+`static_respond` still renders its body here — Dropbox Sign and friends key the ack on the body text,
+not the status, so without it they'd redeliver anyway.
+
+A `parse:` proc that does I/O (a lookup that could fail transiently) can opt back into redelivery by
+raising [`retry_later!`](#asking-for-redelivery-retry_later) — that's the one thing the parse step
+doesn't treat as terminal.
 
 ### Per-vendor observability (`vendor_facet`)
 
@@ -479,9 +514,12 @@ end
 
 Raising `Axn::Webhooks::RetryLater` (directly, or via the `Axn::Webhooks.retry_later!(after: nil)`
 helper) **always** maps to a **503** — `after:` only controls whether the `Retry-After` header is
-present, distinct from a crash (which is a reported plain 500). This affordance requires **synchronous**
-dispatch: it's rescued around the handler's own `call!`, so a `retry_later!` raised inside an async
-worker is just a worker exception, unrelated to the HTTP response already sent.
+present, distinct from a crash (which is a reported plain 500). It's rescued around the whole
+synchronous dispatch, so anything the request runs in-process can defer — the handler, a `parse:`
+proc, a `with:` extractor, an `otherwise:` callable. That also makes it the escape hatch for a
+`parse:` proc that does I/O, whose other errors are [terminal](#unparseable-bodies-unparseable_status).
+The affordance requires **synchronous** dispatch: a `retry_later!` raised inside an async worker is
+just a worker exception, unrelated to the HTTP response already sent.
 
 **"Without paging" requires `include Axn::Webhooks::Handler`** (in place of plain `include Axn`) —
 it's a thin concern that includes `Axn` and declares `fails_on Axn::Webhooks::RetryLater`, so a
