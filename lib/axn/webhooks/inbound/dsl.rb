@@ -11,6 +11,15 @@ module Axn
           @verify_spec = { strategy:, opts:, block: }
         end
 
+        # unauthorized_headers "WWW-Authenticate" => %(Basic realm="Webhook")
+        #
+        # Headers to attach to the 401 a verify failure produces. `verify :basic_auth` supplies
+        # this itself; declare it only for a custom `verify` block that has to challenge a client
+        # into retrying with credentials (see Endpoint#unauthorized_headers).
+        def unauthorized_headers(headers)
+          @unauthorized_headers = headers
+        end
+
         # dispatch to: "Handler" | dispatch on: ->(e){…}, to: {map}, otherwise:, via: | parse: | mode:
         # `unparseable_status:` overrides Axn::Webhooks.config.unparseable_status for THIS endpoint —
         # it belongs here, next to `parse:`, because it only describes what happens when that parse
@@ -121,6 +130,9 @@ module Axn
 
         # Internal: the captured { resolver:, guard: } challenge declaration, or nil if none.
         def __challenge__ = @challenge_spec
+
+        # Internal: the declared 401 headers, or nil to let the verifier speak for itself.
+        def __unauthorized_headers__ = @unauthorized_headers
       end
     end
   end

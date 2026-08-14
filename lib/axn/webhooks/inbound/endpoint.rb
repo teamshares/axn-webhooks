@@ -7,7 +7,8 @@ module Axn
       # the (verified, parsed) event to a handler Axn, and maps the pipeline's outcome to an
       # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
-        def initialize(name:, verifier:, dispatch: nil, respond: nil, static_respond: nil, challenge: nil)
+        def initialize(name:, verifier:, dispatch: nil, respond: nil, static_respond: nil, challenge: nil,
+                       unauthorized_headers: nil)
           if dispatch && dispatch[:mode] == :async && respond
             raise Axn::Webhooks::Error,
                   "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
@@ -26,9 +27,26 @@ module Axn
           @respond = respond
           @static_respond = static_respond
           @challenge = challenge
+          @unauthorized_headers = unauthorized_headers
         end
 
         attr_reader :name
+
+        # Headers attached to the 401 a verify failure produces. Empty for the signature
+        # strategies — there is nothing for a signing client to be challenged *with* — but
+        # mandatory for HTTP Basic auth (RFC 7617), where a client that doesn't authenticate
+        # preemptively sends its first request bare and repeats it with credentials only after a
+        # 401 carrying `WWW-Authenticate`. Without this the second leg never comes and every
+        # request from such a client is dropped, uniformly and silently.
+        #
+        # An explicit `unauthorized_headers` declaration wins, so a custom `verify` block can
+        # supply its own challenge; otherwise the verifier speaks for itself.
+        def unauthorized_headers
+          return @unauthorized_headers if @unauthorized_headers
+          return @verifier.unauthorized_headers if @verifier.respond_to?(:unauthorized_headers)
+
+          {}
+        end
 
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
         # a failure on mismatch, an exception if the verifier raises.
@@ -52,7 +70,7 @@ module Axn
         # `outcome.failure?` but mean opposite things at the HTTP layer.
         def to_response(request)
           verified = verify(request)
-          return Response.new(status: 401) unless verified.ok?
+          return Response.new(status: 401, headers: unauthorized_headers) unless verified.ok?
           return default_ack unless @dispatch
 
           dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
