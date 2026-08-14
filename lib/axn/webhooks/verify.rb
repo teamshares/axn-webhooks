@@ -21,7 +21,11 @@ module Axn
       }.freeze
 
       expects :request, type: Axn::Webhooks::Request, sensitive: true
-      expects :verifier
+      # A verifier closes over or holds the vendor's secret — that's its whole job — so it must
+      # never be rendered into the per-call log line. The built-in strategies redact themselves
+      # too (see Verifiers::BasicAuth#inspect), but this is the boundary that has to hold: a
+      # custom `verify` block or a future strategy can't be relied on to have thought about it.
+      expects :verifier, sensitive: true
       exposes :reason, allow_blank: true, default: nil
       exposes :skew, allow_blank: true, default: nil
       exposes :suggested_unit, allow_blank: true, default: nil

@@ -88,6 +88,12 @@
   first legs; the credentialed second leg never existed, so it showed up as neither. Endpoints
   using a signature strategy are unaffected and still return a bare 401 (there is nothing to
   challenge a signing client *with*).
+- **`Verify` no longer logs its verifier.** `expects :verifier` was not marked `sensitive: true`,
+  so Axn's per-call info logging rendered the verifier on every request. Harmless for the lambda
+  the signature strategies build (`Proc#inspect` is just a source location) but not for any
+  verifier that *holds* a secret in an ivar — the default `Object#inspect` would have written a
+  plaintext credential to the application log on every single request. Marked sensitive at the
+  boundary, since a custom `verify` block can't be relied on to have thought about it.
 - `dispatch to:`/map entries can now target an `Axn::Factory.build(...)` product.
   `Axn::Factory` gives every generated class a debug `.name` (`"AnonymousAxn_<object_id>"`) so its
   instances can be identified in logs, but `Router#constantize` used `name.nil?` to decide whether a

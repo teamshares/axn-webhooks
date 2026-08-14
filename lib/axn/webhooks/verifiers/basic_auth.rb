@@ -33,6 +33,16 @@ module Axn
 
         attr_reader :realm
 
+        # A verifier holds credentials by definition, and Verify's per-call logging renders its
+        # `verifier:` input — so the default Object#inspect would put the plaintext password in the
+        # application log on every single request. Same treatment Request gets, and for the same
+        # reason. The realm is safe (and useful) to show: it's already broadcast in the challenge.
+        def inspect = "#<#{self.class.name} realm=#{realm.inspect} credentials=[REDACTED]>"
+
+        # PP does not route through #inspect — Kernel#pretty_print walks instance variables
+        # directly — so without this `pp verifier` leaks exactly what #inspect just redacted.
+        def pretty_print(printer) = printer.text(inspect)
+
         def call(request)
           expected_username = Resolvers.resolve(@username, request).to_s
           expected_password = Resolvers.resolve(@password, request).to_s

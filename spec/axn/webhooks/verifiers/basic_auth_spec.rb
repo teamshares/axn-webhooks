@@ -72,6 +72,27 @@ RSpec.describe "verify :basic_auth strategy" do
     expect(endpoint.to_response(request(headers: blank)).status).to eq(401)
   end
 
+  # Verify renders its `verifier:` input in the per-call log line, so a default Object#inspect
+  # would write the plaintext password to the application log on every single request.
+  describe "credential redaction" do
+    subject(:verifier) { Axn::Webhooks::Verifiers::BasicAuth.new(username: "twilio", password: "s3cret") }
+
+    it "redacts credentials from #inspect, keeping the realm (already public in the challenge)" do
+      expect(verifier.inspect).to eq('#<Axn::Webhooks::Verifiers::BasicAuth realm="Webhook" credentials=[REDACTED]>')
+      expect(verifier.inspect).not_to include("s3cret", "twilio")
+    end
+
+    # PP walks instance variables rather than calling #inspect, so this needs its own override.
+    it "redacts credentials from pp too" do
+      expect { pp verifier }.to output(/credentials=\[REDACTED\]/).to_stdout
+      expect { pp verifier }.not_to output(/s3cret/).to_stdout
+    end
+
+    it "marks Verify's verifier input sensitive, so a custom verify block is covered too" do
+      expect(Axn::Webhooks::Verify.internal_field_configs.find { |f| f.field == :verifier }.sensitive).to be(true)
+    end
+  end
+
   describe "the 401 challenge" do
     # The regression this whole strategy exists for. Twilio (and any other client that doesn't
     # authenticate preemptively) sends its first request with no Authorization header and only
