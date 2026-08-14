@@ -18,14 +18,30 @@ module Axn
         replay_timestamp_invalid: ->(_check) { "replay timestamp missing or unparseable" },
         signature_missing: ->(_check) { "signature missing" },
         signature_mismatch: ->(_check) { "signature mismatch" },
+        # Not an anomaly: a client that doesn't authenticate preemptively is *supposed* to arrive
+        # bare and wait to be challenged, so this fires once per successful Basic-auth webhook.
+        # Worded so a dashboard full of them doesn't read as an outage — which is exactly what the
+        # same traffic looked like, mislabelled, when it took buyout's Twilio endpoints down for
+        # 27h (PRO-3146).
+        credentials_missing: ->(_check) { "no Basic credentials offered (expected: client awaits the 401 challenge)" },
+        credentials_mismatch: ->(_check) { "Basic credentials rejected" },
       }.freeze
 
       expects :request, type: Axn::Webhooks::Request, sensitive: true
-      expects :verifier
+      # A verifier closes over or holds the vendor's secret — that's its whole job — so it must
+      # never be rendered into the per-call log line. The built-in strategies redact themselves
+      # too (see Verifiers::BasicAuth#inspect), but this is the boundary that has to hold: a
+      # custom `verify` block or a future strategy can't be relied on to have thought about it.
+      expects :verifier, sensitive: true
       exposes :reason, allow_blank: true, default: nil
       exposes :skew, allow_blank: true, default: nil
       exposes :suggested_unit, allow_blank: true, default: nil
-      error "Webhook signature verification failed"
+      # Deliberately mechanism-neutral: this prefixes every reason's message, and `verify :basic_auth`
+      # rejects requests on endpoints where no signature exists — "signature verification failed:
+      # Basic credentials rejected" would reintroduce, in the very first words an operator reads,
+      # the misdirection `reason` was added to end. The signature cases lose nothing, since their
+      # own half of the message still names the signature (see MESSAGES).
+      error "Webhook verification failed"
 
       # A bounded enum (4 values), so unlike :vendor it's stamped unconditionally rather than
       # gated behind Axn::Webhooks.config.vendor_facet — separating the causes is the reason

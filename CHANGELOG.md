@@ -41,6 +41,35 @@
     than a boolean. Custom `verify` blocks are unaffected — the documented
     `->(request) { Boolean }` contract still holds and a falsey return reports
     `:signature_mismatch` — but a custom block may now return a `Check` to name its own cause.
+- **`verify :basic_auth`** — HTTP Basic auth as a first-class strategy, owning the whole mechanism
+  rather than leaving each app to hand-roll it: constant-time credential comparison (hashing first,
+  so credential *length* doesn't leak the way a bytesize precheck would), the
+  `WWW-Authenticate: Basic realm="…"` challenge described below, and fail-closed on a missing or
+  blank username/password. That last one matters — comparing against `""` would authenticate
+  `Authorization: Basic Og==` for anyone, and CI and secret managers can both set an empty string,
+  so blank-but-present counts as missing and raises (a reported exception) rather than quietly
+  returning 401. Credentials resolve through `Resolvers`, so `-> { ENV.fetch("…") }` works as it
+  does for `:hmac` and a rotated secret is picked up without a reboot. `realm:` defaults to
+  `"Webhook"` and is escaped per RFC 7230 quoted-string rules.
+- **`unauthorized_headers`** on the `inbound` DSL, for a custom `verify` block that needs to supply
+  its own 401 challenge. A declaration wins over the verifier's own `#unauthorized_headers`.
+- Two new `Signature::REASONS` for the above: **`:credentials_missing`** and
+  **`:credentials_mismatch`**, so a Basic-auth rejection isn't reported as `:signature_mismatch` on
+  an endpoint where no signature exists. The split matters more than the rename: under RFC 7617 the
+  bare first leg of every *successful* Basic-auth webhook is a rejection, so `:credentials_missing`
+  is the highest-volume value of the `reason` dimension on a perfectly healthy endpoint — its
+  message says as much ("expected: client awaits the 401 challenge") so a dashboard full of them
+  doesn't read as an outage. A genuine credential problem surfaces as `:credentials_mismatch`
+  rather than being buried in that traffic.
+
+### Changed
+- `Verify`'s error prefix is now the mechanism-neutral **"Webhook verification failed"** (was
+  "Webhook signature verification failed"). It prefixes *every* reason's message, so with
+  `verify :basic_auth` it read "Webhook signature verification failed: Basic credentials rejected"
+  — announcing a signature failure on an endpoint that has no signature, in the first words an
+  operator reads, which is exactly the misdirection `reason` was added to end. The signature cases
+  lose nothing: their own half of the message still names the signature. Only the human-readable
+  string changed — `reason` (the thing to match on programmatically) is untouched.
 
 ### Fixed
 - A verified request whose body doesn't parse no longer 500s, which invited an unbounded vendor retry
@@ -62,6 +91,26 @@
   rather than having a transient failure acked away as unparseable — the one thing the parse step
   doesn't treat as terminal. Incidentally a `RetryLater` raised by a `with:` extractor or an
   `otherwise:` callable now maps to 503 too, instead of a reported 500.
+- **A verify failure's 401 can now carry response headers, and HTTP Basic auth endpoints actually
+  work.** `Endpoint#to_response` returned `Response.new(status: 401)` unconditionally — a bare 401,
+  with no way for a verifier to contribute headers to it. That silently breaks every vendor that
+  does *reactive* Basic auth (RFC 7617): a client which doesn't authenticate preemptively sends its
+  first request with **no** `Authorization` header, expects a 401 carrying
+  `WWW-Authenticate: Basic realm="…"`, and only then repeats the request with credentials. Twilio
+  documents exactly this behaviour for webhook URLs, so with a bare 401 the second leg never
+  happens: every webhook is dropped, and the outage is near-invisible because the dropped requests
+  look like ordinary auth failures. This cost buyout ~27h of missing inbound-call alerts and
+  voicemail transcriptions (`teamshares/buyout-app#2690`, reverted in `#2699`) and was hard to
+  diagnose precisely because the observability read "all failures, no successes" — those were all
+  first legs; the credentialed second leg never existed, so it showed up as neither. Endpoints
+  using a signature strategy are unaffected and still return a bare 401 (there is nothing to
+  challenge a signing client *with*).
+- **`Verify` no longer logs its verifier.** `expects :verifier` was not marked `sensitive: true`,
+  so Axn's per-call info logging rendered the verifier on every request. Harmless for the lambda
+  the signature strategies build (`Proc#inspect` is just a source location) but not for any
+  verifier that *holds* a secret in an ivar — the default `Object#inspect` would have written a
+  plaintext credential to the application log on every single request. Marked sensitive at the
+  boundary, since a custom `verify` block can't be relied on to have thought about it.
 - `dispatch to:`/map entries can now target an `Axn::Factory.build(...)` product.
   `Axn::Factory` gives every generated class a debug `.name` (`"AnonymousAxn_<object_id>"`) so its
   instances can be identified in logs, but `Router#constantize` used `name.nil?` to decide whether a

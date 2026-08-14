@@ -46,13 +46,27 @@ module Axn
         def ok? = ok
       end
 
-      REASONS = %i[replay_window replay_timestamp_invalid signature_missing signature_mismatch].freeze
+      # The last two belong to `verify :basic_auth`, which rejects for reasons that have nothing to
+      # do with a signature. Keeping them out would stamp every Basic-auth rejection
+      # `:signature_mismatch` — and under Basic auth the *first leg of every successful webhook* is
+      # a rejection (the client is waiting to be challenged), so that one wrong label would be the
+      # single highest-volume value of this dimension, on endpoints where no signature exists.
+      # Exactly the misdirection PRO-3141 added `reason` to end.
+      REASONS = %i[
+        replay_window replay_timestamp_invalid signature_missing signature_mismatch
+        credentials_missing credentials_mismatch
+      ].freeze
 
       OK = Check.new(ok: true, reason: nil, skew: nil, suggested_unit: nil).freeze
 
       # The verdict a bare falsey return from a custom `verify` block is read as — it rejected the
       # signature without saying more, which is exactly :signature_mismatch.
       MISMATCH = Check.new(ok: false, reason: :signature_mismatch, skew: nil, suggested_unit: nil).freeze
+
+      # `verify :basic_auth`'s two verdicts. CREDENTIALS_MISSING is the expected first leg of the
+      # RFC 7617 handshake, not an anomaly — see Verify::MESSAGES for why its message says so.
+      CREDENTIALS_MISSING = Check.new(ok: false, reason: :credentials_missing, skew: nil, suggested_unit: nil).freeze
+      CREDENTIALS_MISMATCH = Check.new(ok: false, reason: :credentials_mismatch, skew: nil, suggested_unit: nil).freeze
 
       module_function
 

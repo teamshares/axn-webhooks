@@ -125,7 +125,40 @@ Axn::Webhooks.inbound :twilio do
   verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
                    .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
 end
+
+# A vendor gated by HTTP Basic auth rather than a signature
+Axn::Webhooks.inbound :legacy_vendor do
+  verify :basic_auth,
+    username: -> { ENV.fetch("WEBHOOKS_AUTH_USERNAME") },
+    password: -> { ENV.fetch("WEBHOOKS_AUTH_PASSWORD") },
+    realm:    "Webhook"   # optional; appears in the WWW-Authenticate challenge
+end
 ```
+
+#### A note on `verify :basic_auth`
+
+Basic auth is a two-legged protocol, and the second leg is easy to lose. A client that doesn't
+authenticate preemptively — **Twilio is one** — sends its first request with no `Authorization`
+header, expects a `401` carrying `WWW-Authenticate: Basic realm="…"`, and only then repeats the
+request with credentials. Return a bare 401 and that retry never comes: every webhook is dropped,
+and it reads as an ordinary stream of auth failures rather than an outage.
+
+`verify :basic_auth` owns that challenge for you, along with constant-time comparison and
+fail-closed behaviour on a missing or blank credential (comparing against `""` would authenticate
+`Authorization: Basic Og==` for anyone, and CI and secret managers can both set an empty string).
+If you hand-roll Basic auth in a custom `verify` block instead, declare the challenge yourself:
+
+```ruby
+Axn::Webhooks.inbound :vendor do
+  verify { |req| my_own_check(req) }
+  unauthorized_headers "WWW-Authenticate" => %(Basic realm="Webhook")
+end
+```
+
+Prefer signature verification where the vendor offers it: it's one request rather than two, it
+authenticates the *payload* and not merely the caller, and it needs no challenge — Twilio
+[recommends it over Basic auth](https://www.twilio.com/docs/usage/webhooks/webhooks-security) for
+exactly these reasons.
 
 Verify a request (dispatch/respond and HTTP mounting land in later phases):
 
@@ -143,7 +176,7 @@ alerted on separately rather than all reading as "signature mismatch":
 ```ruby
 result.reason  # => :replay_window
 result.skew    # => 10_000  (seconds, signed: positive = the timestamp is in the past)
-result.error   # => "Webhook signature verification failed: replay window exceeded (timestamp skew 10000s)"
+result.error   # => "Webhook verification failed: replay window exceeded (timestamp skew 10000s)"
 ```
 
 | `reason` | What it means | Usually caused by |
@@ -152,6 +185,8 @@ result.error   # => "Webhook signature verification failed: replay window exceed
 | `:replay_timestamp_invalid` | The timestamp is absent or unparseable | A typo'd `replay: { timestamp: header(…) }` name, or a vendor that stopped sending it |
 | `:signature_missing` | No signature header at all | A typo'd `signature:` header name, or an unsigned sender |
 | `:signature_mismatch` | The HMAC genuinely didn't match | Wrong/rotated secret, or the wrong `signing_string` |
+| `:credentials_missing` | `verify :basic_auth` only. No `Authorization` header, or a non-Basic scheme. | **Usually nothing** — this is the expected first leg of the RFC 7617 handshake, so on a healthy Basic-auth endpoint it fires about once per successful webhook |
+| `:credentials_mismatch` | `verify :basic_auth` only. Credentials were offered and rejected. | Wrong/rotated `username:`/`password:`, or a scanner guessing |
 
 A `:replay_window` rejection additionally carries **`suggested_unit`** — the scale that *would* have
 put the timestamp inside the window (`Signature.mismatched_unit`), stamped as its own dimension:
