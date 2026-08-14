@@ -121,6 +121,88 @@ RSpec.describe "verify :hmac strategy" do
     expect(Axn::Webhooks::Inbound[:pinned_seconds].verify(req)).not_to be_ok
   end
 
+  # PRO-3141 — the end-to-end version of the Lob outage: two 401s that used to be identical.
+  describe "rejection reasons" do
+    it "reports :replay_window (with the skew), not :signature_mismatch, for a validly-signed stale request" do
+      stale = (Time.now - 10_000).to_i.to_s
+      sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+      Axn::Webhooks.inbound(:lob) do
+        verify :hmac, secret: "shh", signature: header("X-Sig"),
+                      replay: { timestamp: header("X-Ts"), within: 300 }
+      end
+
+      result = Axn::Webhooks::Inbound[:lob].verify(request(headers: { "X-Sig" => sig, "X-Ts" => stale }))
+
+      expect(result.reason).to eq(:replay_window)
+      expect(result.skew).to be_within(5).of(10_000)
+      expect(result.error).to include("replay window")
+    end
+
+    it "reports :signature_mismatch for a freshly-timestamped request with a bad signature" do
+      fresh = Time.now.to_i.to_s
+      Axn::Webhooks.inbound(:lob) do
+        verify :hmac, secret: "shh", signature: header("X-Sig"),
+                      replay: { timestamp: header("X-Ts"), within: 300 }
+      end
+
+      result = Axn::Webhooks::Inbound[:lob].verify(request(headers: { "X-Sig" => "deadbeef", "X-Ts" => fresh }))
+
+      expect(result.reason).to eq(:signature_mismatch)
+    end
+
+    it "reports :replay_timestamp_invalid when the configured timestamp header is absent (typo'd header name)" do
+      sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+      Axn::Webhooks.inbound(:lob) do
+        verify :hmac, secret: "shh", signature: header("X-Sig"),
+                      replay: { timestamp: header("X-Typo"), within: 300 }
+      end
+
+      result = Axn::Webhooks::Inbound[:lob].verify(request(headers: { "X-Sig" => sig, "X-Ts" => Time.now.to_i.to_s }))
+
+      expect(result.reason).to eq(:replay_timestamp_invalid)
+    end
+
+    it "reports :signature_missing when the vendor sent no signature header" do
+      Axn::Webhooks.inbound(:merge) { verify :hmac, secret: "shh", signature: header("X-Sig") }
+
+      expect(Axn::Webhooks::Inbound[:merge].verify(request(headers: {})).reason).to eq(:signature_missing)
+    end
+
+    it "names a PINNED unit: as the cause, distinguishing it from a genuine replay" do
+      # The Lob outage, as it can still happen post-PRO-3142: epoch-ms read as epoch-s, which only
+      # occurs now if someone explicitly pinned unit: :seconds. Same :replay_window reason as
+      # ordinary staleness, but suggested_unit names the fix outright.
+      fresh_ms = (Time.now.to_i * 1_000).to_s
+      sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+      Axn::Webhooks.inbound(:pinned_wrong) do
+        verify :hmac, secret: "shh", signature: header("X-Sig"),
+                      replay: { timestamp: header("X-Ts"), within: 300, unit: :seconds }
+      end
+
+      result = Axn::Webhooks::Inbound[:pinned_wrong].verify(request(headers: { "X-Sig" => sig, "X-Ts" => fresh_ms }))
+
+      expect(result.reason).to eq(:replay_window)
+      expect(result.suggested_unit).to eq(:ms)
+      expect(result.skew).to be < -1_000_000_000_000
+      expect(result.error).to include("would fit as unit: :ms")
+    end
+
+    it "leaves suggested_unit nil for a genuine replay, so the two are separable" do
+      stale = (Time.now - 10_000).to_i.to_s
+      sig = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+      Axn::Webhooks.inbound(:lob) do
+        verify :hmac, secret: "shh", signature: header("X-Sig"),
+                      replay: { timestamp: header("X-Ts"), within: 300 }
+      end
+
+      result = Axn::Webhooks::Inbound[:lob].verify(request(headers: { "X-Sig" => sig, "X-Ts" => stale }))
+
+      expect(result.reason).to eq(:replay_window)
+      expect(result.suggested_unit).to be_nil
+      expect(result.error).not_to include("would fit")
+    end
+  end
+
   it "raises a loud developer error when a required option is missing" do
     expect { Axn::Webhooks.inbound(:x) { verify :hmac, secret: "s" } } # no signature:
       .to raise_error(ArgumentError, /signature/)

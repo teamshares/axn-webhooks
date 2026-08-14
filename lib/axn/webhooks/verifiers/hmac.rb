@@ -17,7 +17,9 @@ module Axn
 
         lambda do |request|
           timestamp = replay && Resolvers.resolve(replay.fetch(:timestamp), request)
-          Signature.hmac(
+          # hmac_check (not hmac): Verify reads the returned Signature::Check to report WHY the
+          # request was rejected, so a replay-window miss is separable from an HMAC mismatch.
+          Signature.hmac_check(
             secret: Resolvers.resolve(secret, request),
             payload: Resolvers.resolve(signing_string, request),
             signature: Resolvers.resolve(signature, request),

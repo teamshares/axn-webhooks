@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+### Added
+- Verification failures now name their cause. `Signature.hmac` checked the replay window first and
+  returned a bare `false`; a signature mismatch returned the same bare `false`; `Verify` mapped both
+  to `fail!("signature mismatch")`. The two were therefore indistinguishable in the logs — and in the
+  replay case the message was actively wrong, since the signature was valid. That cost hours on the
+  Lob outage (os-app#5128), where every real delivery 401'd with a *valid* signature (the replay guard
+  rejected it, because the timestamp was epoch-**ms** read as epoch-s) but the only evidence said
+  "signature mismatch", sending the investigation into secret rotation and secret drift first.
+  - New `Signature.hmac_check(...)` returns a `Signature::Check` (`ok?`, `reason`, `skew`,
+    `suggested_unit`) instead of a boolean. `Signature.hmac` is now literally `hmac_check(...).ok?` — same behavior, byte for byte,
+    and the replay window still lives in exactly one place rather than being duplicated into each
+    verifier. New public `Signature.skew(timestamp:, now:, unit:)` returns the signed drift in
+    seconds (positive = the timestamp is in the past), or nil if it's absent/unparseable;
+    `within_tolerance?` is now defined in terms of it.
+  - `reason` is one of four: `:replay_window` (valid timestamp, outside the window — carries `skew`),
+    `:replay_timestamp_invalid` (absent or unparseable timestamp), `:signature_missing` (no signature
+    header), `:signature_mismatch` (the HMAC genuinely didn't match). The last three were all
+    "signature mismatch" before, though each names a different misconfiguration.
+  - `Verify` exposes `reason`, `skew` and `suggested_unit` on the result, uses a reason-specific
+    message, and stamps
+    `reason` as a `dimension` (`from: :result`), so verify failures are groupable in Datadog/OTel —
+    the missing signal behind PRO-3125's monitor, which could alert on verify failures but not
+    classify them. Unlike `:vendor`, this dimension is *not* gated behind
+    `Axn::Webhooks.config.vendor_facet`: it's a closed enum, not a per-endpoint identity, so a default
+    install needs it as much as a configured one.
+  - A `:replay_window` rejection also carries `suggested_unit` — the scale that *would* have put the
+    timestamp inside the window, via `Signature.mismatched_unit` (added in PRO-3142) — stamped as a
+    second bounded dimension and appended to the message ("— would fit as unit: `:ms`"). Its
+    presence splits the misconfigured half of `:replay_window` from the genuine half, and its value
+    names the fix; `skew` alone (~1.8 **trillion** seconds for epoch-ms read as epoch-seconds) says
+    only that something is very wrong. Since PRO-3142 made `unit:` infer the scale per timestamp,
+    this is non-nil only when a `unit:` was explicitly **pinned** and doesn't fit — so
+    `reason: :replay_window` with no `suggested_unit` now overwhelmingly means a genuine stale
+    delivery. A timestamp is not a secret and the HTTP response is a bare 401 either way, so nothing
+    extra reaches the sender.
+  - The built-in `:hmac` and `:standard_webhooks` strategies now return a `Signature::Check` rather
+    than a boolean. Custom `verify` blocks are unaffected — the documented
+    `->(request) { Boolean }` contract still holds and a falsey return reports
+    `:signature_mismatch` — but a custom block may now return a `Check` to name its own cause.
+
 ### Fixed
 - A verified request whose body doesn't parse no longer 500s, which invited an unbounded vendor retry
   loop (PRO-3143). `parse.call(request)` raised inside `Dispatch`, the outcome mapper turned any

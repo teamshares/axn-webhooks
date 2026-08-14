@@ -30,7 +30,8 @@ module Axn
           payload = "#{Resolvers.resolve(id, request)}.#{ts}.#{request.raw_body}"
           candidates = StandardWebhooks.extract_v1(Resolvers.resolve(signature, request))
 
-          Signature.hmac(
+          # hmac_check (not hmac): returns a Signature::Check so Verify can name the cause.
+          Signature.hmac_check(
             secret: StandardWebhooks.decode_secret(Resolvers.resolve(secret, request)),
             payload:,
             signature: candidates.join(" "),

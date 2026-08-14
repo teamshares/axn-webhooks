@@ -34,21 +34,66 @@ module Axn
       # so a mismatch is never reported as the caller's own unit under a different name.
       CANONICAL_UNITS = %i[seconds ms microseconds].freeze
 
+      # The outcome of a signature check, with the CAUSE of a rejection named. Deliberately not
+      # called Result — `Axn::Result` already owns that word in this codebase's vocabulary.
+      #
+      # `reason` is one of REASONS (nil when ok). `skew` is set only for :replay_window, in seconds,
+      # signed (positive = the timestamp is in the past). `suggested_unit` is set only when a
+      # *pinned* `unit:` is what pushed the timestamp out of the window (see .mismatched_unit,
+      # PRO-3142) — nil for a genuine replay, which is what separates the Lob outage (os-app#5128)
+      # from a real stale delivery. Under the default `unit: AUTO` it is nil essentially always.
+      Check = Data.define(:ok, :reason, :skew, :suggested_unit) do
+        def ok? = ok
+      end
+
+      REASONS = %i[replay_window replay_timestamp_invalid signature_missing signature_mismatch].freeze
+
+      OK = Check.new(ok: true, reason: nil, skew: nil, suggested_unit: nil).freeze
+
+      # The verdict a bare falsey return from a custom `verify` block is read as — it rejected the
+      # signature without saying more, which is exactly :signature_mismatch.
+      MISMATCH = Check.new(ok: false, reason: :signature_mismatch, skew: nil, suggested_unit: nil).freeze
+
       module_function
 
       # Verify a candidate signature header against the HMAC of `payload`.
       # `signature` may hold several whitespace/comma-separated candidates (key rotation);
       # returns true if ANY matches. Never raises on hostile input.
+      # rubocop:disable Naming/PredicateMethod -- it IS a predicate, but `hmac` is the documented
+      # public entry point (README, every direct caller); renaming it to `hmac?` is a breaking change.
       def hmac(secret:, payload:, signature:, digest: :sha256, encoding: :hex, prefix: nil,
                timestamp: nil, tolerance: nil, now: nil, unit: AUTO)
+        hmac_check(secret:, payload:, signature:, digest:, encoding:, prefix:, timestamp:, tolerance:, now:, unit:).ok?
+      end
+      # rubocop:enable Naming/PredicateMethod
+
+      # Same check as `hmac`, but returns a Check naming WHY a rejection happened rather than a
+      # bare false. `hmac` is this method's `.ok?`, so the replay window lives in exactly one
+      # place and every caller (both built-in verifiers, and `Signature.hmac` itself) agrees.
+      def hmac_check(secret:, payload:, signature:, digest: :sha256, encoding: :hex, prefix: nil,
+                     timestamp: nil, tolerance: nil, now: nil, unit: AUTO)
         # Validate unit: unconditionally — a misconfigured unit: is a config error independent of
         # whether replay protection is active or the request happens to carry a signature.
         validate_unit!(unit)
-        return false if tolerance && !within_tolerance?(timestamp:, tolerance:, now: now || Time.now, unit:)
-        return false if signature.nil? || signature.to_s.empty?
+
+        if tolerance
+          now ||= Time.now
+          drift = skew(timestamp:, now:, unit:)
+          return rejected(:replay_timestamp_invalid) if drift.nil?
+
+          if drift.abs > tolerance.to_i
+            # Only asked on the rejection path — it re-runs the window against each other scale.
+            return rejected(:replay_window, skew: drift,
+                                            suggested_unit: mismatched_unit(timestamp:, tolerance:, now:, unit:))
+          end
+        end
+
+        return rejected(:signature_missing) if signature.nil? || signature.to_s.empty?
 
         expected = compute(secret:, payload:, digest:, encoding:)
-        candidates(signature, prefix:).any? { |candidate| secure_compare(candidate, expected) }
+        return OK if candidates(signature, prefix:).any? { |candidate| secure_compare(candidate, expected) }
+
+        rejected(:signature_mismatch)
       end
 
       # The encoded expected signature for `payload`. Reused by future outbound signing.
@@ -67,10 +112,19 @@ module Axn
 
       # True when `timestamp` is present, parseable, and within ±tolerance seconds of `now`.
       def within_tolerance?(timestamp:, tolerance:, now: nil, unit: AUTO)
-        epoch = coerce_epoch(timestamp, unit)
-        return false if epoch.nil?
+        drift = skew(timestamp:, now:, unit:)
+        !drift.nil? && drift.abs <= tolerance.to_i
+      end
 
-        ((now || Time.now).to_i - epoch).abs <= tolerance.to_i
+      # Seconds between `now` and `timestamp`, signed (positive = `timestamp` is in the past).
+      # nil when the timestamp is absent or unparseable — a distinct condition from "far away",
+      # which is why the two get separate rejection reasons. Goes through coerce_epoch, so `unit:`
+      # (including AUTO's per-timestamp inference) applies here exactly as it does to the window.
+      def skew(timestamp:, now: nil, unit: AUTO)
+        epoch = coerce_epoch(timestamp, unit)
+        return nil if epoch.nil?
+
+        (now || Time.now).to_i - epoch
       end
 
       # Diagnostic: the unit that WOULD have put `timestamp` inside the window, when `unit` didn't.
@@ -85,6 +139,9 @@ module Axn
           candidate != unit && within_tolerance?(timestamp:, tolerance:, now:, unit: candidate)
         end
       end
+
+      def rejected(reason, skew: nil, suggested_unit: nil) = Check.new(ok: false, reason:, skew:, suggested_unit:)
+      private_class_method :rejected
 
       def openssl_digest(digest)
         DIGESTS.fetch(digest) { raise ArgumentError, "unsupported digest: #{digest.inspect}" }

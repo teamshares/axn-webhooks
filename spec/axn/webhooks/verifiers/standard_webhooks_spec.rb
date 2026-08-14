@@ -68,6 +68,22 @@ RSpec.describe "verify :standard_webhooks strategy" do
     expect(Axn::Webhooks::Inbound[:codat].verify(request(headers:))).not_to be_ok
   end
 
+  # PRO-3141 — the preset delegates to Signature, so it separates the causes for free.
+  it "names the cause: :replay_window for a stale request, :signature_mismatch for a bad one" do
+    secret = whsec # Capture let-value as local variable for closure
+    Axn::Webhooks.inbound(:codat) { verify :standard_webhooks, secret:, tolerance: 300 }
+
+    stale_ts = (Time.now - 10_000).to_i.to_s
+    stale = request(headers: { "webhook-id" => id, "webhook-timestamp" => stale_ts,
+                               "webhook-signature" => "v1,#{sign(id:, timestamp: stale_ts, body:, key:)}" })
+    expect(Axn::Webhooks::Inbound[:codat].verify(stale).reason).to eq(:replay_window)
+
+    fresh_ts = Time.now.to_i.to_s
+    tampered = request(headers: { "webhook-id" => id, "webhook-timestamp" => fresh_ts,
+                                  "webhook-signature" => "v1,#{Base64.strict_encode64('nope-nope-nope-nope-nope-nope!!')}" })
+    expect(Axn::Webhooks::Inbound[:codat].verify(tampered).reason).to eq(:signature_mismatch)
+  end
+
   describe Axn::Webhooks::Verifiers::StandardWebhooks do
     it "decodes a whsec_ secret to its raw bytes" do
       expect(described_class.decode_secret("whsec_#{Base64.strict_encode64('abc')}")).to eq("abc")
