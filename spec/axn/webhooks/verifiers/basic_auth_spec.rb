@@ -93,6 +93,41 @@ RSpec.describe "verify :basic_auth strategy" do
     end
   end
 
+  # PRO-3141 made verify failures name their cause. Basic auth rejects for reasons that have
+  # nothing to do with a signature, and under RFC 7617 the bare first leg of every *successful*
+  # webhook is a rejection — so labelling those :signature_mismatch would make the single
+  # highest-volume value of this dimension both wrong and alarming.
+  describe "rejection reasons" do
+    it "reports :credentials_missing for the expected bare first leg, not a mismatch" do
+      result = declare.verify(request)
+
+      expect(result.reason).to eq(:credentials_missing)
+      expect(result.error).to match(/awaits the 401 challenge/)
+    end
+
+    it "reports :credentials_missing for a non-Basic scheme" do
+      expect(declare.verify(request(headers: { "Authorization" => "Bearer abc" })).reason).to eq(:credentials_missing)
+    end
+
+    it "reports :credentials_mismatch when credentials are offered but wrong" do
+      result = declare.verify(request(headers: basic("twilio", "wrong")))
+
+      expect(result.reason).to eq(:credentials_mismatch)
+      expect(result.error).to match(/Basic credentials rejected/)
+    end
+
+    it "exposes no reason on success" do
+      expect(declare.verify(request(headers: basic("twilio", "s3cret"))).reason).to be_nil
+    end
+
+    it "keeps both reasons in the closed enum Verify can render" do
+      %i[credentials_missing credentials_mismatch].each do |reason|
+        expect(Axn::Webhooks::Signature::REASONS).to include(reason)
+        expect(Axn::Webhooks::Verify::MESSAGES).to have_key(reason)
+      end
+    end
+  end
+
   describe "the 401 challenge" do
     # The regression this whole strategy exists for. Twilio (and any other client that doesn't
     # authenticate preemptively) sends its first request with no Authorization header and only

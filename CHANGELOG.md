@@ -53,6 +53,14 @@
   `"Webhook"` and is escaped per RFC 7230 quoted-string rules.
 - **`unauthorized_headers`** on the `inbound` DSL, for a custom `verify` block that needs to supply
   its own 401 challenge. A declaration wins over the verifier's own `#unauthorized_headers`.
+- Two new `Signature::REASONS` for the above: **`:credentials_missing`** and
+  **`:credentials_mismatch`**, so a Basic-auth rejection isn't reported as `:signature_mismatch` on
+  an endpoint where no signature exists. The split matters more than the rename: under RFC 7617 the
+  bare first leg of every *successful* Basic-auth webhook is a rejection, so `:credentials_missing`
+  is the highest-volume value of the `reason` dimension on a perfectly healthy endpoint — its
+  message says as much ("expected: client awaits the 401 challenge") so a dashboard full of them
+  doesn't read as an outage. A genuine credential problem surfaces as `:credentials_mismatch`
+  rather than being buried in that traffic.
 
 ### Fixed
 - A verified request whose body doesn't parse no longer 500s, which invited an unbounded vendor retry

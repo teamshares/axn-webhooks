@@ -18,6 +18,13 @@ module Axn
         replay_timestamp_invalid: ->(_check) { "replay timestamp missing or unparseable" },
         signature_missing: ->(_check) { "signature missing" },
         signature_mismatch: ->(_check) { "signature mismatch" },
+        # Not an anomaly: a client that doesn't authenticate preemptively is *supposed* to arrive
+        # bare and wait to be challenged, so this fires once per successful Basic-auth webhook.
+        # Worded so a dashboard full of them doesn't read as an outage — which is exactly what the
+        # same traffic looked like, mislabelled, when it took buyout's Twilio endpoints down for
+        # 27h (PRO-3146).
+        credentials_missing: ->(_check) { "no Basic credentials offered (expected: client awaits the 401 challenge)" },
+        credentials_mismatch: ->(_check) { "Basic credentials rejected" },
       }.freeze
 
       expects :request, type: Axn::Webhooks::Request, sensitive: true

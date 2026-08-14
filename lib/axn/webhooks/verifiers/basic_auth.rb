@@ -58,10 +58,15 @@ module Axn
           end
 
           username, password = credentials(request)
-          return false unless username
+          # Absent/non-Basic credentials are reported apart from wrong ones. Under RFC 7617 a bare
+          # first request is the handshake working, not a failure, so it's the highest-volume
+          # rejection on a healthy endpoint — conflating it with a real credential problem would
+          # bury the latter in expected traffic.
+          return Signature::CREDENTIALS_MISSING unless username
 
           # `&` rather than `&&` so the comparison doesn't short-circuit on the username.
-          secure_compare(username, expected_username) & secure_compare(password, expected_password)
+          matched = secure_compare(username, expected_username) & secure_compare(password, expected_password)
+          matched ? Signature::OK : Signature::CREDENTIALS_MISMATCH
         end
 
         # The RFC 7617 challenge. Lower-cased key per Rack 3's response-header SPEC (Response
