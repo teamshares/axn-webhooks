@@ -95,10 +95,25 @@ RSpec.describe "verify :basic_auth strategy" do
       expect(headers["www-authenticate"]).to eq('Basic realm="Webhook"')
     end
 
-    it "uses a declared realm, stripping quotes that would break the header" do
-      endpoint = declare(realm: 'Buyout "Webhooks"')
+    it "uses a declared realm" do
+      expect(declare(realm: "Buyout Webhooks").to_response(request).headers["www-authenticate"])
+        .to eq('Basic realm="Buyout Webhooks"')
+    end
 
-      expect(endpoint.to_response(request).headers["www-authenticate"]).to eq('Basic realm="Buyout Webhooks"')
+    # RFC 7230 quoted-string rules. Stripping quotes instead would leave a trailing backslash
+    # escaping the closing quote (`realm="Partner\"`) — malformed enough that a client may reject
+    # the challenge and never retry, which is the failure this whole strategy exists to prevent.
+    it "escapes quotes and backslashes in the realm rather than dropping them" do
+      expect(declare(realm: 'Buyout "Webhooks"').to_response(request).headers["www-authenticate"])
+        .to eq('Basic realm="Buyout \"Webhooks\""')
+
+      expect(declare(realm: "Partner\\").to_response(request).headers["www-authenticate"])
+        .to eq('Basic realm="Partner\\\\"')
+    end
+
+    it "rejects a realm containing control characters at declaration time" do
+      expect { declare(realm: "Bad\r\nX-Injected: 1") }
+        .to raise_error(Axn::Webhooks::Error, /realm cannot contain control characters/)
     end
 
     it "is not sent once the client authenticates" do

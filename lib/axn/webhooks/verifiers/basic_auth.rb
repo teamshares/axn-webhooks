@@ -17,10 +17,18 @@ module Axn
       class BasicAuth
         DEFAULT_REALM = "Webhook"
 
+        # A control character can't be represented in an RFC 7230 quoted-string at all, and CR/LF
+        # would split the response header outright. Rejected at declaration time (this runs inside
+        # `Axn::Webhooks.inbound`, i.e. at boot) rather than silently scrubbed: a realm is developer
+        # config, so a typo should fail the deploy, not ship a subtly malformed challenge.
+        CONTROL_CHARS = /[\x00-\x1F\x7F]/
+
         def initialize(username:, password:, realm: DEFAULT_REALM)
+          raise Axn::Webhooks::Error, "verify :basic_auth realm cannot contain control characters" if realm.to_s.match?(CONTROL_CHARS)
+
           @username = username
           @password = password
-          @realm = realm
+          @realm = realm.to_s
         end
 
         attr_reader :realm
@@ -48,8 +56,14 @@ module Axn
 
         # The RFC 7617 challenge. Lower-cased key per Rack 3's response-header SPEC (Response
         # lower-cases keys anyway; spelled that way here so the two agree on sight).
+        #
+        # The realm is an RFC 7230 quoted-string, so `"` and `\` are escaped rather than stripped —
+        # the realm a client displays should be the one that was configured. Stripping only quotes
+        # would leave a trailing backslash escaping the closing quote (`realm="Partner\"`), which
+        # is malformed enough that a client may reject the challenge and never retry — recreating
+        # the exact silent-drop failure this strategy exists to prevent.
         def unauthorized_headers
-          { "www-authenticate" => %(Basic realm="#{realm.to_s.tr('"', '')}") }
+          { "www-authenticate" => %(Basic realm="#{realm.gsub(/([\\"])/, '\\\\\1')}") }
         end
 
         private
@@ -65,9 +79,11 @@ module Axn
           [username.to_s, password.to_s]
         end
 
-        # Hash first, then compare fixed-length digests. Signature#secure_compare returns false on
-        # a length mismatch instead, which is fine for signatures (fixed width by construction) but
-        # would leak credential length here, where both sides are arbitrary user-chosen strings.
+        # Hash first, then compare the two fixed-width digests — so the comparison itself is
+        # constant-time AND independent of credential length. The obvious alternative, the bytesize
+        # precheck in Signature#secure_compare, is fine for signatures (fixed width by construction)
+        # but would answer "is the password N characters long?" here, where both sides are
+        # arbitrary user-chosen strings. Same construction as ActiveSupport::SecurityUtils.
         def secure_compare(candidate, expected)
           OpenSSL.fixed_length_secure_compare(
             OpenSSL::Digest::SHA256.digest(candidate),
