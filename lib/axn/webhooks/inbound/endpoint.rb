@@ -93,6 +93,7 @@ module Axn
 
         def response_for(dispatched)
           return Response.service_unavailable(retry_after: dispatched.retry_after) if dispatched.retry_later
+          return default_ack(status: unparseable_status) if unparseable?(dispatched)
           return Response.new(status: 500) if dispatched.outcome.exception?
           return default_ack if dispatched.outcome.failure?    # handler fail! -> quiet ack (or static body)
           return default_ack if dispatched.handler_result.nil? # otherwise: :ack / async enqueue -> ack (or static body)
@@ -104,15 +105,33 @@ module Axn
           responded.ok? ? responded.response : Response.new(status: 500)
         end
 
+        # A verified request whose body doesn't parse (PRO-3143). Checked ahead of the generic
+        # exception -> 500 branch: it IS an exception outcome (already reported via on_exception, which
+        # is how you learn a vendor is sending garbage), but a retry can never fix malformed bytes, so
+        # the HTTP answer is terminal instead of an invitation to redeliver forever.
+        def unparseable?(dispatched) = dispatched.exception.is_a?(Axn::Webhooks::UnparseableBody)
+
+        # This endpoint's declaration wins over the global setting; see the setting's own comment for
+        # why the default is a 2xx rather than the semantically-tidier 400.
+        def unparseable_status = @dispatch[:unparseable_status] || Axn::Webhooks.config.unparseable_status
+
         # The bare-ack default, or the declared static_respond body in its place. Every branch
         # above that used to hardcode `Response.ack` (dispatch.failure?, nil handler_result, no
         # respond declared, no dispatch at all) now goes through here — static_respond, unlike
         # respond, has no handler_result to read, so it renders on all of them uniformly.
-        def default_ack
-          return Response.ack unless @static_respond
+        #
+        # `status:` restamps the rendered response, for the one caller (the unparseable-body row) whose
+        # status the gem decides rather than the block. Left nil by every other caller, so a block that
+        # picked its own status — `text("queued", status: 202)` — still keeps it on the success rows.
+        # A raising/non-Response static_respond block is still a 500 here: an internal error in the
+        # endpoint's own body-rendering isn't the vendor's malformed body, and shouldn't be acked as one.
+        def default_ack(status: nil)
+          return Response.ack(status: status || 200) unless @static_respond
 
           responded = StaticRespond.call(responder: @static_respond, vendor: @name)
-          responded.ok? ? responded.response : Response.new(status: 500)
+          return Response.new(status: 500) unless responded.ok?
+
+          status ? responded.response.with_status(status) : responded.response
         end
       end
     end

@@ -68,10 +68,58 @@ RSpec.describe Axn::Webhooks::Dispatch do
     expect(result).to be_ok
   end
 
-  it "settles as a loud exception on a body that fails to parse" do
+  it "settles as a loud exception on a body that fails to parse, wrapped as UnparseableBody with the original as cause" do
     router = Axn::Webhooks::Inbound::Router.new(to: "OkHandler")
     result = described_class.call(request: request("not json"), router:, parse: json_parse)
     expect(result.outcome).to be_exception
+    expect(result.exception).to be_a(Axn::Webhooks::UnparseableBody)
+    expect(result.exception.cause).to be_a(JSON::ParserError)
+  end
+
+  it "wraps whatever a custom parse proc raises as UnparseableBody, so a non-JSON format is covered too" do
+    stub_const("FakeXMLSyntaxError", Class.new(StandardError))
+    parse = ->(_request) { raise FakeXMLSyntaxError, "3:12: FATAL: expected '>'" }
+    router = Axn::Webhooks::Inbound::Router.new(to: "OkHandler")
+    result = described_class.call(request: request("<not xml"), router:, parse:)
+    expect(result.exception).to be_a(Axn::Webhooks::UnparseableBody)
+    expect(result.exception.message).to include("FakeXMLSyntaxError", "expected '>'")
+  end
+
+  it "does not double-wrap an UnparseableBody a custom parse proc raises itself" do
+    boom = Axn::Webhooks::UnparseableBody.new("malformed protobuf")
+    router = Axn::Webhooks::Inbound::Router.new(to: "OkHandler")
+    result = described_class.call(request: request("\x00"), router:, parse: ->(_request) { raise boom })
+    expect(result.exception).to be(boom)
+  end
+
+  it "does not treat a handler crash as an unparseable body (that class stays retryable)" do
+    router = Axn::Webhooks::Inbound::Router.new(to: "BoomHandler")
+    result = described_class.call(request: request("{}"), router:, parse: json_parse)
+    expect(result.exception).not_to be_a(Axn::Webhooks::UnparseableBody)
+  end
+
+  it "reports an unparseable body to on_exception exactly once (report, then ack)" do
+    reports = []
+    original = Axn.config.instance_variable_get(:@on_exception)
+    Axn.config.instance_variable_set(:@on_exception, ->(e, **) { reports << e })
+    begin
+      router = Axn::Webhooks::Inbound::Router.new(to: "OkHandler")
+      described_class.call(request: request("not json"), router:, parse: json_parse)
+      expect(reports.count { |e| e.is_a?(Axn::Webhooks::UnparseableBody) }).to eq(1)
+    ensure
+      Axn.config.instance_variable_set(:@on_exception, original)
+    end
+  end
+
+  it "lets a parse proc that does I/O ask for redelivery via retry_later! instead of acking it away" do
+    router = Axn::Webhooks::Inbound::Router.new(to: "OkHandler")
+    result = described_class.call(
+      request: request("{}"), router:, parse: ->(_request) { Axn::Webhooks.retry_later!(after: 30) },
+    )
+    expect(result).to be_ok
+    expect(result.outcome).not_to be_exception
+    expect(result.retry_later).to be(true)
+    expect(result.retry_after).to eq(30)
   end
 
   it "reports a handler crash to on_exception exactly once" do

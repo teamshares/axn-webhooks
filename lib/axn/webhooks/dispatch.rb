@@ -21,7 +21,7 @@ module Axn
       error "Webhook dispatch failed"
 
       def call
-        event = parse.call(request)
+        event = parse_event
         resolution = router.resolve(event)
         return done!("acknowledged") if resolution == :ack
 
@@ -29,15 +29,36 @@ module Axn
         return dispatch_async(handler_class, args) if async?(handler_class, route_async)
 
         expose handler_result: nil
-        begin
-          expose handler_result: handler_class.call!(**args)
-        rescue Axn::Webhooks::RetryLater => e
-          expose retry_later: true
-          expose retry_after: e.retry_after
-        end
+        expose handler_result: handler_class.call!(**args)
+      rescue Axn::Webhooks::RetryLater => e
+        # Rescued for the whole method, not just the handler call: a `parse:` proc that does I/O needs
+        # the same "come back later" escape hatch, now that everything else it raises is terminal (see
+        # #parse_event) — and a RetryLater from a `with:` extractor or an `otherwise:` callable means
+        # the same thing wherever it's raised. handler_result is left unexposed (allow_nil) whenever
+        # the deferral happens before the handler ran.
+        expose retry_later: true
+        expose retry_after: e.retry_after
       end
 
       private
+
+      # The parse step is terminal by contract: a body that can't become an event won't parse on a
+      # redelivery either, so anything raised here is wrapped as UnparseableBody (PRO-3143) — still a
+      # reported exception outcome, but one Inbound::Endpoint maps to `unparseable_status` rather than
+      # a 500 that invites the vendor to send it again forever. The original error is preserved as the
+      # wrapper's `cause` (`raise` inside a rescue sets it). Wrapping the whole step, rather than
+      # allowlisting JSON::ParserError, is what makes this format-agnostic: a custom XML/form/protobuf
+      # `parse:` proc gets the terminal outcome without having to know about this gem's error classes.
+      #
+      # Two pass-throughs: an UnparseableBody the proc raised itself (already the right answer — don't
+      # double-wrap and bury its message), and a RetryLater (handled by #call's rescue above).
+      def parse_event
+        parse.call(request)
+      rescue Axn::Webhooks::RetryLater, Axn::Webhooks::UnparseableBody
+        raise
+      rescue StandardError => e
+        raise Axn::Webhooks::UnparseableBody, "#{e.class}: #{e.message}"
+      end
 
       # Resolve sync vs async per resolved route (Decision D extended, PRO-2952),
       # most-specific wins: (1) the route's own async: flag; (2) an explicit endpoint

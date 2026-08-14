@@ -3,6 +3,25 @@
 ## [Unreleased]
 
 ### Fixed
+- A verified request whose body doesn't parse no longer 500s, which invited an unbounded vendor retry
+  loop (PRO-3143). `parse.call(request)` raised inside `Dispatch`, the outcome mapper turned any
+  exception into a 500, and vendors retry non-2xx — Lob for 5 days, then it disables the endpoint — so
+  the gem's answer to "this body is malformed" was to ask the sender to deliver it again forever, for a
+  class of failure a retry can never fix. `Dispatch#parse_event` now wraps whatever the parse step
+  raises in the new `Axn::Webhooks::UnparseableBody < Axn::Webhooks::Error` (the original preserved as
+  `cause`), and `Inbound::Endpoint#response_for` maps that class to the new `unparseable_status` —
+  **200** by default — in a branch ahead of the generic exception→500 one. It stays an axn exception
+  outcome, deliberately not in any `fails_on`, so `Axn.config.on_exception` still reports it exactly
+  once: report, then ack. The whole step is wrapped rather than an allowlist of known JSON errors, so a
+  custom XML/form/protobuf `parse:` proc gets the terminal outcome without referencing this gem's error
+  classes; an `UnparseableBody` such a proc raises itself passes through unwrapped. A handler crash,
+  a missing/unresolvable handler, and an unmatched event with no `otherwise:` all still 500 (retrying
+  those can help — a deploy may resolve them), and verify still 401s first.
+- `Dispatch`'s `rescue Axn::Webhooks::RetryLater` moved from wrapping just the handler's `call!` to
+  wrapping the whole `call`, so a `parse:` proc that does I/O can still ask for redelivery (`503`)
+  rather than having a transient failure acked away as unparseable — the one thing the parse step
+  doesn't treat as terminal. Incidentally a `RetryLater` raised by a `with:` extractor or an
+  `otherwise:` callable now maps to 503 too, instead of a reported 500.
 - `dispatch to:`/map entries can now target an `Axn::Factory.build(...)` product.
   `Axn::Factory` gives every generated class a debug `.name` (`"AnonymousAxn_<object_id>"`) so its
   instances can be identified in logs, but `Router#constantize` used `name.nil?` to decide whether a
@@ -59,6 +78,20 @@
   BuildRequest failure maps to a clean 500 rather than escaping as a raise).
 
 ### Added
+- `Axn::Webhooks.config.unparseable_status` (default `200`) and a per-endpoint
+  `dispatch unparseable_status:` override — the HTTP status an inbound endpoint returns when a verified
+  request's body doesn't parse (see the Fixed entry above). The default is a 2xx rather than the tidier
+  400 because 2xx is the only answer every vendor reads as "stop redelivering": Lob, Stripe, Slack and
+  Shopify all retry non-2xx, and the last two also disable an endpoint after sustained failures. Set
+  `400` for a vendor that does honor 4xx as terminal, or `500` to restore the previous behavior. Both
+  levels validate the value as an Integer in `200..599` (the config setting via `ArgumentError` on
+  assignment, the DSL via `Axn::Webhooks::Error` at declaration time) against the shared
+  `Axn::Webhooks::Response.valid_status?`. A declared `static_respond` still renders its body on this
+  row — Dropbox Sign and friends key the ack on the body text, not the status, so a bare status-only
+  response would be read as a failed delivery and redelivered anyway. `Response#with_status(status)`
+  (new) is what restamps it: the block picked its status for the success path, but the gem owns the
+  outcome→status mapping. `Endpoint#default_ack` takes an optional `status:` for that one caller and
+  leaves the other rows (including a block's own `text("queued", status: 202)`) untouched.
 - A dispatch entry's `with:` now accepts a **Symbol** as the rename-only shape — `with: :payload` is
   `{ payload: event }`, the whole parsed event under a different kwarg name, where the lambda form
   read as a stutter (`with: ->(event) { { data: event } }` names the same value twice). For endpoints

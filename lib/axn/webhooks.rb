@@ -37,6 +37,17 @@ module Axn
     # (Teamshares: :dimension) opts in. See Axn::Webhooks::VendorFacet for the runtime mechanism.
     setting :vendor_facet, default: false, one_of: [false, :dimension, :tag]
 
+    # The HTTP status an inbound endpoint returns when a VERIFIED request's body doesn't parse
+    # (PRO-3143). 200 by default, because retrying can never fix a malformed body and 2xx is the only
+    # answer every vendor reads as "stop redelivering": Lob (5 days, then it disables the endpoint),
+    # Stripe, Slack and Shopify all retry non-2xx, and the last two also disable an endpoint after
+    # sustained failures — so a semantically-tidy 400 buys a retry loop from most senders. Set 400 for
+    # a vendor that does treat 4xx as terminal (honest status codes in their delivery dashboard), or
+    # 500 to restore the pre-PRO-3143 behavior. Per-endpoint override: `dispatch unparseable_status:`.
+    setting :unparseable_status,
+            default: 200,
+            validate: ->(value) { Response.valid_status?(value) || "must be an Integer HTTP status between 200 and 599" }
+
     # A dedicated deprecator instance, so a consuming Rails app can register it
     # (Rails.application.deprecators[:webhooks] = Axn::Webhooks.deprecator) and govern
     # its behavior (silence in test, raise in CI, etc.).
