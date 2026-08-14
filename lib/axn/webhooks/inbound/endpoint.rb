@@ -8,7 +8,7 @@ module Axn
       # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
         def initialize(name:, verifier:, dispatch: nil, respond: nil, static_respond: nil, challenge: nil,
-                       unauthorized_headers: nil)
+                       unauthorized_headers: nil, challenge_required: nil)
           if dispatch && dispatch[:mode] == :async && respond
             raise Axn::Webhooks::Error,
                   "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
@@ -28,6 +28,9 @@ module Axn
           @static_respond = static_respond
           @challenge = challenge
           @unauthorized_headers = unauthorized_headers
+          @challenge_required = challenge_required
+
+          validate_challenge!
         end
 
         attr_reader :name
@@ -46,6 +49,26 @@ module Axn
           return @verifier.unauthorized_headers if @verifier.respond_to?(:unauthorized_headers)
 
           {}
+        end
+
+        # Is this request an authentication attempt at all? When it isn't, there is nothing to
+        # verify — it's a protocol precondition, not a failed verification — and #to_response
+        # answers with the challenge without invoking Verify (PRO-3148). Under a two-legged scheme
+        # like RFC 7617 Basic auth a reactive client sends one such request per *successful*
+        # webhook, so recording them as verify failures made the highest-volume outcome on a healthy
+        # endpoint a recorded failure, and a cross-vendor verify-failure monitor unusable without
+        # knowing which vendors happen to use Basic auth.
+        #
+        # False unless something says otherwise, so the signature strategies — which have no
+        # challenge to offer and no second leg to wait for — are untouched.
+        #
+        # Note this is NOT the `challenge` declaration (that's the vendor's GET handshake, see
+        # #challenge_response). Same word, different protocol: this one is the 401 kind.
+        def challenge_required?(request)
+          return !!@challenge_required.call(request) if @challenge_required
+          return @verifier.challenge_required?(request) if @verifier.respond_to?(:challenge_required?)
+
+          false
         end
 
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
@@ -69,6 +92,12 @@ module Axn
         # rule, because a verify failure (401) and a handler business fail! (2xx) are both
         # `outcome.failure?` but mean opposite things at the HTTP layer.
         def to_response(request)
+          # Ahead of verify, deliberately: a request that isn't an authentication attempt gets the
+          # challenge rather than a recorded verify failure (see #challenge_required?). Same 401 on
+          # the wire, and it still can't reach a handler — strictly safer than the `done!` that
+          # would settle this leg as a *success*.
+          return Response.new(status: 401, headers: unauthorized_headers) if challenge_required?(request)
+
           verified = verify(request)
           return Response.new(status: 401, headers: unauthorized_headers) unless verified.ok?
           return default_ack unless @dispatch
@@ -108,6 +137,20 @@ module Axn
         end
 
         private
+
+        # A challenge with nothing in it is the PRO-3146 silent drop: the client is told to retry and
+        # never told how, so every request is dropped forever — and now without even a verify failure
+        # recorded, since answering the challenge skips Verify. Fails the boot rather than shipping an
+        # endpoint that is both broken and invisible. Reads the *effective* headers, so declaring
+        # `challenge_required` alongside a verifier that carries its own challenge (`verify
+        # :basic_auth`) is fine — only a hand-rolled endpoint with neither lands here.
+        def validate_challenge!
+          return unless @challenge_required && unauthorized_headers.empty?
+
+          raise Axn::Webhooks::Error,
+                "inbound endpoint `#{@name}` declares `challenge_required` but has no challenge to send — " \
+                "declare `unauthorized_headers` too, or the challenged client is never told how to retry"
+        end
 
         def response_for(dispatched)
           return Response.service_unavailable(retry_after: dispatched.retry_after) if dispatched.retry_later

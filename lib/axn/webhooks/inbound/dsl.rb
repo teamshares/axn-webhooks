@@ -20,6 +20,19 @@ module Axn
           @unauthorized_headers = headers
         end
 
+        # challenge_required { |req| req.header("Authorization").to_s.empty? }
+        #
+        # Declares which requests are not authentication attempts at all, and so get the challenge
+        # (401 + `unauthorized_headers`) instead of being run through `verify` and recorded as
+        # verify failures. `verify :basic_auth` answers this itself; declare it only for a custom
+        # `verify` block that wraps a two-legged scheme the gem can't see through — the shape
+        # buyout's Twilio routes use, where the BasicAuth verifier sits inside a block:
+        #
+        #   challenge_required { |req| my_basic_auth.challenge_required?(req) }
+        def challenge_required(&block)
+          @challenge_required = block
+        end
+
         # dispatch to: "Handler" | dispatch on: ->(e){…}, to: {map}, otherwise:, via: | parse: | mode:
         # `unparseable_status:` overrides Axn::Webhooks.config.unparseable_status for THIS endpoint —
         # it belongs here, next to `parse:`, because it only describes what happens when that parse
@@ -133,6 +146,9 @@ module Axn
 
         # Internal: the declared 401 headers, or nil to let the verifier speak for itself.
         def __unauthorized_headers__ = @unauthorized_headers
+
+        # Internal: the declared challenge-required predicate, or nil to ask the verifier.
+        def __challenge_required__ = @challenge_required
       end
     end
   end

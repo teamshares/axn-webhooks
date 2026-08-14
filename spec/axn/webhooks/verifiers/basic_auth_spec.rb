@@ -98,15 +98,20 @@ RSpec.describe "verify :basic_auth strategy" do
   # webhook is a rejection — so labelling those :signature_mismatch would make the single
   # highest-volume value of this dimension both wrong and alarming.
   describe "rejection reasons" do
-    it "reports :credentials_missing for the expected bare first leg, not a mismatch" do
-      result = declare.verify(request)
+    # PRO-3148 narrowed what reaching this reason means. Over HTTP the bare leg is answered with
+    # the challenge before Verify runs, so :credentials_missing is now the *non-Basic scheme* case:
+    # a client that meant to authenticate and got it wrong. Its message says so rather than
+    # describing the handshake leg it no longer reports.
+    it "reports :credentials_missing for a non-Basic scheme — a client that meant to authenticate" do
+      result = declare.verify(request(headers: { "Authorization" => "Bearer abc" }))
 
       expect(result.reason).to eq(:credentials_missing)
-      expect(result.error).to match(/awaits the 401 challenge/)
+      expect(result.error).to match(/non-Basic Authorization scheme/)
     end
 
-    it "reports :credentials_missing for a non-Basic scheme" do
-      expect(declare.verify(request(headers: { "Authorization" => "Bearer abc" })).reason).to eq(:credentials_missing)
+    # The stage API still answers honestly for a bare request; it just isn't a path HTTP can take.
+    it "reports :credentials_missing for a bare request asked of #verify directly" do
+      expect(declare.verify(request).reason).to eq(:credentials_missing)
     end
 
     it "reports :credentials_mismatch when credentials are offered but wrong" do
