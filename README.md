@@ -35,29 +35,48 @@ It always uses a constant-time comparison and supports multi-signature (key-rota
 ### Replay protection
 
 Pass `timestamp:` and `tolerance:` to guard against replayed requests — `hmac` returns `false` if
-the timestamp is more than `tolerance` seconds from now, in either direction. Vendors that send
-epoch **milliseconds** (not seconds) — e.g. Lob — pass `unit:`:
+the timestamp is more than `tolerance` seconds from now, in either direction. Epoch seconds,
+milliseconds and microseconds are all handled without configuration:
 
 ```ruby
 Axn::Webhooks::Signature.hmac(
   secret:, payload:, signature:,
-  timestamp: request.header("X-Timestamp"),  # epoch ms
+  timestamp: request.header("X-Timestamp"),  # epoch s, ms or µs — inferred per timestamp
   tolerance: 300,
-  unit:      :ms,                            # :seconds (default) | :ms | :milliseconds | :microseconds
+)
+```
+
+`unit:` defaults to `:auto`, which reads the scale off each timestamp's magnitude. The three scales
+sit 1000× apart and their plausible-date ranges don't overlap — a 13-digit value read as seconds is
+the year 58,601 — so inference is unambiguous for anything a vendor could legitimately send. It also
+can't widen what's accepted: a misread lands ~56 years off, which no realistic tolerance admits.
+
+This matters for vendors that send **more than one** unit. Lob delivers epoch seconds through Svix
+and epoch milliseconds from its dashboard's debug send; no single fixed unit is correct for it.
+
+Pass `unit:` explicitly to pin a vendor to one scale, so a change in what it sends fails loudly
+instead of being absorbed:
+
+```ruby
+Axn::Webhooks::Signature.hmac(
+  secret:, payload:, signature:,
+  timestamp: request.header("X-Timestamp"),
+  tolerance: 300,
+  unit:      :ms,   # :auto (default) | :seconds | :ms | :milliseconds | :microseconds
 )
 ```
 
 `unit:` only describes the resolution of the incoming `timestamp:` — `tolerance:`/`within:` is
 always in seconds, regardless of `unit:`. A `Time` timestamp ignores `unit:` entirely (it's already
 unambiguous). An unrecognized `unit:` raises `ArgumentError` immediately, even when `timestamp:`
-happens to be a `Time` — the unit lookup happens before the timestamp is inspected.
+happens to be a `Time` — the unit is validated before the timestamp is inspected.
 
-The same `unit:` option is available on `verify :hmac`'s `replay:` hash:
+The same `unit:` option is available on `verify :hmac`'s `replay:` hash, and is equally optional:
 
 ```ruby
 Axn::Webhooks.inbound :lob do
   verify :hmac, secret: ENV.fetch("LOB_WEBHOOK_SECRET"), signature: header("X-Lob-Signature"),
-                replay: { timestamp: header("X-Lob-Signature-Timestamp"), within: 300, unit: :ms }
+                replay: { timestamp: header("X-Lob-Signature-Timestamp"), within: 300 }
 end
 ```
 

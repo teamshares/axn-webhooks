@@ -157,7 +157,7 @@ RSpec.describe Axn::Webhooks::Signature do
                                   unit: :ms)).to be(false)
     end
 
-    it "defaults unit to :seconds when omitted (regression)" do
+    it "accepts a plain epoch-seconds timestamp when unit: is omitted (regression)" do
       ts = (now - 60).to_i
       expect(described_class.within_tolerance?(timestamp: ts, tolerance: 300, now:)).to be(true)
     end
@@ -187,6 +187,117 @@ RSpec.describe Axn::Webhooks::Signature do
     it "raises ArgumentError for an unsupported unit via .hmac even when tolerance is absent" do
       expect do
         described_class.hmac(secret:, payload:, signature: hex, unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+    end
+  end
+
+  describe "unit: :auto" do
+    let(:secret)  { "Jefe" }
+    let(:payload) { "what do ya want for nothing?" }
+    let(:hex)     { "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" }
+
+    # The two Lob senders from PRO-3142, captured off the wire. Same vendor, same endpoint,
+    # same second -- one sends 10-digit seconds, the other 13-digit milliseconds.
+    let(:now)       { Time.at(1_786_679_195) }
+    let(:lob_svix)  { "1786679195" }        # Svix, real deliveries
+    let(:lob_debug) { "1786679195123" }     # dashboard debug send
+
+    it "accepts both Lob senders under one configuration" do
+      expect(described_class.within_tolerance?(timestamp: lob_svix, tolerance: 300, now:, unit: :auto)).to be(true)
+      expect(described_class.within_tolerance?(timestamp: lob_debug, tolerance: 300, now:, unit: :auto)).to be(true)
+    end
+
+    it "is the default when unit: is omitted, so neither Lob sender needs configuring" do
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: lob_svix, tolerance: 300, now:)).to be(true)
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: lob_debug, tolerance: 300, now:)).to be(true)
+    end
+
+    it "infers each supported scale from magnitude" do
+      seconds = (now - 60).to_i
+      expect(described_class.within_tolerance?(timestamp: seconds, tolerance: 300, now:, unit: :auto)).to be(true)
+      expect(described_class.within_tolerance?(timestamp: seconds * 1_000, tolerance: 300, now:, unit: :auto)).to be(true)
+      expect(described_class.within_tolerance?(timestamp: seconds * 1_000_000, tolerance: 300, now:, unit: :auto)).to be(true)
+    end
+
+    it "accepts Integer and String forms identically" do
+      ts = (now - 60).to_i * 1_000
+      expect(described_class.within_tolerance?(timestamp: ts, tolerance: 300, now:, unit: :auto)).to be(true)
+      expect(described_class.within_tolerance?(timestamp: ts.to_s, tolerance: 300, now:, unit: :auto)).to be(true)
+    end
+
+    it "still rejects a genuinely stale timestamp at every scale (inference is not a rescue)" do
+      stale = (now - 10_000).to_i
+      expect(described_class.within_tolerance?(timestamp: stale, tolerance: 300, now:, unit: :auto)).to be(false)
+      expect(described_class.within_tolerance?(timestamp: stale * 1_000, tolerance: 300, now:, unit: :auto)).to be(false)
+      expect(described_class.within_tolerance?(timestamp: stale * 1_000_000, tolerance: 300, now:, unit: :auto)).to be(false)
+    end
+
+    it "pins the band boundaries: 1e11 is the year 5138 in seconds, so it reads as ms" do
+      # Below the floor -> seconds. At/above it -> ms. Both are ~56 years from `now` and rejected;
+      # what this pins is the branch, via which side of the window each lands on.
+      just_under = 99_999_999_999            # seconds -> year 5138
+      just_over  = 100_000_000_000           # ms      -> 1973
+      expect(described_class.within_tolerance?(timestamp: just_under, tolerance: 300, now:, unit: :auto)).to be(false)
+      expect(described_class.within_tolerance?(timestamp: just_over, tolerance: 300, now:, unit: :auto)).to be(false)
+      expect(described_class.mismatched_unit(timestamp: just_under, tolerance: 300, now:, unit: :auto)).to be_nil
+    end
+
+    it "leaves an explicit unit: as a hard lockdown -- no inference, no rescue" do
+      expect(described_class.within_tolerance?(timestamp: lob_debug, tolerance: 300, now:, unit: :seconds)).to be(false)
+      expect(described_class.within_tolerance?(timestamp: lob_svix, tolerance: 300, now:, unit: :ms)).to be(false)
+    end
+
+    it "ignores :auto for a Time timestamp (already unambiguous)" do
+      expect(described_class.within_tolerance?(timestamp: now - 60, tolerance: 300, now:, unit: :auto)).to be(true)
+    end
+
+    it "handles zero, negative and unparseable values without raising" do
+      expect(described_class.within_tolerance?(timestamp: 0, tolerance: 300, now:, unit: :auto)).to be(false)
+      expect(described_class.within_tolerance?(timestamp: -1_786_679_195, tolerance: 300, now:, unit: :auto)).to be(false)
+      expect(described_class.within_tolerance?(timestamp: "not-a-time", tolerance: 300, now:, unit: :auto)).to be(false)
+    end
+
+    it "still raises ArgumentError for an unsupported unit" do
+      expect do
+        described_class.within_tolerance?(timestamp: lob_svix, tolerance: 300, now:, unit: :fortnights)
+      end.to raise_error(ArgumentError, /unsupported unit/)
+    end
+  end
+
+  # Diagnostic surface for PRO-3141, which turns a bare 401 into a classified failure reason.
+  # Pure and side-effect-free: it names the unit that WOULD have fit, and logs nothing itself.
+  describe ".mismatched_unit" do
+    let(:now)       { Time.at(1_786_679_195) }
+    let(:lob_svix)  { "1786679195" }
+    let(:lob_debug) { "1786679195123" }
+
+    it "names the unit that would have fit when the configured one is wrong" do
+      expect(described_class.mismatched_unit(timestamp: lob_debug, tolerance: 300, now:, unit: :seconds)).to eq(:ms)
+      expect(described_class.mismatched_unit(timestamp: lob_svix, tolerance: 300, now:, unit: :ms)).to eq(:seconds)
+    end
+
+    it "returns nil when the configured unit already fits" do
+      expect(described_class.mismatched_unit(timestamp: lob_svix, tolerance: 300, now:, unit: :seconds)).to be_nil
+      expect(described_class.mismatched_unit(timestamp: lob_debug, tolerance: 300, now:, unit: :ms)).to be_nil
+    end
+
+    it "returns nil for a genuine replay -- no unit rescues a stale timestamp" do
+      stale = (now - 10_000).to_i
+      expect(described_class.mismatched_unit(timestamp: stale, tolerance: 300, now:, unit: :seconds)).to be_nil
+    end
+
+    it "returns nil for a missing or unparseable timestamp" do
+      expect(described_class.mismatched_unit(timestamp: nil, tolerance: 300, now:, unit: :seconds)).to be_nil
+      expect(described_class.mismatched_unit(timestamp: "not-a-time", tolerance: 300, now:, unit: :seconds)).to be_nil
+    end
+
+    it "treats the :milliseconds alias as :ms rather than reporting it as the mismatch" do
+      expect(described_class.mismatched_unit(timestamp: lob_svix, tolerance: 300, now:, unit: :milliseconds)).to eq(:seconds)
+    end
+
+    it "raises ArgumentError for an unsupported unit, like the rest of the unit surface" do
+      expect do
+        described_class.mismatched_unit(timestamp: lob_svix, tolerance: 300, now:, unit: :fortnights)
       end.to raise_error(ArgumentError, /unsupported unit/)
     end
   end

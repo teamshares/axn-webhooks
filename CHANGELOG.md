@@ -140,9 +140,30 @@
   explicit `mode: :async`. Mutually exclusive with `respond` (raises at registration if both are
   declared). Fixes the README's DropboxSign example, which was wrong for any consuming app with
   an axn async adapter configured.
-- `unit:` option on `replay:` (`verify :hmac`) and on `Signature.hmac`/`.within_tolerance?` directly — `:seconds` (default), `:ms`/`:milliseconds`, or `:microseconds`. Vendors sending epoch milliseconds (Lob) or finer resolutions no longer need a hand-rolled `timestamp[0, 10]`-style slice to fake seconds; the raw epoch value is divided by the unit's divisor before the tolerance comparison. A `Time` timestamp ignores `unit:` (already unambiguous); an unrecognized `unit:` raises `ArgumentError` immediately, regardless of timestamp type. `verify :hmac`'s `replay:` hash now also raises `ArgumentError` for any key outside `timestamp`/`within`/`unit` — a typo (e.g. `units:`) previously fell silently back to `unit: :seconds`, quietly failing verification for every epoch-ms vendor with zero diagnostic.
+- `unit:` option on `replay:` (`verify :hmac`) and on `Signature.hmac`/`.within_tolerance?` directly — `:auto` (default, see below), `:seconds`, `:ms`/`:milliseconds`, or `:microseconds`. Vendors sending epoch milliseconds (Lob) or finer resolutions no longer need a hand-rolled `timestamp[0, 10]`-style slice to fake seconds; the raw epoch value is divided by the unit's divisor before the tolerance comparison. A `Time` timestamp ignores `unit:` (already unambiguous); an unrecognized `unit:` raises `ArgumentError` immediately, regardless of timestamp type. `verify :hmac`'s `replay:` hash now also raises `ArgumentError` for any key outside `timestamp`/`within`/`unit` — a typo (e.g. `units:`) previously fell silently back to `unit: :seconds`, quietly failing verification for every epoch-ms vendor with zero diagnostic.
 
 ### Changed
+- `unit:` now defaults to **`:auto`**, inferring the timestamp's scale from its magnitude, rather than
+  to `:seconds`. A single declared unit cannot express a vendor that sends more than one, and Lob does:
+  real deliveries arrive through Svix as 10-digit epoch seconds, while its dashboard's debug send emits
+  13-digit milliseconds. Pinning either one breaks the other — `unit: :ms` puts every Svix delivery in
+  January 1970, a ~56-year skew that 401s the request before the HMAC even runs, which is what took
+  Lob's live traffic down (os-app#5128) and forced a `timestamp[0, 10]` slice back into consumer config.
+  Inference is unambiguous: seconds, milliseconds and microseconds sit 1000× apart and their
+  plausible-date bands don't overlap (a 13-digit value read as seconds is the year 58,601), so the
+  bands are `< 1e11` → seconds, `< 1e14` → ms, else microseconds. It cannot widen what's accepted —
+  a wrong-scale reading of any timestamp lands ~56 years from now, which no realistic tolerance
+  admits — so no stale timestamp becomes acceptable by being reinterpreted. A correctly-configured
+  `unit: :seconds` endpoint is unaffected; the only behavior change is that a millisecond or
+  microsecond sender now verifies instead of silently 401ing. An explicit `unit:` still works and is
+  now a deliberate lockdown: pin a vendor to one scale and a change in what it sends fails loudly
+  rather than being absorbed. An explicit `unit: nil`/`false` (e.g. an unset env var) still raises
+  `ArgumentError` rather than falling back to the default.
+- `Signature.mismatched_unit(timestamp:, tolerance:, now:, unit:)` — returns the unit that *would*
+  have put a rejected timestamp inside the window, or `nil` when the configured unit already fits,
+  the timestamp is missing/unparseable, or no scale rescues it. `nil` therefore means a genuine
+  replay and a symbol means a misconfigured `unit:`. Pure and side-effect-free — it logs nothing and
+  classifies nothing on its own; it exists for the verify-failure diagnostics to build on.
 - `Axn::Webhooks::Error` now includes `Axn::Error`, core's public-error boundary, so a consuming app's
   `rescue Axn::Error` catches this gem's errors alongside core's (and `RetryLater` with them — the tag
   is inherited). `Axn::Error` is a marker module rather than a base class, so the hierarchy is
