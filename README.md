@@ -176,7 +176,7 @@ alerted on separately rather than all reading as "signature mismatch":
 ```ruby
 result.reason  # => :replay_window
 result.skew    # => 10_000  (seconds, signed: positive = the timestamp is in the past)
-result.error   # => "Webhook signature verification failed: replay window exceeded (timestamp skew 10000s)"
+result.error   # => "Webhook verification failed: replay window exceeded (timestamp skew 10000s)"
 ```
 
 | `reason` | What it means | Usually caused by |
@@ -185,6 +185,8 @@ result.error   # => "Webhook signature verification failed: replay window exceed
 | `:replay_timestamp_invalid` | The timestamp is absent or unparseable | A typo'd `replay: { timestamp: header(…) }` name, or a vendor that stopped sending it |
 | `:signature_missing` | No signature header at all | A typo'd `signature:` header name, or an unsigned sender |
 | `:signature_mismatch` | The HMAC genuinely didn't match | Wrong/rotated secret, or the wrong `signing_string` |
+| `:credentials_missing` | `verify :basic_auth` only. No `Authorization` header, or a non-Basic scheme. | **Usually nothing** — this is the expected first leg of the RFC 7617 handshake, so on a healthy Basic-auth endpoint it fires about once per successful webhook |
+| `:credentials_mismatch` | `verify :basic_auth` only. Credentials were offered and rejected. | Wrong/rotated `username:`/`password:`, or a scanner guessing |
 
 A `:replay_window` rejection additionally carries **`suggested_unit`** — the scale that *would* have
 put the timestamp inside the window (`Signature.mismatched_unit`), stamped as its own dimension:

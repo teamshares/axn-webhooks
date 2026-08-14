@@ -62,6 +62,15 @@
   doesn't read as an outage. A genuine credential problem surfaces as `:credentials_mismatch`
   rather than being buried in that traffic.
 
+### Changed
+- `Verify`'s error prefix is now the mechanism-neutral **"Webhook verification failed"** (was
+  "Webhook signature verification failed"). It prefixes *every* reason's message, so with
+  `verify :basic_auth` it read "Webhook signature verification failed: Basic credentials rejected"
+  — announcing a signature failure on an endpoint that has no signature, in the first words an
+  operator reads, which is exactly the misdirection `reason` was added to end. The signature cases
+  lose nothing: their own half of the message still names the signature. Only the human-readable
+  string changed — `reason` (the thing to match on programmatically) is untouched.
+
 ### Fixed
 - A verified request whose body doesn't parse no longer 500s, which invited an unbounded vendor retry
   loop (PRO-3143). `parse.call(request)` raised inside `Dispatch`, the outcome mapper turned any

@@ -36,7 +36,12 @@ module Axn
       exposes :reason, allow_blank: true, default: nil
       exposes :skew, allow_blank: true, default: nil
       exposes :suggested_unit, allow_blank: true, default: nil
-      error "Webhook signature verification failed"
+      # Deliberately mechanism-neutral: this prefixes every reason's message, and `verify :basic_auth`
+      # rejects requests on endpoints where no signature exists — "signature verification failed:
+      # Basic credentials rejected" would reintroduce, in the very first words an operator reads,
+      # the misdirection `reason` was added to end. The signature cases lose nothing, since their
+      # own half of the message still names the signature (see MESSAGES).
+      error "Webhook verification failed"
 
       # A bounded enum (4 values), so unlike :vendor it's stamped unconditionally rather than
       # gated behind Axn::Webhooks.config.vendor_facet — separating the causes is the reason

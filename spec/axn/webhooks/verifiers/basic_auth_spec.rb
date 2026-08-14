@@ -120,6 +120,16 @@ RSpec.describe "verify :basic_auth strategy" do
       expect(declare.verify(request(headers: basic("twilio", "s3cret"))).reason).to be_nil
     end
 
+    # The reason-specific half is only half the message: Verify's `error` prefixes every one of
+    # them. A signature-specific prefix would put the misdirection back in the first words an
+    # operator reads, on an endpoint where no signature exists.
+    it "never describes a Basic-auth rejection as a signature failure" do
+      %i[credentials_missing credentials_mismatch].each do |reason|
+        headers = reason == :credentials_missing ? {} : basic("twilio", "wrong")
+        expect(declare.verify(request(headers:)).error).not_to match(/signature/i)
+      end
+    end
+
     it "keeps both reasons in the closed enum Verify can render" do
       %i[credentials_missing credentials_mismatch].each do |reason|
         expect(Axn::Webhooks::Signature::REASONS).to include(reason)
