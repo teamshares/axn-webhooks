@@ -75,6 +75,13 @@
     is absent or blank); the signature strategies don't, so they are byte-identical in behaviour and
     telemetry. `#verify` and `#handle` are deliberately unchanged — they are the verification stage,
     and a bare request honestly doesn't verify — so a caller driving them by hand asks this first.
+  - The predicate runs inside its own Axn (`Inbound::ChallengeRequired`), like the verifier, the
+    `parse:` step and the GET challenge resolver: it's request-dependent code reading adversarial
+    input, and it runs ahead of every other boundary on the POST path, so a raise would otherwise
+    escape as an unhandled Rack exception. A crash reads as "can't tell" and verifies normally — the
+    pre-precondition behaviour, which can neither dispatch an unauthenticated request nor drop an
+    authenticated one — and is reported once via `on_exception`. An endpoint with no predicate makes
+    no such call at all, so the signature strategies gain no stage.
   - New **`challenge_required { |req| … }`** `inbound` declaration, mirroring `unauthorized_headers`
     (a declaration wins over the verifier's own predicate). Needed when a custom `verify` block
     wraps a two-legged verifier the gem can't see through. Declaring it on an endpoint with no

@@ -60,15 +60,20 @@ module Axn
         # knowing which vendors happen to use Basic auth.
         #
         # False unless something says otherwise, so the signature strategies — which have no
-        # challenge to offer and no second leg to wait for — are untouched.
+        # challenge to offer and no second leg to wait for — are untouched: no predicate means no
+        # ChallengeRequired call either, not merely a false answer from one.
         #
         # Note this is NOT the `challenge` declaration (that's the vendor's GET handshake, see
         # #challenge_response). Same word, different protocol: this one is the 401 kind.
         def challenge_required?(request)
-          return !!@challenge_required.call(request) if @challenge_required
-          return @verifier.challenge_required?(request) if @verifier.respond_to?(:challenge_required?)
+          predicate = challenge_predicate
+          return false unless predicate
 
-          false
+          # Inside an Axn boundary: the predicate is request-dependent code the gem doesn't own, and
+          # it runs ahead of every other boundary on the POST path. A crash settles not-ok and is read
+          # as "can't tell" -> verify normally (see ChallengeRequired for why that's the safe answer).
+          checked = ChallengeRequired.call(request:, predicate:, vendor: @name)
+          checked.ok? && checked.required
         end
 
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
@@ -137,6 +142,17 @@ module Axn
         end
 
         private
+
+        # The declared block, else the verifier's own bound predicate, else nil for "nobody claims a
+        # challenge" — the signature strategies and every plain `verify` lambda. Same precedence as
+        # #unauthorized_headers: a declaration wins, so a custom block can speak for a verifier the
+        # gem can't see through.
+        def challenge_predicate
+          return @challenge_required if @challenge_required
+          return @verifier.method(:challenge_required?) if @verifier.respond_to?(:challenge_required?)
+
+          nil
+        end
 
         # A challenge with nothing in it is the PRO-3146 silent drop: the client is told to retry and
         # never told how, so every request is dropped forever — and now without even a verify failure

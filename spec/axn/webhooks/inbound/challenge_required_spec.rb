@@ -172,6 +172,67 @@ RSpec.describe "the challenge-required precondition" do
     end
   end
 
+  # The predicate is a request-dependent extension point, and it runs on the Rack path ahead of
+  # everything else — so like the verifier, the `parse:` step and the GET challenge resolver, it gets
+  # an Axn boundary rather than being trusted not to raise on adversarial input.
+  describe "a predicate that raises" do
+    def endpoint_with_raising_predicate
+      declare { challenge_required { |_req| raise "predicate exploded" } }
+    end
+
+    it "does not escape to the Rack layer" do
+      Axn::Webhooks.inbound(:twilio) do
+        verify :basic_auth, username: "twilio", password: "s3cret"
+        challenge_required { |_req| raise "predicate exploded" }
+      end
+      env = Rack::MockRequest.env_for("https://example.com/calls/notify", method: "POST", input: "CallSid=CA123")
+
+      expect { Axn::Webhooks::Inbound[:twilio].call(env) }.not_to raise_error
+    end
+
+    # Falls through to Verify — the behaviour from before the precondition existed. Safe by
+    # construction: Verify still decides, so a broken predicate can never dispatch an
+    # unauthenticated request, and it can't drop an authenticated one either.
+    it "falls through to verification rather than 401ing an authenticated request" do
+      stub_const("SpyHandler", Class.new do
+        include Axn
+
+        expects :event, allow_blank: true
+        def call = self.class.calls << event
+        def self.calls = @calls ||= []
+      end)
+      Axn::Webhooks.inbound(:twilio) do
+        verify :basic_auth, username: "twilio", password: "s3cret"
+        challenge_required { |_req| raise "predicate exploded" }
+        dispatch to: "SpyHandler", parse: :params.to_proc
+      end
+
+      response = Axn::Webhooks::Inbound[:twilio].to_response(request(headers: basic("twilio", "s3cret")))
+
+      expect(response.status).to eq(200)
+      expect(SpyHandler.calls.size).to eq(1)
+    end
+
+    it "still rejects an unauthenticated request" do
+      expect(endpoint_with_raising_predicate.to_response(request).status).to eq(401)
+    end
+
+    it "reports the exception exactly once, so a permanently-broken predicate isn't silent" do
+      reports = []
+      original = Axn.config.instance_variable_get(:@on_exception)
+      Axn.config.instance_variable_set(:@on_exception, ->(e, **) { reports << e })
+
+      begin
+        endpoint_with_raising_predicate.to_response(request)
+      ensure
+        Axn.config.instance_variable_set(:@on_exception, original)
+      end
+
+      expect(reports.size).to eq(1)
+      expect(reports.first.message).to eq("predicate exploded")
+    end
+  end
+
   # #verify and #handle are the verification *stage*: asking them about a bare request asks "does
   # this verify?", and the honest answer stays no. Settling them ok? would be an authentication
   # bypass; the public predicate is how a caller driving the endpoint by hand answers the challenge.
