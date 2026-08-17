@@ -157,15 +157,20 @@ module Axn
         # A challenge with nothing in it is the PRO-3146 silent drop: the client is told to retry and
         # never told how, so every request is dropped forever — and now without even a verify failure
         # recorded, since answering the challenge skips Verify. Fails the boot rather than shipping an
-        # endpoint that is both broken and invisible. Reads the *effective* headers, so declaring
-        # `challenge_required` alongside a verifier that carries its own challenge (`verify
-        # :basic_auth`) is fine — only a hand-rolled endpoint with neither lands here.
+        # endpoint that is both broken and invisible.
+        #
+        # Both halves read the *effective* value, not the declaration: a predicate can arrive from a
+        # registered verifier (`Verifiers.register` is public) as easily as from a `challenge_required`
+        # block, and either can be paired with a challenge from the other side. So `verify :basic_auth`
+        # plus a declared predicate is fine, a declared pair is fine, and only an endpoint that claims
+        # a challenge is required without saying what to challenge with lands here.
         def validate_challenge!
-          return unless @challenge_required && unauthorized_headers.empty?
+          return unless challenge_predicate && unauthorized_headers.empty?
 
           raise Axn::Webhooks::Error,
-                "inbound endpoint `#{@name}` declares `challenge_required` but has no challenge to send — " \
-                "declare `unauthorized_headers` too, or the challenged client is never told how to retry"
+                "inbound endpoint `#{@name}` requires a challenge (`challenge_required`, or a verifier that " \
+                "answers `#challenge_required?`) but has no challenge to send — declare `unauthorized_headers`, " \
+                "or the challenged client is never told how to retry"
         end
 
         def response_for(dispatched)

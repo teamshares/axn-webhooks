@@ -155,13 +155,32 @@ RSpec.describe "the challenge-required precondition" do
     # Challenging a client with nothing is the PRO-3146 silent-drop failure exactly: the client is
     # told to retry and never told how, so every request is dropped forever. Now with no verify
     # failure recorded either, it would be invisible as well as broken — so it fails the boot.
-    it "is rejected at declaration time when there is no challenge to send" do
+    it "is rejected at declaration time when the declaration has no challenge to send" do
       expect do
         Axn::Webhooks.inbound(:vendor) do
           verify { |_req| false }
           challenge_required { |_req| true }
         end
       end.to raise_error(Axn::Webhooks::Error, /challenge_required.*unauthorized_headers/m)
+    end
+
+    # The same hole, reached the other way: `Verifiers.register` is public, so a consumer's verifier
+    # can claim a challenge is required and never say what to challenge with. The guard has to read
+    # the *effective* predicate, not just the declared block, or a registered strategy walks straight
+    # past it into the headerless-401 silent drop — with verification skipped, so nothing records it.
+    it "is rejected at declaration time when a verifier claims a challenge it can't send" do
+      stub_const("HalfChallenger", Class.new do
+        def call(_request) = false
+        def challenge_required?(_request) = true
+      end)
+      Axn::Webhooks::Verifiers.register(:half_challenger) { HalfChallenger.new }
+
+      begin
+        expect { Axn::Webhooks.inbound(:vendor) { verify :half_challenger } }
+          .to raise_error(Axn::Webhooks::Error, /challenge_required.*unauthorized_headers/m)
+      ensure
+        Axn::Webhooks::Verifiers::STRATEGIES.delete(:half_challenger)
+      end
     end
 
     it "wins over the verifier's own predicate, as `unauthorized_headers` does" do

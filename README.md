@@ -172,9 +172,10 @@ Axn::Webhooks.inbound :vendor do
 end
 ```
 
-The two go together: declaring `challenge_required` on an endpoint that has no challenge to send
-raises at boot, since challenging a client with nothing drops every request forever and — now that
-answering the challenge skips `verify` — records nothing about it.
+The two go together: an endpoint that requires a challenge but has none to send raises at boot —
+whether the predicate came from a `challenge_required` declaration or from a custom verifier's own
+`#challenge_required?` — since challenging a client with nothing drops every request forever and,
+now that answering the challenge skips `verify`, records nothing about it.
 
 `Endpoint#challenge_required?(request)` is public for callers who drive `#verify`/`#handle`
 themselves rather than mounting the endpoint: those two stay honest about a bare request (it does

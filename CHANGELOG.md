@@ -84,9 +84,11 @@
     no such call at all, so the signature strategies gain no stage.
   - New **`challenge_required { |req| … }`** `inbound` declaration, mirroring `unauthorized_headers`
     (a declaration wins over the verifier's own predicate). Needed when a custom `verify` block
-    wraps a two-legged verifier the gem can't see through. Declaring it on an endpoint with no
-    challenge to send raises at boot: a client told to retry but not told how is the PRO-3146 silent
-    drop, and skipping `Verify` would now make it invisible as well as broken.
+    wraps a two-legged verifier the gem can't see through. An endpoint that requires a challenge but
+    has none to send raises at boot — whether the predicate came from this declaration or from a
+    verifier's own `#challenge_required?`, since `Verifiers.register` is public: a client told to
+    retry but not told how is the PRO-3146 silent drop, and skipping `Verify` would now make it
+    invisible as well as broken.
 
 ### Changed
 - `Verify`'s error prefix is now the mechanism-neutral **"Webhook verification failed"** (was
