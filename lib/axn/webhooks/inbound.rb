@@ -36,6 +36,7 @@ module Axn
           static_respond: dsl.__static_respond__,
           challenge: dsl.__challenge__,
           unauthorized_headers: dsl.__unauthorized_headers__,
+          challenge_required: dsl.__challenge_required__,
         ),
       )
     end

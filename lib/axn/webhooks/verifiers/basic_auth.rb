@@ -69,6 +69,19 @@ module Axn
           matched ? Signature::OK : Signature::CREDENTIALS_MISMATCH
         end
 
+        # Is this request an authentication attempt at all? False for anything carrying an
+        # `Authorization` header — including a non-Basic scheme, which is a client that meant to
+        # authenticate and got it wrong, and stays a visible `:credentials_missing` rejection.
+        #
+        # True only for the bare first leg of the RFC 7617 handshake, which Endpoint answers with
+        # the challenge instead of running Verify: there is nothing to verify, and a reactive client
+        # sends one of these per *successful* webhook, so recording them as verify failures made the
+        # highest-volume outcome on a healthy endpoint a failure (PRO-3148).
+        #
+        # A blank header counts as absent — an empty `Authorization` presents no credentials and no
+        # scheme, so treating it as an attempt would 401 it with no telemetry either way.
+        def challenge_required?(request) = request.header("Authorization").to_s.strip.empty?
+
         # The RFC 7617 challenge. Lower-cased key per Rack 3's response-header SPEC (Response
         # lower-cases keys anyway; spelled that way here so the two agree on sight).
         #

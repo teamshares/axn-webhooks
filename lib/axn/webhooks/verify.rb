@@ -18,12 +18,15 @@ module Axn
         replay_timestamp_invalid: ->(_check) { "replay timestamp missing or unparseable" },
         signature_missing: ->(_check) { "signature missing" },
         signature_mismatch: ->(_check) { "signature mismatch" },
-        # Not an anomaly: a client that doesn't authenticate preemptively is *supposed* to arrive
-        # bare and wait to be challenged, so this fires once per successful Basic-auth webhook.
-        # Worded so a dashboard full of them doesn't read as an outage — which is exactly what the
-        # same traffic looked like, mislabelled, when it took buyout's Twilio endpoints down for
-        # 27h (PRO-3146).
-        credentials_missing: ->(_check) { "no Basic credentials offered (expected: client awaits the 401 challenge)" },
+        # A genuine anomaly, and worth alerting on: the client presented an `Authorization` header,
+        # so it meant to authenticate, but not a Basic one. The bare handshake leg — which used to
+        # land here, once per *successful* webhook, making this the highest-volume value of the
+        # dimension — is answered with the challenge before Verify runs at all now (PRO-3148), so
+        # the message names what is actually left rather than the leg it no longer reports.
+        credentials_missing: lambda { |_check|
+          "no Basic credentials offered — a non-Basic Authorization scheme (the bare handshake leg " \
+            "is challenged before Verify)"
+        },
         credentials_mismatch: ->(_check) { "Basic credentials rejected" },
       }.freeze
 

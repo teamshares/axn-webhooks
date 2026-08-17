@@ -55,12 +55,40 @@
   its own 401 challenge. A declaration wins over the verifier's own `#unauthorized_headers`.
 - Two new `Signature::REASONS` for the above: **`:credentials_missing`** and
   **`:credentials_mismatch`**, so a Basic-auth rejection isn't reported as `:signature_mismatch` on
-  an endpoint where no signature exists. The split matters more than the rename: under RFC 7617 the
-  bare first leg of every *successful* Basic-auth webhook is a rejection, so `:credentials_missing`
-  is the highest-volume value of the `reason` dimension on a perfectly healthy endpoint — its
-  message says as much ("expected: client awaits the 401 challenge") so a dashboard full of them
-  doesn't read as an outage. A genuine credential problem surfaces as `:credentials_mismatch`
-  rather than being buried in that traffic.
+  an endpoint where no signature exists. `:credentials_missing` means the client presented an
+  `Authorization` header that wasn't a Basic credential — it meant to authenticate and got it wrong,
+  which is a real and low-volume signal; the bare handshake leg is challenged before `Verify` runs
+  (see below) and so never lands here. `:credentials_mismatch` is credentials offered and rejected.
+- **The Basic-auth challenge leg no longer records a verify failure** (PRO-3148). Under RFC 7617 a
+  client that doesn't authenticate preemptively sends one bare request per *successful* webhook, so
+  settling that leg as a `Verify` failure made the highest-volume outcome on a perfectly healthy
+  endpoint a recorded failure — which broke the thing `reason` exists for. A cross-vendor "verify
+  failures" monitor saw a permanent stream from every Basic-auth endpoint and none from signature
+  endpoints, and could only be quietened by teaching it which vendors happen to use Basic auth:
+  exactly the vendor-specific knowledge that rots. `Endpoint#to_response` now asks whether the
+  request is an authentication attempt at all and, when it isn't, answers with the 401 challenge
+  *before* `Verify` runs. Same 401 on the wire, still no path to a handler — and strictly safer than
+  the `done!` this invites, which settles the result as a *success* and would dispatch a request
+  that presented no credentials.
+  - New public **`Endpoint#challenge_required?(request)`**, sourced from the verifier's own
+    `#challenge_required?` when it has one. `verify :basic_auth` has one (true when `Authorization`
+    is absent or blank); the signature strategies don't, so they are byte-identical in behaviour and
+    telemetry. `#verify` and `#handle` are deliberately unchanged — they are the verification stage,
+    and a bare request honestly doesn't verify — so a caller driving them by hand asks this first.
+  - The predicate runs inside its own Axn (`Inbound::ChallengeRequired`), like the verifier, the
+    `parse:` step and the GET challenge resolver: it's request-dependent code reading adversarial
+    input, and it runs ahead of every other boundary on the POST path, so a raise would otherwise
+    escape as an unhandled Rack exception. A crash reads as "can't tell" and verifies normally — the
+    pre-precondition behaviour, which can neither dispatch an unauthenticated request nor drop an
+    authenticated one — and is reported once via `on_exception`. An endpoint with no predicate makes
+    no such call at all, so the signature strategies gain no stage.
+  - New **`challenge_required { |req| … }`** `inbound` declaration, mirroring `unauthorized_headers`
+    (a declaration wins over the verifier's own predicate). Needed when a custom `verify` block
+    wraps a two-legged verifier the gem can't see through. An endpoint that requires a challenge but
+    has none to send raises at boot — whether the predicate came from this declaration or from a
+    verifier's own `#challenge_required?`, since `Verifiers.register` is public: a client told to
+    retry but not told how is the PRO-3146 silent drop, and skipping `Verify` would now make it
+    invisible as well as broken.
 
 ### Changed
 - `Verify`'s error prefix is now the mechanism-neutral **"Webhook verification failed"** (was

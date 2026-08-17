@@ -8,7 +8,7 @@ module Axn
       # HTTP Response. Challenge (GET) and Rack mount arrive in a later phase.
       class Endpoint
         def initialize(name:, verifier:, dispatch: nil, respond: nil, static_respond: nil, challenge: nil,
-                       unauthorized_headers: nil)
+                       unauthorized_headers: nil, challenge_required: nil)
           if dispatch && dispatch[:mode] == :async && respond
             raise Axn::Webhooks::Error,
                   "inbound endpoint `#{name}` declares a custom `respond` but explicit `dispatch mode: :async` " \
@@ -28,6 +28,9 @@ module Axn
           @static_respond = static_respond
           @challenge = challenge
           @unauthorized_headers = unauthorized_headers
+          @challenge_required = challenge_required
+
+          validate_challenge!
         end
 
         attr_reader :name
@@ -46,6 +49,31 @@ module Axn
           return @verifier.unauthorized_headers if @verifier.respond_to?(:unauthorized_headers)
 
           {}
+        end
+
+        # Is this request an authentication attempt at all? When it isn't, there is nothing to
+        # verify — it's a protocol precondition, not a failed verification — and #to_response
+        # answers with the challenge without invoking Verify (PRO-3148). Under a two-legged scheme
+        # like RFC 7617 Basic auth a reactive client sends one such request per *successful*
+        # webhook, so recording them as verify failures made the highest-volume outcome on a healthy
+        # endpoint a recorded failure, and a cross-vendor verify-failure monitor unusable without
+        # knowing which vendors happen to use Basic auth.
+        #
+        # False unless something says otherwise, so the signature strategies — which have no
+        # challenge to offer and no second leg to wait for — are untouched: no predicate means no
+        # ChallengeRequired call either, not merely a false answer from one.
+        #
+        # Note this is NOT the `challenge` declaration (that's the vendor's GET handshake, see
+        # #challenge_response). Same word, different protocol: this one is the 401 kind.
+        def challenge_required?(request)
+          predicate = challenge_predicate
+          return false unless predicate
+
+          # Inside an Axn boundary: the predicate is request-dependent code the gem doesn't own, and
+          # it runs ahead of every other boundary on the POST path. A crash settles not-ok and is read
+          # as "can't tell" -> verify normally (see ChallengeRequired for why that's the safe answer).
+          checked = ChallengeRequired.call(request:, predicate:, vendor: @name)
+          checked.ok? && checked.required
         end
 
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
@@ -69,6 +97,12 @@ module Axn
         # rule, because a verify failure (401) and a handler business fail! (2xx) are both
         # `outcome.failure?` but mean opposite things at the HTTP layer.
         def to_response(request)
+          # Ahead of verify, deliberately: a request that isn't an authentication attempt gets the
+          # challenge rather than a recorded verify failure (see #challenge_required?). Same 401 on
+          # the wire, and it still can't reach a handler — strictly safer than the `done!` that
+          # would settle this leg as a *success*.
+          return Response.new(status: 401, headers: unauthorized_headers) if challenge_required?(request)
+
           verified = verify(request)
           return Response.new(status: 401, headers: unauthorized_headers) unless verified.ok?
           return default_ack unless @dispatch
@@ -108,6 +142,36 @@ module Axn
         end
 
         private
+
+        # The declared block, else the verifier's own bound predicate, else nil for "nobody claims a
+        # challenge" — the signature strategies and every plain `verify` lambda. Same precedence as
+        # #unauthorized_headers: a declaration wins, so a custom block can speak for a verifier the
+        # gem can't see through.
+        def challenge_predicate
+          return @challenge_required if @challenge_required
+          return @verifier.method(:challenge_required?) if @verifier.respond_to?(:challenge_required?)
+
+          nil
+        end
+
+        # A challenge with nothing in it is the PRO-3146 silent drop: the client is told to retry and
+        # never told how, so every request is dropped forever — and now without even a verify failure
+        # recorded, since answering the challenge skips Verify. Fails the boot rather than shipping an
+        # endpoint that is both broken and invisible.
+        #
+        # Both halves read the *effective* value, not the declaration: a predicate can arrive from a
+        # registered verifier (`Verifiers.register` is public) as easily as from a `challenge_required`
+        # block, and either can be paired with a challenge from the other side. So `verify :basic_auth`
+        # plus a declared predicate is fine, a declared pair is fine, and only an endpoint that claims
+        # a challenge is required without saying what to challenge with lands here.
+        def validate_challenge!
+          return unless challenge_predicate && unauthorized_headers.empty?
+
+          raise Axn::Webhooks::Error,
+                "inbound endpoint `#{@name}` requires a challenge (`challenge_required`, or a verifier that " \
+                "answers `#challenge_required?`) but has no challenge to send — declare `unauthorized_headers`, " \
+                "or the challenged client is never told how to retry"
+        end
 
         def response_for(dispatched)
           return Response.service_unavailable(retry_after: dispatched.retry_after) if dispatched.retry_later

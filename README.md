@@ -155,6 +155,32 @@ Axn::Webhooks.inbound :vendor do
 end
 ```
 
+That bare first leg is **not** a verification failure — there is nothing to verify. It's answered
+with the challenge before `verify` runs at all, so it records nothing: without that, the
+highest-volume outcome on a healthy Basic-auth endpoint would be a recorded failure, and a
+cross-vendor monitor on verify failures couldn't tell a stream of them from an outage. The request
+still gets the same `401` and still can never reach a handler.
+
+`verify :basic_auth` knows which requests those are. A custom block doesn't, so say so — the same
+way you declare its challenge, and with the same precedence (a declaration wins):
+
+```ruby
+Axn::Webhooks.inbound :vendor do
+  verify { |req| my_own_check(req) }
+  unauthorized_headers "WWW-Authenticate" => %(Basic realm="Webhook")
+  challenge_required { |req| req.header("Authorization").to_s.strip.empty? }
+end
+```
+
+The two go together: an endpoint that requires a challenge but has none to send raises at boot —
+whether the predicate came from a `challenge_required` declaration or from a custom verifier's own
+`#challenge_required?` — since challenging a client with nothing drops every request forever and,
+now that answering the challenge skips `verify`, records nothing about it.
+
+`Endpoint#challenge_required?(request)` is public for callers who drive `#verify`/`#handle`
+themselves rather than mounting the endpoint: those two stay honest about a bare request (it does
+not verify), so answer the challenge before asking them.
+
 Prefer signature verification where the vendor offers it: it's one request rather than two, it
 authenticates the *payload* and not merely the caller, and it needs no challenge — Twilio
 [recommends it over Basic auth](https://www.twilio.com/docs/usage/webhooks/webhooks-security) for
@@ -185,7 +211,7 @@ result.error   # => "Webhook verification failed: replay window exceeded (timest
 | `:replay_timestamp_invalid` | The timestamp is absent or unparseable | A typo'd `replay: { timestamp: header(…) }` name, or a vendor that stopped sending it |
 | `:signature_missing` | No signature header at all | A typo'd `signature:` header name, or an unsigned sender |
 | `:signature_mismatch` | The HMAC genuinely didn't match | Wrong/rotated secret, or the wrong `signing_string` |
-| `:credentials_missing` | `verify :basic_auth` only. No `Authorization` header, or a non-Basic scheme. | **Usually nothing** — this is the expected first leg of the RFC 7617 handshake, so on a healthy Basic-auth endpoint it fires about once per successful webhook |
+| `:credentials_missing` | `verify :basic_auth` only. An `Authorization` header that isn't a Basic credential. The bare first leg of the handshake is [challenged before verification](#a-note-on-verify-basic_auth) and never reaches here. | A client that meant to authenticate and used the wrong scheme, or a scanner |
 | `:credentials_mismatch` | `verify :basic_auth` only. Credentials were offered and rejected. | Wrong/rotated `username:`/`password:`, or a scanner guessing |
 
 A `:replay_window` rejection additionally carries **`suggested_unit`** — the scale that *would* have

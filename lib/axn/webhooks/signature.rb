@@ -48,10 +48,8 @@ module Axn
 
       # The last two belong to `verify :basic_auth`, which rejects for reasons that have nothing to
       # do with a signature. Keeping them out would stamp every Basic-auth rejection
-      # `:signature_mismatch` — and under Basic auth the *first leg of every successful webhook* is
-      # a rejection (the client is waiting to be challenged), so that one wrong label would be the
-      # single highest-volume value of this dimension, on endpoints where no signature exists.
-      # Exactly the misdirection PRO-3141 added `reason` to end.
+      # `:signature_mismatch` — the exact misdirection PRO-3141 added `reason` to end, on endpoints
+      # where no signature exists.
       REASONS = %i[
         replay_window replay_timestamp_invalid signature_missing signature_mismatch
         credentials_missing credentials_mismatch
@@ -63,8 +61,10 @@ module Axn
       # signature without saying more, which is exactly :signature_mismatch.
       MISMATCH = Check.new(ok: false, reason: :signature_mismatch, skew: nil, suggested_unit: nil).freeze
 
-      # `verify :basic_auth`'s two verdicts. CREDENTIALS_MISSING is the expected first leg of the
-      # RFC 7617 handshake, not an anomaly — see Verify::MESSAGES for why its message says so.
+      # `verify :basic_auth`'s two verdicts. CREDENTIALS_MISSING covers both "no Authorization at
+      # all" and "an Authorization that isn't Basic", but only the second reaches Verify over HTTP:
+      # the first is the bare handshake leg, which Endpoint answers with the challenge before
+      # verifying (PRO-3148, and see BasicAuth#challenge_required?).
       CREDENTIALS_MISSING = Check.new(ok: false, reason: :credentials_missing, skew: nil, suggested_unit: nil).freeze
       CREDENTIALS_MISMATCH = Check.new(ok: false, reason: :credentials_mismatch, skew: nil, suggested_unit: nil).freeze
 
