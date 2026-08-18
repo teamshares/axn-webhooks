@@ -230,7 +230,11 @@ is precisely the case a status-callback URL (`…/update?callId=N`) exercises. M
 `?`-or-end across the whole URL isn't either — the leftmost match lands in the *query* for something
 like `?redirect=a/`. A mount at a prefix (`at: "/webhooks"`, vendor posts `/webhooks/twilio`) leaves a
 non-`"/"` `PATH_INFO` and so has no slash to strip, and the form above is a no-op there — so it is
-safe to apply unconditionally rather than per-route.
+safe to apply unconditionally rather than per-route, **as long as the URL registered with the vendor
+doesn't itself end in `/`**. It's indistinguishable from the mount artifact at this layer: both
+produce a `req.url` ending in `/`, but one should be chomped and the other must not be. Register the
+webhook URL without a trailing slash (the natural spelling of an `at:` mount path) and this doesn't
+come up.
 
 **`url` reflects the scheme and host the proxy reported.** It comes from `Rack::Request#url`, so a CDN
 or load balancer added in front, a change in `X-Forwarded-Proto` handling, or a new domain changes
@@ -351,10 +355,15 @@ Axn::Webhooks.inbound :codat do
            otherwise: :ack        # unknown-but-expected events: log + 2xx (omit to raise loudly)
 end
 
-# One endpoint, one handler; form-encoded body:
+# One endpoint, one handler; form-encoded body. See "URL-signing verifiers" below for why the
+# URL is normalized before validation.
 Axn::Webhooks.inbound :twilio do
-  verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
-                   .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
+  verify do |req|
+    path, query = req.url.split("?", 2)
+
+    Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
+      .validate([path.chomp("/"), query].compact.join("?"), req.params, req.header("X-Twilio-Signature"))
+  end
   dispatch to: "Actions::Twilio::HandleSms", parse: ->(req) { req.params }
 end
 
@@ -376,8 +385,12 @@ with `ack`/`text`/`xml`/`json` available as bare calls:
 ```ruby
 # Twilio call-control: the handler computes TwiML; respond renders it.
 Axn::Webhooks.inbound :twilio do
-  verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
-                   .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
+  verify do |req|
+    path, query = req.url.split("?", 2)
+
+    Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
+      .validate([path.chomp("/"), query].compact.join("?"), req.params, req.header("X-Twilio-Signature"))
+  end
   dispatch to: "Actions::Twilio::HandleCall", parse: ->(req) { req.params }
   respond { |result| xml(result.twiml) }   # handler exposes :twiml
 end
