@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Documentation
+- README: document URL-signing verifiers, and correct the Twilio example. Vendors that sign the
+  request URL (Twilio) must strip the trailing slash a mount adds — Rack leaves `PATH_INFO` as `"/"`
+  when the mount point is the whole route, so `Request#url` carries a slash the vendor's registered
+  URL does not, and the previous example passed `req.url` straight to `RequestValidator#validate`.
+  Anyone following it rejected every request, with `:signature_mismatch` as the only symptom — which
+  reads identically to a rotated secret. Also notes that `url` reflects proxy-reported scheme/host, so
+  a CDN or `X-Forwarded-Proto` change silently breaks verification the same way.
+- README: warn that a `verify` block must not return an `Axn::Result`. The contract is read as
+  `check.is_a?(Signature::Check) ? check.ok? : !!check`, and an `Axn::Result` is neither — and is
+  truthy when `ok?` is false, so a verifier that returns one reports every rejected request as
+  verified and dispatches it. In an axn-consuming app "put the check in an action" is the obvious
+  instinct, and this is the one place it fails open.
+- README: note that Rails disallows autoloading during initialization, so a custom `verify` block must
+  name its constant inside the block rather than at declaration time. (`dispatch to:` was already
+  safe — a string handler is resolved via `const_get` per request.)
+
 ### Added
 - Verification failures now name their cause. `Signature.hmac` checked the replay window first and
   returned a bare `false`; a signature mismatch returned the same bare `false`; `Verify` mapped both

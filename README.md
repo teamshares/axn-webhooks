@@ -120,10 +120,15 @@ Axn::Webhooks.inbound :merge_dev do
     encoding:  :base64_urlsafe
 end
 
-# Twilio — custom verifier delegating to the vendor SDK
+# Twilio — custom verifier delegating to the vendor SDK. Twilio signs the URL, so the trailing
+# slash a mount adds has to come off first — see "URL-signing verifiers" below.
 Axn::Webhooks.inbound :twilio do
-  verify { |req| Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
-                   .validate(req.url, req.params, req.header("X-Twilio-Signature")) }
+  verify do |req|
+    path, query = req.url.split("?", 2)
+
+    Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
+      .validate([path.chomp("/"), query].compact.join("?"), req.params, req.header("X-Twilio-Signature"))
+  end
 end
 
 # A vendor gated by HTTP Basic auth rather than a signature
@@ -193,6 +198,48 @@ result = Axn::Webhooks::Inbound[:codat].verify(request)  # => Axn::Result
 result.ok?  # signature valid?
 ```
 
+#### URL-signing verifiers
+
+Some vendors — Twilio most notably — sign the **request URL** rather than the body, and compare
+against the URL as registered in their dashboard. `Request#url` is rebuilt from the Rack env, and two
+properties of that rebuild will bite.
+
+**A mount whose path is the whole route adds a trailing slash.** Rack puts the mount point in
+`SCRIPT_NAME` and leaves `PATH_INFO` as `"/"` for a request matching it exactly:
+
+```ruby
+mount Axn::Webhooks::Inbound[:twilio], at: "/webhooks/twilio"
+
+# vendor POSTs to https://example.com/webhooks/twilio
+req.url   # => "https://example.com/webhooks/twilio/"             <- note the slash
+# ...and with a query string:
+req.url   # => "https://example.com/webhooks/twilio/?callId=42"
+```
+
+The vendor signed the URL *without* that slash, so passing `req.url` straight to a URL-signing
+validator rejects every request — a valid signature over a URL that doesn't match, which reads in the
+logs exactly like a rotated secret. Split on the query, then chomp the path:
+
+```ruby
+path, query = req.url.split("?", 2)
+signed_url = [path.chomp("/"), query].compact.join("?")
+```
+
+Chomping the whole URL is **not** equivalent: it strips nothing when a query string is present, which
+is precisely the case a status-callback URL (`…/update?callId=N`) exercises. Matching `/` before
+`?`-or-end across the whole URL isn't either — the leftmost match lands in the *query* for something
+like `?redirect=a/`. A mount at a prefix (`at: "/webhooks"`, vendor posts `/webhooks/twilio`) leaves a
+non-`"/"` `PATH_INFO` and so has no slash to strip, and the form above is a no-op there — so it is
+safe to apply unconditionally rather than per-route.
+
+**`url` reflects the scheme and host the proxy reported.** It comes from `Rack::Request#url`, so a CDN
+or load balancer added in front, a change in `X-Forwarded-Proto` handling, or a new domain changes
+what actually gets verified. The only symptom is `:signature_mismatch` on every request — again
+indistinguishable from a rotated secret, so it is worth naming in whatever alerts on `reason`.
+
+Nothing about this applies to body-signing verifiers (`:hmac`, `:standard_webhooks`), which never
+read `url`.
+
 ### Why verification failed
 
 A rejected request is always a bare 401 on the wire, but the *cause* is on the result and on the
@@ -232,6 +279,24 @@ The built-in `:hmac` and `:standard_webhooks` strategies report all four reasons
 keeps the documented `->(request) { Boolean }` contract — a falsey return is reported as
 `:signature_mismatch`. To name its own cause, a custom block may return a
 `Axn::Webhooks::Signature::Check` (e.g. by delegating to `Signature.hmac_check`) instead of a boolean.
+
+**Don't return an `Axn::Result` from a `verify` block.** In an axn-consuming app the instinct is to
+put the check in an action, but the contract above is read as
+`check.is_a?(Signature::Check) ? check.ok? : !!check` — and an `Axn::Result` is neither a `Check` nor
+a boolean, and is **truthy even when `ok?` is false**. A verifier that returns one therefore reports
+every rejected request as verified and dispatches it, with no verify failure recorded anywhere. If the
+logic belongs in an action, call it from the block and translate:
+
+```ruby
+verify do |req|
+  MyCheck.call(request: req).ok? ? Axn::Webhooks::Signature::OK : Axn::Webhooks::Signature::MISMATCH
+end
+```
+
+Usually it doesn't need to be an action at all: `Verify` is already the Axn boundary for this stage —
+it owns the `expects`/`exposes` contract, the `sensitive:` redaction of the verifier, the `reason`
+dimension, and the exception report — which is why both built-in strategies are a plain class and a
+lambda rather than actions.
 
 ### The request object
 
@@ -426,6 +491,24 @@ block acks it (nil result → bare 2xx), while a sync route's result is rendered
 `async` whose handler has no adapter is reported as an exception (the same guard as `mode: :async`).
 
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
+
+**Note on Rails autoloading**: `inbound` blocks are evaluated where they're declared — at boot, if
+that's an initializer — and Rails disallows autoloading during initialization. So naming a class from
+`app/` while the initializer runs raises `NameError` and fails the boot. Handler classes are already
+safe: `dispatch to:` accepts a **string**, which is resolved via `const_get` per request. A custom
+`verify` block needs the same treatment — keep the constant inside the block, which runs per request
+rather than at boot:
+
+```ruby
+# NameError at boot — the constant is named while the initializer runs
+checker = MyApp::SignatureChecker.new(secret: ENV.fetch("SECRET"))
+Axn::Webhooks.inbound(:vendor) { verify { |req| checker.call(req) } }
+
+# Fine — the constant is named when a request arrives
+Axn::Webhooks.inbound(:vendor) do
+  verify { |req| MyApp::SignatureChecker.verify(req, secret: ENV.fetch("SECRET")) }
+end
+```
 
 ### Mounting
 
