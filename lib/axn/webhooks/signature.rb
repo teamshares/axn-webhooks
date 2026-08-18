@@ -61,6 +61,13 @@ module Axn
       # signature without saying more, which is exactly :signature_mismatch.
       MISMATCH = Check.new(ok: false, reason: :signature_mismatch, skew: nil, suggested_unit: nil).freeze
 
+      # "The request carried no signature at all", for a custom `verify` block to return in place of
+      # MISMATCH. Exported because that distinction is only available to a verifier that reads the
+      # header itself: a bare falsey return collapses to :signature_mismatch, which on a guessable
+      # public path buries the alertable case (a rotated secret, or a URL we rebuild wrong) under
+      # ordinary unsigned scanner traffic. `:hmac` reports it via hmac_check below.
+      SIGNATURE_MISSING = Check.new(ok: false, reason: :signature_missing, skew: nil, suggested_unit: nil).freeze
+
       # `verify :basic_auth`'s two verdicts. CREDENTIALS_MISSING covers both "no Authorization at
       # all" and "an Authorization that isn't Basic", but only the second reaches Verify over HTTP:
       # the first is the bare handshake leg, which Endpoint answers with the challenge before
@@ -102,7 +109,7 @@ module Axn
           end
         end
 
-        return rejected(:signature_missing) if signature.nil? || signature.to_s.empty?
+        return SIGNATURE_MISSING if signature.nil? || signature.to_s.empty?
 
         expected = compute(secret:, payload:, digest:, encoding:)
         return OK if candidates(signature, prefix:).any? { |candidate| secure_compare(candidate, expected) }

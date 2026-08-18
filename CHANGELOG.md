@@ -2,7 +2,31 @@
 
 ## [Unreleased]
 
+### Documentation
+- README: document URL-signing verifiers, and correct the Twilio example. Vendors that sign the
+  request URL (Twilio) must strip the trailing slash a mount adds — Rack leaves `PATH_INFO` as `"/"`
+  when the mount point is the whole route, so `Request#url` carries a slash the vendor's registered
+  URL does not, and the previous example passed `req.url` straight to `RequestValidator#validate`.
+  Anyone following it rejected every request, with `:signature_mismatch` as the only symptom — which
+  reads identically to a rotated secret. Also notes that `url` reflects proxy-reported scheme/host, so
+  a CDN or `X-Forwarded-Proto` change silently breaks verification the same way.
+- README: warn that a `verify` block must not return an `Axn::Result`. The contract is read as
+  `check.is_a?(Signature::Check) ? check.ok? : !!check`, and an `Axn::Result` is neither — and is
+  truthy when `ok?` is false, so a verifier that returns one reports every rejected request as
+  verified and dispatches it. In an axn-consuming app "put the check in an action" is the obvious
+  instinct, and this is the one place it fails open.
+- README: note that Rails disallows autoloading during initialization, so a custom `verify` block must
+  name its constant inside the block rather than at declaration time. (`dispatch to:` was already
+  safe — a string handler is resolved via `const_get` per request.)
+
 ### Added
+- `Signature::SIGNATURE_MISSING`, the fifth exported verdict, alongside `OK`, `MISMATCH`, and the two
+  `CREDENTIALS_*`. A custom `verify` block can only distinguish "no signature header at all" from "the
+  signature didn't match" if it reads the header itself, and a bare falsey return collapses both into
+  `:signature_mismatch` — which on a guessable public path buries the alertable case under ordinary
+  unsigned scanner traffic. The README recommends returning a `Check` for exactly this, so the verdict
+  it wants is now exported rather than hand-constructed. `Signature.hmac_check` returns the same
+  constant internally.
 - Verification failures now name their cause. `Signature.hmac` checked the replay window first and
   returned a bare `false`; a signature mismatch returned the same bare `false`; `Verify` mapped both
   to `fail!("signature mismatch")`. The two were therefore indistinguishable in the logs — and in the
