@@ -20,6 +20,13 @@
   safe — a string handler is resolved via `const_get` per request.)
 
 ### Added
+- `Signature::SIGNATURE_MISSING`, the fifth exported verdict, alongside `OK`, `MISMATCH`, and the two
+  `CREDENTIALS_*`. A custom `verify` block can only distinguish "no signature header at all" from "the
+  signature didn't match" if it reads the header itself, and a bare falsey return collapses both into
+  `:signature_mismatch` — which on a guessable public path buries the alertable case under ordinary
+  unsigned scanner traffic. The README recommends returning a `Check` for exactly this, so the verdict
+  it wants is now exported rather than hand-constructed. `Signature.hmac_check` returns the same
+  constant internally.
 - Verification failures now name their cause. `Signature.hmac` checked the replay window first and
   returned a bare `false`; a signature mismatch returned the same bare `false`; `Verify` mapped both
   to `fail!("signature mismatch")`. The two were therefore indistinguishable in the logs — and in the

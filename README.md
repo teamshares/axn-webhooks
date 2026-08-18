@@ -280,6 +280,12 @@ keeps the documented `->(request) { Boolean }` contract — a falsey return is r
 `:signature_mismatch`. To name its own cause, a custom block may return a
 `Axn::Webhooks::Signature::Check` (e.g. by delegating to `Signature.hmac_check`) instead of a boolean.
 
+`Signature` exports the ready-made verdicts, so a custom block rarely has to construct a `Check`:
+`OK`, `MISMATCH`, `SIGNATURE_MISSING`, `CREDENTIALS_MISSING`, `CREDENTIALS_MISMATCH`. Returning
+`SIGNATURE_MISSING` rather than `MISMATCH` when the header is absent earns its one extra line on a
+guessable public path — it keeps ordinary unsigned scanner traffic out of `:signature_mismatch`,
+which is the reason actually worth alerting on.
+
 **Don't return an `Axn::Result` from a `verify` block.** In an axn-consuming app the instinct is to
 put the check in an action, but the contract above is read as
 `check.is_a?(Signature::Check) ? check.ok? : !!check` — and an `Axn::Result` is neither a `Check` nor

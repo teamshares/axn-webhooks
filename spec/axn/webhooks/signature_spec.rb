@@ -9,6 +9,39 @@ RSpec.describe Axn::Webhooks::Signature do
   let(:payload) { "what do ya want for nothing?" }
   let(:hex)     { "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" }
 
+  # The verdicts a custom `verify` block returns rather than computing. Each has to be a Check (so
+  # Verify reads its `reason` instead of falling back to :signature_mismatch), frozen (so a caller
+  # can't mutate a shared verdict), and carry the reason its name claims.
+  describe "the exported verdicts" do
+    {
+      OK: [true, nil],
+      MISMATCH: [false, :signature_mismatch],
+      SIGNATURE_MISSING: [false, :signature_missing],
+      CREDENTIALS_MISSING: [false, :credentials_missing],
+      CREDENTIALS_MISMATCH: [false, :credentials_mismatch],
+    }.each do |name, (ok, reason)|
+      it "#{name} is a frozen Check reporting ok?=#{ok} / #{reason.inspect}" do
+        verdict = described_class.const_get(name)
+
+        expect(verdict).to be_a(described_class::Check)
+        expect(verdict).to be_frozen
+        expect(verdict.ok?).to be(ok)
+        expect(verdict.reason).to eq(reason)
+        expect(verdict.skew).to be_nil
+        expect(verdict.suggested_unit).to be_nil
+      end
+    end
+
+    it "names a reason that Verify knows how to report" do
+      %i[MISMATCH SIGNATURE_MISSING CREDENTIALS_MISSING CREDENTIALS_MISMATCH].each do |name|
+        reason = described_class.const_get(name).reason
+
+        expect(described_class::REASONS).to include(reason)
+        expect(Axn::Webhooks::Verify::MESSAGES).to have_key(reason)
+      end
+    end
+  end
+
   describe ".compute" do
     it "produces the RFC 4231 hex vector for sha256" do
       expect(described_class.compute(secret:, payload:, digest: :sha256, encoding: :hex)).to eq(hex)
