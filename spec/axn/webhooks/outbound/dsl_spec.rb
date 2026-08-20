@@ -166,6 +166,26 @@ RSpec.describe "Axn::Webhooks.outbound" do
       end.to raise_error(ArgumentError, /max_attempts got invalid value.*must be a positive Integer/)
     end
 
+    it "rejects a non-Numeric timeout (e.g. a String from ENV.fetch)" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          timeouts open: "5"
+          event :x, to: ["https://x"]
+        end
+      end.to raise_error(ArgumentError, /open_timeout got invalid value.*must be a positive Numeric/)
+    end
+
+    it "rejects a non-positive read timeout" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          timeouts read: 0
+          event :x, to: ["https://x"]
+        end
+      end.to raise_error(ArgumentError, /read_timeout got invalid value.*must be a positive Numeric/)
+    end
+
     it "rejects a zero-arity backoff" do
       expect do
         Axn::Webhooks.outbound do

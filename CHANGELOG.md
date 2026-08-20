@@ -84,18 +84,20 @@
   the existing 5xx/429.
 - Boot-time validation on the `outbound` block: `max_attempts` must be a positive Integer; `backoff`
   must accept the attempt number; `to:` must be an Array or a callable; a statically-declared `to:`
-  URL must be a valid http/https URL with a host. Each previously either behaved unexpectedly at
-  delivery time (an arity-0 `backoff` blows up mid-delivery; a non-Array/non-callable `to:` is
-  silently mangled by `Array(...)`) or crashed as an unhandled exception the async adapter would
-  retry forever (a malformed or hostless static URL raises inside `Transport.post`'s
-  `URI.parse`/`#request_uri`). Every one of these — along with an unknown `sign` strategy and a
-  missing `sign` declaration — is a pure declaration mistake, decided once when the block is
-  evaluated and never at runtime, so each raises plain `ArgumentError` rather than the gem's own
-  `Axn::Webhooks::Error` (reserved for conditions a caller might legitimately rescue at runtime, e.g.
-  emitting an unregistered event). `max_attempts`/`backoff`/`transport`/`vendor`/`user_agent`/
-  `timeouts` are now declared via `Axn::Configurable::Settings` (the same DSL `Axn::Webhooks` itself
-  and sibling gems use) rather than hand-rolled ivars — `events` stays hand-written, since it's a
-  Hash cross-validated as a whole from one DSL block rather than a flat setting.
+  URL must be a valid http/https URL with a host; `timeouts open:`/`read:` must each be a positive
+  Numeric. Each previously either behaved unexpectedly at delivery time (an arity-0 `backoff` blows
+  up mid-delivery; a non-Array/non-callable `to:` is silently mangled by `Array(...)`; a non-Numeric
+  timeout, e.g. a String from `ENV.fetch`, raises `NoMethodError` from inside `Net::HTTP`) or crashed
+  as an unhandled exception the async adapter would retry forever (a malformed or hostless static
+  URL raises inside `Transport.post`'s `URI.parse`/`#request_uri`). Every one of these — along with
+  an unknown `sign` strategy and a missing `sign` declaration — is a pure declaration mistake,
+  decided once when the block is evaluated and never at runtime, so each raises plain `ArgumentError`
+  rather than the gem's own `Axn::Webhooks::Error` (reserved for conditions a caller might
+  legitimately rescue at runtime, e.g. emitting an unregistered event).
+  `max_attempts`/`backoff`/`transport`/`vendor`/`user_agent`/`timeouts` are now declared via
+  `Axn::Configurable::Settings` (the same DSL `Axn::Webhooks` itself and sibling gems use) rather
+  than hand-rolled ivars — `events` stays hand-written, since it's a Hash cross-validated as a whole
+  from one DSL block rather than a flat setting.
 - A second `Axn::Webhooks.outbound` block now logs a warning before silently replacing the first
   (previously a bare, silent assignment) — only one outbound declaration is ever active at a time.
 

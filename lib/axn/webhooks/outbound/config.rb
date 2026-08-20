@@ -40,8 +40,13 @@ module Axn
         setting :transport, default: -> { Transport }
         setting :vendor
         setting :user_agent
-        setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT
-        setting :read_timeout, default: DEFAULT_READ_TIMEOUT
+        # Forwarded straight to Net::HTTP (see Transport), which calls `.zero?`/compares on whatever
+        # it's given — an unvalidated non-Numeric (e.g. a String from `ENV.fetch("OPEN_TIMEOUT")`)
+        # would otherwise raise NoMethodError mid-delivery instead of failing at boot (Codex P2
+        # finding).
+        TIMEOUT_VALIDATE = ->(v) { (v.is_a?(Numeric) && v.positive?) || "must be a positive Numeric" }
+        setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT, validate: TIMEOUT_VALIDATE
+        setting :read_timeout, default: DEFAULT_READ_TIMEOUT, validate: TIMEOUT_VALIDATE
 
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
                        vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil)
