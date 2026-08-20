@@ -39,7 +39,11 @@
   `Base64.strict_decode64`. That check now also rejects a blank secret and one missing the required
   `whsec_` prefix — both previously decoded "successfully" (an empty or unprefixed value is still
   valid base64) and signed every delivery with an empty or wrong key, indistinguishable from any
-  other receiver-side misconfiguration.
+  other receiver-side misconfiguration. The error message never includes the secret's actual bytes
+  (only its class, or a shape description like "a whsec_-prefixed String that failed to decode") —
+  it can be raised on every delivery attempt (a callable secret re-resolves per call, and may
+  transiently resolve to something malformed), which is exactly when it'd otherwise flow the live
+  signing credential into whatever logger/exception reporter `Axn.config.on_exception` is wired to.
 - A permanent-4xx failure message's truncated response-body snippet no longer risks
   `Encoding::CompatibilityError` (mixing the ASCII-8BIT net/http labels every response body with, and
   the UTF-8 ellipsis) or a dangling invalid byte sequence from cutting a multibyte character at the
@@ -48,6 +52,14 @@
 - Boot-time URL validation now requires a host, not just an http(s) scheme — `"https:foo"`,
   `"https:"`, and `"https:///hook"` all parse as scheme-only `https` with no host, previously
   accepted and left to fail unexpectedly inside `Transport`'s request construction at delivery time.
+  It also now requires a String outright — a non-String `to:` entry (e.g. a `URI` object) parsed
+  fine via `#to_s` here, but the original object is what stayed in the declaration and was later
+  handed to `Deliver` as `url:` (`expects :url, type: String`), rejected at emission time despite
+  passing this check.
+- The `backoff` boot-time check now verifies the callable actually accepts one positional argument
+  (via `#parameters`) instead of trusting `#arity` — `->(attempt:) { }` (a required keyword) and
+  `->(a, b, *rest) { }` (needs two positional args) both reported an arity that passed the old
+  check, then raised `ArgumentError` on the very first `config.backoff.call(attempt)`.
 - `Axn::Webhooks.emit` no longer resolves the event's `vendor` ahead of `Emit.call!` — that lookup
   raises the same "unknown outbound event" error `Emit` itself already raises internally, but doing
   it before entering the action bypassed axn's executor (and its `on_exception` reporting) for an

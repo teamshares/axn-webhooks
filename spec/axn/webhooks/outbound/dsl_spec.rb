@@ -208,6 +208,36 @@ RSpec.describe "Axn::Webhooks.outbound" do
       end.not_to raise_error
     end
 
+    it "rejects a backoff that reports arity 1 but actually requires a keyword (fails on the real .call(attempt))" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          backoff ->(attempt:) { attempt * 10 }
+          event :x, to: ["https://x"]
+        end
+      end.to raise_error(ArgumentError, /backoff got invalid value.*must be a callable accepting the attempt number/)
+    end
+
+    it "rejects a backoff that reports negative arity but actually requires two positional args" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          backoff ->(a, b, *_rest) { a + b }
+          event :x, to: ["https://x"]
+        end
+      end.to raise_error(ArgumentError, /backoff got invalid value.*must be a callable accepting the attempt number/)
+    end
+
+    it "accepts a splat-only backoff, which genuinely works with .call(attempt)" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          backoff ->(*rest) { rest.first * 10 }
+          event :x, to: ["https://x"]
+        end
+      end.not_to raise_error
+    end
+
     it "rejects a `to:` that is neither an Array nor callable" do
       expect do
         Axn::Webhooks.outbound do
@@ -247,6 +277,18 @@ RSpec.describe "Axn::Webhooks.outbound" do
           end
         end.to raise_error(ArgumentError, /must be http\(s\)/), "expected #{url.inspect} to be rejected"
       end
+    end
+
+    it "rejects a non-String static URL (e.g. a URI object) instead of letting it through via #to_s" do
+      # #to_s alone would parse fine here, but the ORIGINAL non-String object stays in `@events` and
+      # is later handed to `Deliver` as `url:` (`expects :url, type: String`) — accepted at boot,
+      # rejected at emission/delivery time instead.
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          event :x, to: [URI("https://example.com/hook")]
+        end
+      end.to raise_error(ArgumentError, /must be a String/)
     end
 
     it "does not eagerly validate a callable `to:` (resolved per emission, not at boot)" do

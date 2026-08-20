@@ -33,15 +33,8 @@ module Axn
                           validate: lambda { |v|
                             next "must be a callable accepting the attempt number" unless v.respond_to?(:call)
 
-                            # `v.arity` for a Proc/lambda; `v.method(:call).arity` for a plain object
-                            # (e.g. `def call(attempt); …; end`) with no `#arity` of its own — NOT
-                            # the other way around: `Proc#call` itself is a variable-arity method, so
-                            # `some_proc.method(:call).arity` is always -1 regardless of the proc's
-                            # own declared arity, which would accept a zero-arity proc too (Codex P2
-                            # finding: the reverse mistake, calling `#arity` on a receiver that may
-                            # not define it, raised NoMethodError on a valid plain-object callable).
-                            arity = v.respond_to?(:arity) ? v.arity : v.method(:call).arity
-                            (arity == 1 || arity.negative?) || "must be a callable accepting the attempt number"
+                            params = v.respond_to?(:parameters) ? v.parameters : v.method(:call).parameters
+                            accepts_one_positional_argument?(params) || "must be a callable accepting the attempt number"
                           }
         # Same reasoning as `backoff`: `Transport` is a Module, and Configurable's non-dynamic default
         # path calls `.dup` on it — silently swapping in an anonymous copy that fails every `== Transport`
@@ -56,6 +49,26 @@ module Axn
         TIMEOUT_VALIDATE = ->(v) { (v.is_a?(Numeric) && v.positive?) || "must be a positive Numeric" }
         setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT, validate: TIMEOUT_VALIDATE
         setting :read_timeout, default: DEFAULT_READ_TIMEOUT, validate: TIMEOUT_VALIDATE
+
+        # Whether `callable.call(attempt)` — exactly one positional argument — actually works, per
+        # `#parameters` (uniformly correct across a lambda, a non-lambda Proc, and a plain object's
+        # `#call` Method — unlike `#arity`, which a non-strict Proc's own positional params report as
+        # `:opt` rather than `:req`, so this doesn't need to special-case proc-vs-lambda at all).
+        # `arity == 1 || arity.negative?` (the prior check) passed `->(attempt:) { }` (a required
+        # KEYWORD, arity 1, but `.call(5)` raises "missing keyword") and `->(a, b, *rest) { }` (arity
+        # -3, but `.call(5)` raises "given 1, expected 2+") — both boot-time-valid, both blowing up on
+        # the very first retry (Codex P2 finding).
+        def self.accepts_one_positional_argument?(params)
+          return false if params.any? { |(type, _)| type == :keyreq }
+
+          required = params.count { |(type, _)| type == :req }
+          return false if required > 1
+
+          optional = params.count { |(type, _)| type == :opt }
+          rest = params.any? { |(type, _)| type == :rest }
+          required + optional + (rest ? 1 : 0) >= 1
+        end
+        private_class_method :accepts_one_positional_argument?
 
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
                        vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil)
@@ -140,7 +153,14 @@ module Axn
         end
 
         def validate_url!(name, url)
-          uri = URI.parse(url.to_s)
+          # A non-String (e.g. a `URI` object) would parse fine here via `#to_s`, but the ORIGINAL
+          # object is what stays in `@events` and is later handed to `Deliver` as `url:` — which
+          # `expects :url, type: String` and rejects at emission/delivery time despite passing this
+          # boot-time check (Codex P2 finding). Require a String outright rather than normalizing,
+          # matching the no-silent-coercion stance the `to:` Array/callable check above already takes.
+          raise ArgumentError, "outbound event #{name.inspect} `to:` URL must be a String (got #{url.class})" unless url.is_a?(String)
+
+          uri = URI.parse(url)
           return if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
 
           raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{url.inspect} must be http(s)"

@@ -71,6 +71,26 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
         .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
     end
+
+    # The secret can be re-resolved (and re-raise this same error) on every single delivery attempt,
+    # so its message must never echo the actual secret bytes into logs/exception reporters — a
+    # transiently-malformed value is exactly the case where the reporter is most likely to fire
+    # (Codex P1 finding).
+    it "never includes the actual secret bytes in the error message" do
+      %w[a-live-looking-secret-value whsec_not-valid-base64!!!].each do |bad_secret|
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: bad_secret }, block: nil)
+
+        expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+          .to raise_error(Axn::Webhooks::Error) { |e| expect(e.message).not_to include(bad_secret) }
+      end
+    end
+
+    it "never includes a non-String secret's value in the error message, only its class" do
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: 12_345 }, block: nil)
+
+      expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+        .to raise_error(Axn::Webhooks::Error, /Integer/)
+    end
   end
 
   describe "custom block" do

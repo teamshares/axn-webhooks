@@ -74,7 +74,19 @@ module Axn
           # or wrong key — silently, since the receiver's 401 is indistinguishable from any other
           # misconfiguration (Codex P1 finding).
           def invalid_secret_error(secret)
-            Axn::Webhooks::Error.new("sign :standard_webhooks secret must be a whsec_<base64> value (got #{secret.inspect})")
+            Axn::Webhooks::Error.new("sign :standard_webhooks secret must be a whsec_<base64> value (got #{describe_secret(secret)})")
+          end
+
+          # Never interpolates the secret's actual bytes into the message: this error can be raised
+          # on every delivery attempt (a callable secret is re-resolved per call, and may transiently
+          # resolve to something malformed), and would otherwise flow the live signing credential
+          # straight into whatever logs/exception reporter Axn.config.on_exception is wired to
+          # (Codex P1 finding).
+          def describe_secret(secret)
+            return secret.class.name unless secret.is_a?(String)
+            return "a #{secret.length}-char String not prefixed with whsec_" unless secret.start_with?("whsec_")
+
+            "a whsec_-prefixed String that failed to decode"
           end
         end
       end
