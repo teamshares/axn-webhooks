@@ -196,6 +196,18 @@ RSpec.describe "Axn::Webhooks.outbound" do
       end.to raise_error(ArgumentError, /backoff got invalid value.*must be a callable accepting the attempt number/)
     end
 
+    it "accepts a plain callable object backoff (no #arity of its own — only Method#arity via #call)" do
+      backoff_object = Class.new { def call(attempt) = attempt * 10 }.new
+
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          backoff backoff_object
+          event :x, to: ["https://x"]
+        end
+      end.not_to raise_error
+    end
+
     it "rejects a `to:` that is neither an Array nor callable" do
       expect do
         Axn::Webhooks.outbound do

@@ -31,8 +31,17 @@ module Axn
         # wrapper resolves to the lambda itself instead.
         setting :backoff, default: -> { DEFAULT_BACKOFF },
                           validate: lambda { |v|
-                            (v.respond_to?(:call) && (v.arity == 1 || v.arity.negative?)) ||
-                              "must be a callable accepting the attempt number"
+                            next "must be a callable accepting the attempt number" unless v.respond_to?(:call)
+
+                            # `v.arity` for a Proc/lambda; `v.method(:call).arity` for a plain object
+                            # (e.g. `def call(attempt); …; end`) with no `#arity` of its own — NOT
+                            # the other way around: `Proc#call` itself is a variable-arity method, so
+                            # `some_proc.method(:call).arity` is always -1 regardless of the proc's
+                            # own declared arity, which would accept a zero-arity proc too (Codex P2
+                            # finding: the reverse mistake, calling `#arity` on a receiver that may
+                            # not define it, raised NoMethodError on a valid plain-object callable).
+                            arity = v.respond_to?(:arity) ? v.arity : v.method(:call).arity
+                            (arity == 1 || arity.negative?) || "must be a callable accepting the attempt number"
                           }
         # Same reasoning as `backoff`: `Transport` is a Module, and Configurable's non-dynamic default
         # path calls `.dup` on it — silently swapping in an anonymous copy that fails every `== Transport`

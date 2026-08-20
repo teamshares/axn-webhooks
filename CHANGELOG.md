@@ -89,11 +89,16 @@
   up mid-delivery; a non-Array/non-callable `to:` is silently mangled by `Array(...)`; a non-Numeric
   timeout, e.g. a String from `ENV.fetch`, raises `NoMethodError` from inside `Net::HTTP`) or crashed
   as an unhandled exception the async adapter would retry forever (a malformed or hostless static
-  URL raises inside `Transport.post`'s `URI.parse`/`#request_uri`). Every one of these — along with
-  an unknown `sign` strategy and a missing `sign` declaration — is a pure declaration mistake,
-  decided once when the block is evaluated and never at runtime, so each raises plain `ArgumentError`
-  rather than the gem's own `Axn::Webhooks::Error` (reserved for conditions a caller might
-  legitimately rescue at runtime, e.g. emitting an unregistered event).
+  URL raises inside `Transport.post`'s `URI.parse`/`#request_uri`). The `backoff` check inspects
+  `#arity` when the callable has one (a Proc/lambda) and `#method(:call).arity` otherwise (a plain
+  object with its own `def call(attempt)`, which has no `#arity` method) — not the other way around:
+  `Proc#call` is itself variable-arity, so `#method(:call).arity` on a Proc is always `-1` regardless
+  of what it actually declares, which would silently accept a zero-arity one.
+
+  Every one of these checks — along with an unknown `sign` strategy and a missing `sign` declaration
+  — is a pure declaration mistake, decided once when the block is evaluated and never at runtime, so
+  each raises plain `ArgumentError` rather than the gem's own `Axn::Webhooks::Error` (reserved for
+  conditions a caller might legitimately rescue at runtime, e.g. emitting an unregistered event).
   `max_attempts`/`backoff`/`transport`/`vendor`/`user_agent`/`timeouts` are now declared via
   `Axn::Configurable::Settings` (the same DSL `Axn::Webhooks` itself and sibling gems use) rather
   than hand-rolled ivars — `events` stays hand-written, since it's a Hash cross-validated as a whole
