@@ -12,16 +12,25 @@ module Axn
         expects :event
         expects :data, type: Hash, allow_blank: true, default: {}
 
+        exposes :webhook_ids, type: Array, allow_blank: true, default: []
+        exposes :target_count, type: Integer, default: 0
+
+        # Bounded to the events a sending app declares — same shape as inbound's unconditional
+        # `reason` dimension, not a per-request identity.
+        dimension :event, -> { event.to_s }
+
         def call
           config = Axn::Webhooks::Outbound.config
           type = config.wire_type(event)
           warn_sync_fallback(type) unless async_configured?
 
-          config.targets_for(event).each do |url|
+          ids = config.targets_for(event).map do |url|
             id = Envelope.new_id
             body = Envelope.build(id:, type:, data:)
-            enqueue(url:, webhook_id: id, body:, event: type)
+            enqueue(url:, webhook_id: id, body:, event: type, vendor:)
+            id
           end
+          expose(webhook_ids: ids, target_count: ids.size)
         end
 
         private

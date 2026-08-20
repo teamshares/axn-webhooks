@@ -15,7 +15,16 @@ module Axn
       @config = nil
 
       class << self
-        def install(config) = @config = config
+        def install(config)
+          unless @config.nil?
+            Axn.config.logger.warn(
+              "[axn-webhooks] a second `Axn::Webhooks.outbound` block replaces the first — only one outbound declaration is active at a time",
+            )
+          end
+
+          @config = config
+        end
+
         def reset! = @config = nil
 
         def config
@@ -36,7 +45,7 @@ module Axn
     # Emit an outbound webhook event. Fans out one signed, self-retrying delivery per subscriber.
     # Raises loudly (Axn::Webhooks::Error) on an unknown event.
     def self.emit(event, data: {})
-      Outbound::Emit.call!(event:, data:)
+      Outbound::Emit.call!(event:, data:, vendor: Outbound.config.vendor_for(event))
     end
   end
 end

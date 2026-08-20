@@ -45,4 +45,29 @@ RSpec.describe "Axn::Webhooks.emit" do
     expect(Axn.config.logger).to receive(:warn).with(/synchronous|no async adapter/i).once
     Axn::Webhooks.emit(:lead_signed, data: {})
   end
+
+  it "exposes the resolved webhook_ids and target_count" do
+    calls = []
+    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { |**kw| calls << kw }
+
+    result = Axn::Webhooks.emit(:lead_signed, data: {})
+
+    expect(result.webhook_ids).to match_array(calls.map { |c| c[:webhook_id] })
+    expect(result.target_count).to eq(2)
+  end
+
+  it "passes the outbound block's configured vendor down to Deliver" do
+    Axn::Webhooks::Outbound.reset!
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+      vendor :internal
+      event :lead_signed, to: ["https://a.example/hook"]
+    end
+    calls = []
+    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { |**kw| calls << kw }
+
+    Axn::Webhooks.emit(:lead_signed, data: {})
+
+    expect(calls.first[:vendor]).to eq(:internal)
+  end
 end

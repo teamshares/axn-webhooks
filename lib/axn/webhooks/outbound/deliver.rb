@@ -19,6 +19,10 @@ module Axn
         expects :event, type: String
         expects :attempt, type: Integer, default: 1
 
+        # Bounded to the events a sending app declares — same shape as inbound's unconditional
+        # `reason` dimension, not a per-request identity.
+        dimension :event, -> { event }
+
         # Only reports when `@exhaustion_error` was set by `retry_or_exhaust!`'s exhaustion branch
         # (see `report_exhaustion_if_needed`) -- a permanent-4xx `fail!` (in `#call`) also fires
         # `on_failure` (axn dispatches it for ANY `fail!`), but must NOT page: it never sets that
@@ -47,7 +51,7 @@ module Axn
           return if success?(response.status) # 2xx -> done
           return retry_or_exhaust!(retry_after: header_value(response.headers, "retry-after")) if retryable?(response.status)
 
-          fail!("permanent delivery failure (HTTP #{response.status}) for #{event} to #{url}")
+          fail!(permanent_failure_message(response))
         end
 
         private
@@ -55,7 +59,16 @@ module Axn
         def config = Axn::Webhooks::Outbound.config
 
         def post
-          config.transport.post(url:, body:, headers: signed_headers)
+          config.transport.post(**post_args)
+        end
+
+        # Timeouts are only forwarded to the built-in Transport — a custom injected transport
+        # (e.g. Faraday-backed) owns its own timeout configuration, and the documented seam is
+        # `.post(url:, body:, headers:)`; passing it kwargs it never declared would raise.
+        def post_args
+          args = { url:, body:, headers: signed_headers }
+          args.merge!(open_timeout: config.open_timeout, read_timeout: config.read_timeout) if config.transport == Transport
+          args
         end
 
         # Sign per attempt with a FRESH timestamp (so the receiver's replay window accepts a retry),
@@ -65,12 +78,39 @@ module Axn
                 .merge("content-type" => "application/json", "user-agent" => user_agent)
         end
 
-        def user_agent = "axn-webhooks/#{Axn::Webhooks::VERSION}"
+        def user_agent
+          suffix = resolve_user_agent_suffix
+          return "axn-webhooks/#{Axn::Webhooks::VERSION}" if suffix.nil?
+
+          "axn-webhooks/#{Axn::Webhooks::VERSION} (#{suffix})"
+        end
+
+        def resolve_user_agent_suffix
+          configured = config.user_agent
+          return nil if configured.nil?
+
+          configured.respond_to?(:call) ? configured.call : configured
+        end
 
         def success?(status) = (200..299).cover?(status)
 
         # 5xx, plus the "come back later" 4xx codes.
-        def retryable?(status) = status >= 500 || [429].include?(status)
+        def retryable?(status) = status >= 500 || [408, 425, 429].include?(status)
+
+        # The receiver-supplied body is the one piece of detail a permanent 4xx can offer beyond
+        # its status code — truncated so a verbose error page never blows up a log line or an
+        # exception report.
+        def permanent_failure_message(response)
+          "permanent delivery failure (HTTP #{response.status}) for #{event} to #{url}#{truncated_body(response.body)}"
+        end
+
+        def truncated_body(body)
+          return "" if body.nil? || body.empty?
+
+          snippet = body[0, 500]
+          snippet += "…" if body.bytesize > 500
+          ": #{snippet}"
+        end
 
         # Only reschedule when BOTH attempts remain AND an async adapter is actually configured for
         # Deliver to reschedule itself onto — otherwise `call_async` would raise a ScriptError
@@ -86,7 +126,7 @@ module Axn
           end
 
           delay = [config.backoff.call(attempt), parse_retry_after(retry_after)].compact.max
-          self.class.call_async(url:, webhook_id:, body:, event:, attempt: attempt + 1, _async: { wait: delay })
+          self.class.call_async(url:, webhook_id:, body:, event:, vendor:, attempt: attempt + 1, _async: { wait: delay })
         end
 
         def terminal_message

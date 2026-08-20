@@ -630,7 +630,9 @@ from wherever the triggering event happens:
 Axn::Webhooks.outbound do
   # Standard Webhooks signing (reuses Axn::Webhooks::Signature under the hood) — symmetric with
   # a receiver's own `verify :standard_webhooks`. A custom signer block is accepted in the same slot.
-  sign :standard_webhooks, secret: ENV.fetch("WEBHOOK_SIGNING_SECRET")
+  # `secret:` may be a plain value or a zero-arity callable, resolved fresh on every signing attempt
+  # (the same convention as every inbound `verify` secret) — so a secret can rotate without a reboot.
+  sign :standard_webhooks, secret: -> { ENV.fetch("WEBHOOK_SIGNING_SECRET") }
 
   # Default subscriber resolver — the seam a future DB-backed subscription store slots into.
   # Any event declared with no explicit `to:` falls back to this.
@@ -639,26 +641,40 @@ Axn::Webhooks.outbound do
   event :lead_signed, to: ["https://example.com/webhooks/lead_signed"]  # static list
   event :lead_closed                                                    # no `to:` -> resolved via `subscribers`
   event :invoice_paid, type: "invoice.paid", to: ["https://example.com/webhooks/invoice_paid"]  # override the wire `type`
+  event :internal_only, to: ["https://internal.example/hook"], vendor: :internal  # override the vendor facet, this event only
 
   max_attempts 8                                                # default shown
-  backoff ->(attempt) { [30 * (3**(attempt - 1)), 6 * 3600].min } # default shown (seconds; capped at 6h)
+  backoff ->(attempt) { [30 * (3**(attempt - 1)), 6 * 3600].min } # default shown (seconds; capped at 6h, jittered — see below)
   transport MyFaradayTransport                                  # optional; defaults to stdlib net/http
+  timeouts open: 5, read: 10                                    # defaults shown, seconds; built-in transport only
+  vendor :internal                                              # optional; the observability facet default for every event (overridable per event, above)
+  user_agent -> { "#{Rails.application.class.module_parent_name} / #{Rails.application.config.git_sha}" } # optional suffix; plain value or callable
 end
 
-Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })  # => Axn::Result
+result = Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })  # => Axn::Result
+result.webhook_ids    # => ["msg_<uuid>", ...] — one per resolved target
+result.target_count   # => 1
 ```
 
 * **Symbols are the identity.** `emit(:unknown_event)` raises `Axn::Webhooks::Error` immediately,
   listing the known events — no silent no-op for a typo'd event name. A statically declared
-  `event :x, to: []` warns at boot (it will deliver nowhere).
+  `event :x, to: []` warns at boot (it will deliver nowhere). A second `Axn::Webhooks.outbound` block
+  replaces the first and logs a warning — only one is ever active.
 * **Wire `type`** defaults to the symbol as a string (`:lead_signed` → `"lead_signed"`), overridable
   per event with `type:` when a receiver expects a dotted convention or another exact value.
 * **`to:`** accepts a static Array or a lambda (`->(event) { … }`); the block-level `subscribers`
-  resolver is the shared default when an event declares no `to:` at all.
+  resolver is the shared default when an event declares no `to:` at all. A static Array's URLs are
+  validated as http/https at boot; a lambda's return value is not (it can't be, since it depends on
+  runtime state) — validate what it returns yourself if that matters.
 * **Fan-out**: `emit` resolves the event's subscribers and enqueues one independent, self-retrying
   `Axn::Webhooks::Outbound::Deliver` per target — one slow/failing subscriber can't block another.
   Each delivery gets its own stable `webhook-id`, generated once per (emission × target) and reused
-  across every retry attempt of that delivery, so receivers can dedup.
+  across every retry attempt of that delivery, so receivers can dedup. `emit`'s result exposes the
+  full list of `webhook_ids` and a `target_count`, so a caller can record what actually went out.
+* **`vendor`** stamps the same observability facet (`Axn::Webhooks.config.vendor_facet`) inbound
+  endpoints already use, letting Datadog/Honeybadger group outbound deliveries by event or
+  subscriber. A per-event `vendor:` overrides the block-level default; an event with neither is
+  unstamped.
 
 ### Envelope & signing
 
@@ -680,14 +696,24 @@ Receivers verify with the inbound half's `verify :standard_webhooks` — end-to-
 `id`/`timestamp` give idempotency + replay protection for free. **Signing happens per attempt**: each
 retry recomputes the signature with a fresh `webhook-timestamp` (so it lands inside the receiver's
 replay-tolerance window) while reusing the same `webhook-id` from the first attempt (so the receiver
-can still dedup a redelivered message).
+can still dedup a redelivered message). The envelope body's own `timestamp` field, by contrast, is
+fixed once at emit time (it's part of the dedup identity) — so a retried delivery's signed
+`webhook-timestamp` header and its body's `timestamp` field deliberately diverge; read the header as
+"when this attempt was signed", not the body's "when this event happened".
+
+`user-agent` is `axn-webhooks/<version>`, plus an optional suffix — `axn-webhooks/<version>
+(<value>)` — from `user_agent` in the `outbound` block (a plain value or a zero-arity callable,
+resolved per attempt).
 
 ### Transport
 
 The HTTP call is an injectable seam (`.post(url:, body:, headers:) -> Transport::Response`, a
-`Data.define(:status, :headers)`). The default is stdlib `net/http` — no new runtime dependency — and
-a consuming app can swap in its own object (e.g. Faraday-backed) via `transport` in the `outbound`
-block.
+`Data.define(:status, :headers, :body)` — `body:` defaults to `nil`, so a transport built against the
+original two-field shape still works). The default is stdlib `net/http` — no new runtime dependency —
+and a consuming app can swap in its own object (e.g. Faraday-backed) via `transport` in the `outbound`
+block. `timeouts open:`/`read:` (defaults 5s/10s) only reach the **built-in** transport — a custom one
+owns its own timeout configuration, since the documented seam is `.post(url:, body:, headers:)` with
+no timeout kwargs guaranteed.
 
 ### Async posture
 
@@ -706,15 +732,17 @@ half:
 | Receiver responds | Delivery does |
 | -- | -- |
 | **2xx** | success |
-| **5xx, 429, 503 + `Retry-After`, timeout, connection error** | retryable → self-reschedule the next attempt |
-| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet `fail!`, no retry (a silent business failure surfaced via the `Deliver` result + axn's routine outcome logging, NOT via `on_exception`) |
+| **408, 425, 429, 5xx, 503 + `Retry-After`, timeout, connection error** | retryable → self-reschedule the next attempt |
+| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet `fail!`, no retry (a silent business failure surfaced via the `Deliver` result + axn's routine outcome logging, NOT via `on_exception`) — the failure message includes a truncated (500-byte) copy of the response body, the one piece of receiver-supplied detail a bare status code can't carry |
 | **unexpected exception** (crash / OOM / network raise mid-flight) | propagates → adapter retries the un-acked job (at-least-once safety net) |
 
 **One self-managed retry engine, adapter-agnostic.** On a retryable response, `Deliver` computes its
 own delay and re-enqueues itself via axn's adapter-agnostic delayed-enqueue seam
 (`call_async(_async: { wait: delay })`, carrying `attempt: n + 1`) rather than inheriting whatever
 default backoff curve the underlying adapter has — identical retry behavior across every axn adapter,
-and `Retry-After` is honored precisely: `delay = max(backoff(attempt), retry_after_seconds)`. After
+and `Retry-After` is honored precisely: `delay = max(backoff(attempt), retry_after_seconds)`. The
+default `backoff` curve applies **equal jitter** (half the computed delay is fixed, half is random) so
+a fan-out event whose receiver is down doesn't have every failing target retry in lockstep. After
 `max_attempts`, exhaustion is reported **once** (via `Axn.config.on_exception`) and then delivery
 stops — it never raises, so the async adapter doesn't also retry an already-exhausted job. If no
 async adapter is configured at all, a retryable failure is treated the same as an exhausted retry
@@ -764,6 +792,21 @@ self-registration store — where receivers register their own endpoint URLs at 
 required to add a listener — is a real future shape, but it's **intentionally deferred until a real
 use-case justifies it**. The `subscribers`/`to:` lambda is the seam it will slot into with no API
 change: swap the lambda body for a DB lookup and nothing else in this gem needs to move.
+
+### Boot-time validation
+
+An `outbound` block fails loudly at declaration time — rather than as an unexpected exception mid-
+delivery, which the async adapter would otherwise retry as if it were a network failure — for:
+`max_attempts` that isn't a positive Integer; a `backoff` that doesn't accept the attempt number
+(arity 0); a `to:` that is neither an Array nor a callable; and a statically-declared `to:` URL that
+isn't a valid http/https URL. A callable `to:`'s *return value* isn't validated (it depends on
+runtime state), nor is a callable `secret:`'s.
+
+### Testing
+
+`Axn::Webhooks::Outbound.reset!` clears the declared `outbound` block — call it in an `after` hook
+between examples that each declare their own, the same way `Axn::Webhooks::Inbound.reset!` clears
+registered vendors.
 
 ## Development
 

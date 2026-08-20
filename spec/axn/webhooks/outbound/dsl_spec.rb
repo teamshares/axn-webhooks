@@ -106,6 +106,107 @@ RSpec.describe "Axn::Webhooks.outbound" do
     end
   end
 
+  it "warns (does not raise) when a second `outbound` block replaces the first" do
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      event :lead_signed, to: ["https://x"]
+    end
+
+    expect(Axn.config.logger).to receive(:warn).with(/second.*outbound.*block.*replaces/i)
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      event :lead_closed, to: ["https://y"]
+    end
+
+    expect(Axn::Webhooks::Outbound.config.targets_for(:lead_closed)).to eq(["https://y"])
+  end
+
+  describe "vendor tagging" do
+    it "stamps the block-level default vendor for an event with no override" do
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+        vendor :internal
+        event :lead_signed, to: ["https://x"]
+      end
+      expect(Axn::Webhooks::Outbound.config.vendor_for(:lead_signed)).to eq(:internal)
+    end
+
+    it "lets a per-event vendor override the block-level default" do
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+        vendor :internal
+        event :lead_signed, to: ["https://x"], vendor: :leads_pipeline
+      end
+      expect(Axn::Webhooks::Outbound.config.vendor_for(:lead_signed)).to eq(:leads_pipeline)
+    end
+
+    it "is nil when neither the block nor the event declares one" do
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+        event :lead_signed, to: ["https://x"]
+      end
+      expect(Axn::Webhooks::Outbound.config.vendor_for(:lead_signed)).to be_nil
+    end
+  end
+
+  describe "validation" do
+    it "rejects a non-positive max_attempts" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          max_attempts 0
+          event :x, to: ["https://x"]
+        end
+      end.to raise_error(Axn::Webhooks::Error, /max_attempts must be a positive Integer/)
+    end
+
+    it "rejects a zero-arity backoff" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          backoff -> { 30 }
+          event :x, to: ["https://x"]
+        end
+      end.to raise_error(Axn::Webhooks::Error, /backoff must be a callable accepting the attempt number/)
+    end
+
+    it "rejects a `to:` that is neither an Array nor callable" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          event :x, to: { url: "https://x" }
+        end
+      end.to raise_error(Axn::Webhooks::Error, /`to:` must be an Array of URLs or a callable/)
+    end
+
+    it "rejects a non-http(s) static URL" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          event :x, to: ["file:///etc/passwd"]
+        end
+      end.to raise_error(Axn::Webhooks::Error, /must be http\(s\)/)
+    end
+
+    it "rejects an unparseable static URL" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          event :x, to: ["http://[::not-a-host"]
+        end
+      end.to raise_error(Axn::Webhooks::Error, /is not a valid URL/)
+    end
+
+    it "does not eagerly validate a callable `to:` (resolved per emission, not at boot)" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          event :x, to: ->(_event) { ["not-a-url"] }
+        end
+      end.not_to raise_error
+    end
+  end
+
   describe "Config#transport" do
     it "defaults to Outbound::Transport when the block does not call `transport`" do
       Axn::Webhooks.outbound do
