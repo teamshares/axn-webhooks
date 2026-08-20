@@ -28,6 +28,26 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
       )
       expect(headers["webhook-signature"]).to eq("v1,#{expected}")
     end
+
+    it "resolves a callable secret per call rather than freezing it at build time" do
+      calls = 0
+      resolver = lambda do
+        calls += 1
+        secret
+      end
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+
+      2.times { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+
+      expect(calls).to eq(2)
+    end
+
+    it "raises a named error when the resolved secret isn't a decodable whsec_ value" do
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: "not-whsec" }, block: nil)
+
+      expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+        .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
+    end
   end
 
   describe "custom block" do

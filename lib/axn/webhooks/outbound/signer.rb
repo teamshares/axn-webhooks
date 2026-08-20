@@ -33,7 +33,7 @@ module Axn
 
           def call(id:, timestamp:, body:)
             sig = Signature.compute(
-              secret: Verifiers::StandardWebhooks.decode_secret(@secret),
+              secret: decoded_secret,
               payload: "#{id}.#{timestamp}.#{body}",
               digest: :sha256,
               encoding: :base64,
@@ -43,6 +43,24 @@ module Axn
               "webhook-timestamp" => timestamp.to_s,
               "webhook-signature" => "v1,#{sig}",
             }
+          end
+
+          private
+
+          # A callable secret (the norm for every other webhook secret in this gem — see
+          # Resolvers.resolve) resolves per call rather than being frozen at `sign` time; a plain
+          # value is used as-is. Arity-free: unlike a subscriber resolver, a signing secret has no
+          # natural argument to pass.
+          def resolve_secret
+            @secret.respond_to?(:call) ? @secret.call : @secret
+          end
+
+          def decoded_secret
+            secret = resolve_secret
+            Verifiers::StandardWebhooks.decode_secret(secret)
+          rescue ArgumentError
+            raise Axn::Webhooks::Error,
+                  "sign :standard_webhooks secret must be a whsec_<base64> value (got #{secret.inspect})"
           end
         end
       end
