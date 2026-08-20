@@ -48,6 +48,29 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
         .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
     end
+
+    it "raises rather than silently signing with an empty key when the secret is blank" do
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: "" }, block: nil)
+
+      expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+        .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
+    end
+
+    it "raises rather than silently signing with an empty key when the secret is whsec_ with nothing after it" do
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: "whsec_" }, block: nil)
+
+      expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+        .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
+    end
+
+    it "raises on a bare base64 secret missing the required whsec_ prefix" do
+      signer = described_class.build(
+        strategy: :standard_webhooks, opts: { secret: Base64.strict_encode64("secret") }, block: nil,
+      )
+
+      expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+        .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
+    end
   end
 
   describe "custom block" do
@@ -60,8 +83,8 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
     end
   end
 
-  it "raises on an unknown strategy" do
+  it "raises (ArgumentError: a boot-time declaration mistake, not a runtime condition) on an unknown strategy" do
     expect { described_class.build(strategy: :nope, opts: {}, block: nil) }
-      .to raise_error(Axn::Webhooks::Error, /unknown sign strategy/)
+      .to raise_error(ArgumentError, /unknown sign strategy/)
   end
 end

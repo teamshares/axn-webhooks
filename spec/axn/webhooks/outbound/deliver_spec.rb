@@ -370,6 +370,32 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
 
       expect(result.error).to eq("permanent delivery failure (HTTP 422) for lead_signed to https://os.example/hook")
     end
+
+    it "scrubs a long binary receiver body instead of raising Encoding::CompatibilityError" do
+      # net/http labels response bodies ASCII-8BIT regardless of actual content; a long body with
+      # non-ASCII bytes hits the ellipsis-append path that previously mixed encodings.
+      binary_body = ("\xFF\xFE" * 300).dup.force_encoding(Encoding::ASCII_8BIT)
+      transport = fake_transport(ok(422, {}, binary_body))
+      declare!(transport:)
+
+      result = described_class.call(**kwargs)
+
+      expect(result.error).to include("HTTP 422")
+      expect(result.error).to end_with("…")
+    end
+
+    it "truncates an ASCII-8BIT body without leaving an invalid byte sequence when the cut splits a multibyte character" do
+      # Labeled ASCII-8BIT (as net/http does) but holding valid UTF-8 multibyte text — byte 500 lands
+      # mid-character, so a raw byteslice alone would leave a dangling invalid sequence.
+      long_body = ("é" * 1000).dup.force_encoding(Encoding::ASCII_8BIT)
+      transport = fake_transport(ok(422, {}, long_body))
+      declare!(transport:)
+
+      result = described_class.call(**kwargs)
+
+      expect(result.error).to end_with("…")
+      expect { result.error.encode(Encoding::UTF_8) }.not_to raise_error
+    end
   end
 
   describe "retryable status codes" do

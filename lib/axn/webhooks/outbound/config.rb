@@ -7,6 +7,12 @@ module Axn
     module Outbound
       # The resolved, immutable outbound declaration. One per process (a single `outbound` block).
       class Config
+        # Validated settings via the upstream Axn::Configurable DSL (class flavor) — max_attempts/
+        # backoff/transport/vendor/user_agent/timeouts are simple, independently valid-or-not values.
+        # `events` (and its `to:`/URL structure) stays hand-written below: it's a Hash built and
+        # cross-validated as a whole from one DSL block, not a flat setting.
+        extend Axn::Configurable::Settings
+
         DEFAULT_MAX_ATTEMPTS = 8
         # Equal jitter (half fixed, half random): a fan-out event whose receiver is down would
         # otherwise have every failing target retry in lockstep, converging on the same instant.
@@ -17,23 +23,44 @@ module Axn
         DEFAULT_OPEN_TIMEOUT = 5
         DEFAULT_READ_TIMEOUT = 10
 
+        setting :max_attempts, default: DEFAULT_MAX_ATTEMPTS,
+                               validate: ->(v) { (v.is_a?(Integer) && v.positive?) || "must be a positive Integer" }
+        # The default itself IS a callable (not a value computed BY one) — a bare Proc default would
+        # otherwise be read as "call this with no args to derive the default" (Configurable's dynamic-
+        # default convention) and blow up on DEFAULT_BACKOFF's required `attempt` arg. A zero-arity
+        # wrapper resolves to the lambda itself instead.
+        setting :backoff, default: -> { DEFAULT_BACKOFF },
+                          validate: lambda { |v|
+                            (v.respond_to?(:call) && (v.arity == 1 || v.arity.negative?)) ||
+                              "must be a callable accepting the attempt number"
+                          }
+        # Same reasoning as `backoff`: `Transport` is a Module, and Configurable's non-dynamic default
+        # path calls `.dup` on it — silently swapping in an anonymous copy that fails every `== Transport`
+        # identity check downstream (e.g. Deliver's timeout-forwarding guard).
+        setting :transport, default: -> { Transport }
+        setting :vendor
+        setting :user_agent
+        setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT
+        setting :read_timeout, default: DEFAULT_READ_TIMEOUT
+
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
                        vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil)
           @signer = signer
           @events = events # { Symbol => { to:, type:, vendor: } }
           @default_subscribers = default_subscribers
-          @max_attempts = max_attempts || DEFAULT_MAX_ATTEMPTS
-          @backoff = backoff || DEFAULT_BACKOFF
-          @transport = transport || Transport
-          @vendor = vendor
-          @user_agent = user_agent
-          @open_timeout = open_timeout || DEFAULT_OPEN_TIMEOUT
-          @read_timeout = read_timeout || DEFAULT_READ_TIMEOUT
 
-          validate!
+          self.max_attempts = max_attempts unless max_attempts.nil?
+          self.backoff = backoff unless backoff.nil?
+          self.transport = transport unless transport.nil?
+          self.vendor = vendor unless vendor.nil?
+          self.user_agent = user_agent unless user_agent.nil?
+          self.open_timeout = open_timeout unless open_timeout.nil?
+          self.read_timeout = read_timeout unless read_timeout.nil?
+
+          @events.each { |name, spec| validate_event!(name, spec) }
         end
 
-        attr_reader :signer, :max_attempts, :backoff, :transport, :user_agent, :open_timeout, :read_timeout
+        attr_reader :signer
 
         def events = @events.keys
 
@@ -43,7 +70,7 @@ module Axn
 
         # A per-event `vendor:` overrides the block-level default; same precedence as `type:`.
         def vendor_for(event)
-          fetch(event)[:vendor] || @vendor
+          fetch(event)[:vendor] || vendor
         end
 
         # A DECLARED per-event `to:` always wins, even when it resolves to zero targets — a static
@@ -81,29 +108,17 @@ module Axn
 
         # Boot-time validation, so a malformed declaration fails loudly here rather than as an
         # unexpected exception mid-delivery (which the async adapter would retry as if it were a
-        # network failure).
-        def validate!
-          unless @max_attempts.is_a?(Integer) && @max_attempts.positive?
-            raise Axn::Webhooks::Error, "outbound max_attempts must be a positive Integer (got #{@max_attempts.inspect})"
-          end
-
-          unless @backoff.respond_to?(:call) && backoff_accepts_attempt?
-            raise Axn::Webhooks::Error, "outbound backoff must be a callable accepting the attempt number"
-          end
-
-          @events.each { |name, spec| validate_event!(name, spec) }
-        end
-
-        def backoff_accepts_attempt?
-          arity = @backoff.arity
-          arity == 1 || arity.negative?
-        end
-
+        # network failure). A pure declaration mistake — never triggered by runtime/user data, and
+        # nothing a running app would want to rescue-and-continue past — so this raises plain
+        # ArgumentError, same as `max_attempts`/`backoff` above, rather than the gem's own
+        # `Axn::Webhooks::Error` (reserved for conditions a caller might legitimately rescue at
+        # runtime, e.g. `fetch`'s unknown-event error below, raised on every `emit`/`targets_for`
+        # call rather than once at boot).
         def validate_event!(name, spec)
           return if spec[:to].nil? || spec[:to].respond_to?(:call)
 
           unless spec[:to].is_a?(Array)
-            raise Axn::Webhooks::Error,
+            raise ArgumentError,
                   "outbound event #{name.inspect} `to:` must be an Array of URLs or a callable (got #{spec[:to].class})"
           end
 
@@ -112,11 +127,11 @@ module Axn
 
         def validate_url!(name, url)
           uri = URI.parse(url.to_s)
-          return if %w[http https].include?(uri.scheme)
+          return if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
 
-          raise Axn::Webhooks::Error, "outbound event #{name.inspect} `to:` URL #{url.inspect} must be http(s)"
+          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{url.inspect} must be http(s)"
         rescue URI::InvalidURIError
-          raise Axn::Webhooks::Error, "outbound event #{name.inspect} `to:` URL #{url.inspect} is not a valid URL"
+          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{url.inspect} is not a valid URL"
         end
       end
     end

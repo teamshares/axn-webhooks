@@ -36,7 +36,22 @@
   no page), and nothing anywhere named the cause. `Signer::StandardWebhooksSigner` now resolves a
   callable secret per call; a secret that still isn't a decodable `whsec_<base64>` value after
   resolution now raises a named `Axn::Webhooks::Error` instead of a bare `ArgumentError` from inside
-  `Base64.strict_decode64`.
+  `Base64.strict_decode64`. That check now also rejects a blank secret and one missing the required
+  `whsec_` prefix — both previously decoded "successfully" (an empty or unprefixed value is still
+  valid base64) and signed every delivery with an empty or wrong key, indistinguishable from any
+  other receiver-side misconfiguration.
+- A permanent-4xx failure message's truncated response-body snippet no longer risks
+  `Encoding::CompatibilityError` (mixing the ASCII-8BIT net/http labels every response body with, and
+  the UTF-8 ellipsis) or a dangling invalid byte sequence from cutting a multibyte character at the
+  500-byte boundary — both turned an intended quiet `fail!` into an unhandled exception the async
+  adapter would retry.
+- Boot-time URL validation now requires a host, not just an http(s) scheme — `"https:foo"`,
+  `"https:"`, and `"https:///hook"` all parse as scheme-only `https` with no host, previously
+  accepted and left to fail unexpectedly inside `Transport`'s request construction at delivery time.
+- `Axn::Webhooks.emit` no longer resolves the event's `vendor` ahead of `Emit.call!` — that lookup
+  raises the same "unknown outbound event" error `Emit` itself already raises internally, but doing
+  it before entering the action bypassed axn's executor (and its `on_exception` reporting) for an
+  unregistered event, silently downgrading what's meant to be a loud, reported failure.
 
 ### Added (Outbound)
 - **`vendor`** — a block-level default (and per-event override) that stamps the same
@@ -69,10 +84,18 @@
   the existing 5xx/429.
 - Boot-time validation on the `outbound` block: `max_attempts` must be a positive Integer; `backoff`
   must accept the attempt number; `to:` must be an Array or a callable; a statically-declared `to:`
-  URL must be a valid http/https URL. Each previously either behaved unexpectedly at delivery time
-  (an arity-0 `backoff` blows up mid-delivery; a non-Array/non-callable `to:` is silently mangled by
-  `Array(...)`) or crashed as an unhandled exception the async adapter would retry forever (a
-  malformed static URL raises inside `Transport.post`'s `URI.parse`/`#request_uri`).
+  URL must be a valid http/https URL with a host. Each previously either behaved unexpectedly at
+  delivery time (an arity-0 `backoff` blows up mid-delivery; a non-Array/non-callable `to:` is
+  silently mangled by `Array(...)`) or crashed as an unhandled exception the async adapter would
+  retry forever (a malformed or hostless static URL raises inside `Transport.post`'s
+  `URI.parse`/`#request_uri`). Every one of these — along with an unknown `sign` strategy and a
+  missing `sign` declaration — is a pure declaration mistake, decided once when the block is
+  evaluated and never at runtime, so each raises plain `ArgumentError` rather than the gem's own
+  `Axn::Webhooks::Error` (reserved for conditions a caller might legitimately rescue at runtime, e.g.
+  emitting an unregistered event). `max_attempts`/`backoff`/`transport`/`vendor`/`user_agent`/
+  `timeouts` are now declared via `Axn::Configurable::Settings` (the same DSL `Axn::Webhooks` itself
+  and sibling gems use) rather than hand-rolled ivars — `events` stays hand-written, since it's a
+  Hash cross-validated as a whole from one DSL block rather than a flat setting.
 - A second `Axn::Webhooks.outbound` block now logs a warning before silently replacing the first
   (previously a bare, silent assignment) — only one outbound declaration is ever active at a time.
 

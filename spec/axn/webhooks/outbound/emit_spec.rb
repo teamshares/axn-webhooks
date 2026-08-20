@@ -21,6 +21,20 @@ RSpec.describe "Axn::Webhooks.emit" do
       .to raise_error(Axn::Webhooks::Error, /unknown outbound event/)
   end
 
+  it "reports an unknown event through axn's own exception reporting, not a bare raise ahead of the action" do
+    # Regression: `self.emit` used to resolve `vendor_for(event)` BEFORE calling `Emit.call!`, so an
+    # unknown event raised outside the Axn action entirely -- same error class/message, but axn's
+    # executor (and its on_exception reporting) never ran. Assert on the reporter call, not just the
+    # raised error, so this can't pass for the wrong reason again.
+    reported = []
+    allow(Axn.config).to receive(:on_exception) { |error, **| reported << error }
+
+    expect { Axn::Webhooks.emit(:not_a_real_event, data: {}) }
+      .to raise_error(Axn::Webhooks::Error, /unknown outbound event/)
+
+    expect(reported.map(&:message)).to include(a_string_matching(/unknown outbound event/))
+  end
+
   it "fans out one delivery per target, each with a distinct webhook-id and the wire type" do
     calls = []
     allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { |**kw| calls << kw }

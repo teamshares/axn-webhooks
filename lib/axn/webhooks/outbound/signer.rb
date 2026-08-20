@@ -14,7 +14,9 @@ module Axn
 
           case strategy&.to_sym
           when :standard_webhooks then StandardWebhooksSigner.new(**opts)
-          else raise Axn::Webhooks::Error, "unknown sign strategy #{strategy.inspect}"
+          # A pure declaration mistake (decided once at boot, never at runtime) — ArgumentError, not
+          # Axn::Webhooks::Error, matching Config's own misconfiguration-vs-runtime split.
+          else raise ArgumentError, "unknown sign strategy #{strategy.inspect}"
           end
         end
 
@@ -57,10 +59,22 @@ module Axn
 
           def decoded_secret
             secret = resolve_secret
-            Verifiers::StandardWebhooks.decode_secret(secret)
+            raise invalid_secret_error(secret) unless secret.is_a?(String) && secret.start_with?("whsec_")
+
+            decoded = Verifiers::StandardWebhooks.decode_secret(secret)
+            raise invalid_secret_error(secret) if decoded.empty?
+
+            decoded
           rescue ArgumentError
-            raise Axn::Webhooks::Error,
-                  "sign :standard_webhooks secret must be a whsec_<base64> value (got #{secret.inspect})"
+            raise invalid_secret_error(secret)
+          end
+
+          # A blank secret, or one missing the `whsec_` prefix, would otherwise decode "successfully"
+          # (an empty or unprefixed value is still valid base64) and sign every delivery with an empty
+          # or wrong key — silently, since the receiver's 401 is indistinguishable from any other
+          # misconfiguration (Codex P1 finding).
+          def invalid_secret_error(secret)
+            Axn::Webhooks::Error.new("sign :standard_webhooks secret must be a whsec_<base64> value (got #{secret.inspect})")
           end
         end
       end

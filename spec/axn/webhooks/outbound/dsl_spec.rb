@@ -150,6 +150,12 @@ RSpec.describe "Axn::Webhooks.outbound" do
   end
 
   describe "validation" do
+    # Every check below is a pure declaration mistake, decided once at boot when the `outbound`
+    # block is evaluated — never triggered by runtime/user data, and not something a running app
+    # would rescue-and-continue past. So it's plain ArgumentError, not the gem's own
+    # `Axn::Webhooks::Error` (reserved for conditions that can happen at runtime and might
+    # legitimately be rescued — e.g. `targets_for`'s unknown-event error, raised on every `emit`
+    # call rather than once at boot).
     it "rejects a non-positive max_attempts" do
       expect do
         Axn::Webhooks.outbound do
@@ -157,7 +163,7 @@ RSpec.describe "Axn::Webhooks.outbound" do
           max_attempts 0
           event :x, to: ["https://x"]
         end
-      end.to raise_error(Axn::Webhooks::Error, /max_attempts must be a positive Integer/)
+      end.to raise_error(ArgumentError, /max_attempts got invalid value.*must be a positive Integer/)
     end
 
     it "rejects a zero-arity backoff" do
@@ -167,7 +173,7 @@ RSpec.describe "Axn::Webhooks.outbound" do
           backoff -> { 30 }
           event :x, to: ["https://x"]
         end
-      end.to raise_error(Axn::Webhooks::Error, /backoff must be a callable accepting the attempt number/)
+      end.to raise_error(ArgumentError, /backoff got invalid value.*must be a callable accepting the attempt number/)
     end
 
     it "rejects a `to:` that is neither an Array nor callable" do
@@ -176,7 +182,7 @@ RSpec.describe "Axn::Webhooks.outbound" do
           sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
           event :x, to: { url: "https://x" }
         end
-      end.to raise_error(Axn::Webhooks::Error, /`to:` must be an Array of URLs or a callable/)
+      end.to raise_error(ArgumentError, /`to:` must be an Array of URLs or a callable/)
     end
 
     it "rejects a non-http(s) static URL" do
@@ -185,7 +191,7 @@ RSpec.describe "Axn::Webhooks.outbound" do
           sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
           event :x, to: ["file:///etc/passwd"]
         end
-      end.to raise_error(Axn::Webhooks::Error, /must be http\(s\)/)
+      end.to raise_error(ArgumentError, /must be http\(s\)/)
     end
 
     it "rejects an unparseable static URL" do
@@ -194,7 +200,21 @@ RSpec.describe "Axn::Webhooks.outbound" do
           sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
           event :x, to: ["http://[::not-a-host"]
         end
-      end.to raise_error(Axn::Webhooks::Error, /is not a valid URL/)
+      end.to raise_error(ArgumentError, /is not a valid URL/)
+    end
+
+    it "rejects a static URL with an http(s) scheme but no host" do
+      # URI.parse accepts these as scheme=https with a nil/empty host; the built-in Transport would
+      # only fail constructing/sending the request at delivery time, so boot-time validation must
+      # check the host explicitly rather than trusting the scheme alone.
+      %w[https:foo https: https:///hook].each do |url|
+        expect do
+          Axn::Webhooks.outbound do
+            sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+            event :x, to: [url]
+          end
+        end.to raise_error(ArgumentError, /must be http\(s\)/), "expected #{url.inspect} to be rejected"
+      end
     end
 
     it "does not eagerly validate a callable `to:` (resolved per emission, not at boot)" do

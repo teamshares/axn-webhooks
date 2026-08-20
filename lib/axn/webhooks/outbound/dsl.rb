@@ -52,7 +52,9 @@ module Axn
 
         # Internal: build the resolved Config, validating declarations.
         def __config__
-          raise Axn::Webhooks::Error, "outbound block must declare `sign`" if @sign_spec.nil?
+          # A pure declaration mistake (decided once at boot, never at runtime) — ArgumentError, not
+          # Axn::Webhooks::Error, matching Config's own misconfiguration-vs-runtime split.
+          raise ArgumentError, "outbound block must declare `sign`" if @sign_spec.nil?
 
           @events.each do |name, spec|
             next unless spec[:to].is_a?(Array) && spec[:to].empty?

@@ -104,11 +104,18 @@ module Axn
           "permanent delivery failure (HTTP #{response.status}) for #{event} to #{url}#{truncated_body(response.body)}"
         end
 
+        # net/http labels every response body ASCII-8BIT regardless of actual content, so `body` may
+        # hold arbitrary bytes (invalid UTF-8, or valid multibyte UTF-8 mislabeled as binary). Slice
+        # BYTES first (encoding-agnostic, so the cut itself never raises), then force UTF-8 and
+        # `scrub` — which also repairs a multibyte character split at the 500-byte boundary — before
+        # appending the UTF-8 ellipsis, so the two `+` operands are always compatible.
         def truncated_body(body)
           return "" if body.nil? || body.empty?
 
-          snippet = body[0, 500]
-          snippet += "…" if body.bytesize > 500
+          bytes = body.b
+          truncated = bytes.bytesize > 500
+          snippet = bytes.byteslice(0, 500).force_encoding(Encoding::UTF_8).scrub("�")
+          snippet += "…" if truncated
           ": #{snippet}"
         end
 

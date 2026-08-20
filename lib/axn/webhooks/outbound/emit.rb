@@ -22,6 +22,7 @@ module Axn
         def call
           config = Axn::Webhooks::Outbound.config
           type = config.wire_type(event)
+          @vendor = config.vendor_for(event)
           warn_sync_fallback(type) unless async_configured?
 
           ids = config.targets_for(event).map do |url|
@@ -34,6 +35,14 @@ module Axn
         end
 
         private
+
+        # Overrides the plain `expects :vendor` reader VendorFacet declared above: an unknown event
+        # would otherwise need resolving via `Config#vendor_for` BEFORE this action even runs (see
+        # `Axn::Webhooks.emit`'s comment) to satisfy that expectation, which is exactly what defeats
+        # axn's exception reporting. Resolved once per call, in `#call`, after `wire_type` has
+        # already validated the event -- so both this method and VendorFacet's `dimension`/`tag`
+        # resolvers (which call this same reader) see the config-derived vendor.
+        attr_reader :vendor
 
         # Async when an adapter is configured for Deliver, else a warned best-effort sync fallback
         # (no cross-process retries). Presence check only — never branches on adapter type.
