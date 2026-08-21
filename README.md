@@ -519,9 +519,9 @@ handler outlives the vendor's ack window (Slack's 3s), so running it inline trad
 vendor timeout, a redelivery, and duplicate processing — and it changes the response the vendor
 sees, since the async path acks with no handler result while the sync path renders one (a handler
 `fail!` included). It's also the same no-silent-downgrade stance outbound's `to:` takes: a *declared*
-resolver that returns nil delivers nowhere rather than falling back to `subscribers`. Should
-outbound ever gain a per-`emit` `async:` override, it should raise here too rather than inherit the
-`:auto` fallback.
+resolver that returns nil delivers nowhere rather than falling back to `subscribers`. That rule is what the shipped per-`emit` `async:` override follows: `emit(..., async: true)` raises
+when no adapter is configured, exactly as an explicitly-`async` inbound route does, rather than
+inheriting `Emit`'s `:auto` fallback.
 
 ### Nested endpoints
 

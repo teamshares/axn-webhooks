@@ -70,6 +70,7 @@ module Axn
           # rather than silently becoming last-one-wins (Codex review).
           discard_inherited(:@static_respond_block)
           @respond_block = block
+          claim_ownership(:@respond_block)
         end
 
         # static_respond { text("...") } — a body that does NOT read the handler result (block
@@ -87,6 +88,7 @@ module Axn
 
           discard_inherited(:@respond_block) # see `respond` — cross-form override, inherited only
           @static_respond_block = block
+          claim_ownership(:@static_respond_block)
         end
 
         # challenge ->(req){ req.params["challenge"] }                          — Nylas
@@ -134,6 +136,12 @@ module Axn
           instance_variable_set(ivar, nil)
           @inherited_ivars.delete(ivar)
         end
+
+        # Marks an ivar as belonging to THIS block from here on. Without it, a child that
+        # re-declared `respond` left `@respond_block` still listed as inherited, so a following
+        # `static_respond` discarded the child's OWN block and the pair was accepted — exactly the
+        # same-block conflict the discard rule is supposed to keep raising (Codex review).
+        def claim_ownership(ivar) = @inherited_ivars&.delete(ivar)
 
         # Internal: declared child endpoints, name => block. Empty for a plain `inbound` block.
         def __children__ = @child_endpoints || {}

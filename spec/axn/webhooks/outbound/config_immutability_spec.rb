@@ -84,6 +84,25 @@ RSpec.describe "Axn::Webhooks::Outbound::Config immutability" do
     expect(config.targets_for(:lead_signed)).to eq(["https://a.example/hook"])
   end
 
+  it "copies a mutable event type: and vendor: too, not just the to: URLs" do
+    # Freezing the spec Hash left its String VALUES aliased to the caller's, so `type.replace(…)`
+    # rewrote wire_type and every envelope emitted afterwards (Codex review).
+    type = +"lead.signed"
+    vendor = +"internal"
+
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      event :lead_signed, to: ["https://a.example/hook"], type:, vendor:
+    end
+
+    config = Axn::Webhooks::Outbound.config
+    type.replace("other_event")
+    vendor.replace("hijacked")
+
+    expect(config.wire_type(:lead_signed)).to eq("lead.signed")
+    expect(config.vendor_for(:lead_signed)).to eq("internal")
+  end
+
   it "does NOT freeze caller-supplied callables" do
     resolver = ->(_event) { ["https://x.example/hook"] }
     signer = ->(id:, timestamp:, body:) { { "x-sig" => "#{id}#{timestamp}#{body}" } }

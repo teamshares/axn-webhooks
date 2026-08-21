@@ -145,6 +145,43 @@ RSpec.describe "nested inbound endpoints" do
     end.to raise_error(Axn::Webhooks::Error, /declares both/)
   end
 
+  it "still rejects both renderers in a child even when the parent declared one of them" do
+    # The round-2 fix cleared the inherited alternative but left the re-declared one marked
+    # inherited, so the SECOND declaration cleared the child's OWN first one and the pair was
+    # accepted — silently dropping a renderer the child explicitly asked for (Codex review).
+    expect do
+      Axn::Webhooks.inbound :slack do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        respond { |_result| text("parent") }
+
+        endpoint(:events) do
+          dispatch to: "HandlerB"
+          respond { |_result| text("child") }
+          static_respond { text("also child") }
+        end
+      end
+    end.to raise_error(Axn::Webhooks::Error, /declares both/)
+  end
+
+  it "registers NOTHING when a later child fails to build" do
+    # Registration is process-global; publishing children one at a time left earlier ones live
+    # after a later one raised, mixing endpoints from different declarations (Codex review).
+    expect do
+      Axn::Webhooks.inbound :vendor do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+
+        endpoint(:good) { dispatch to: "HandlerA" }
+        endpoint(:bad) do
+          dispatch to: "HandlerB"
+          respond { |_result| text("x") }
+          static_respond { text("y") }
+        end
+      end
+    end.to raise_error(Axn::Webhooks::Error)
+
+    expect(Axn::Webhooks::Inbound.registered).to be_empty
+  end
+
   it "rejects a parent that both declares endpoints and dispatches itself" do
     expect do
       Axn::Webhooks.inbound :slack do

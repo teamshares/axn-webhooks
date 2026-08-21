@@ -131,11 +131,12 @@ module Axn
         def deep_freeze!
           materialize_settings!
           @events.each_value do |spec|
-            # COPY rather than freeze in place: `event to: SOME_CONSTANT` would otherwise leave the
-            # application holding a frozen object it never froze, while the Strings inside stayed
-            # mutable — so `url.replace("ftp://…")` rewrote the published config, past the
-            # boot-time validation that already ran on it (Codex review).
-            spec[:to] = spec[:to].map { |url| url.is_a?(String) ? url.dup.freeze : url }.freeze if spec[:to].is_a?(Array)
+            # COPY rather than freeze in place, and cover EVERY value, not just `to:`: `event to:
+            # SOME_CONSTANT` would otherwise leave the application holding a frozen object it never
+            # froze, while the Strings inside stayed mutable — so `url.replace("ftp://…")` rewrote
+            # the published config past the boot-time validation that already ran on it, and a
+            # mutable `type:`/`vendor:` rewrote `wire_type`/`vendor_for` the same way (Codex review).
+            spec.transform_values! { |value| config_owned(value) }
             spec.freeze
           end
           @events.freeze
@@ -153,6 +154,16 @@ module Axn
         # in sync now — adding a `setting` is enough.
         def materialize_settings!
           Axn::Configurable.declared_settings_for(self.class).each_key { |name| public_send(name) }
+        end
+
+        # An immutable copy the config owns, for the shapes an event spec can hold. A callable `to:`
+        # (or anything else the app supplied) is returned untouched — not ours to copy or freeze.
+        def config_owned(value)
+          case value
+          when String then value.dup.freeze
+          when Array then value.map { |element| config_owned(element) }.freeze
+          else value
+          end
         end
 
         def fetch(event)

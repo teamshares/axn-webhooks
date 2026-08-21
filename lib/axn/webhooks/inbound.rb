@@ -44,27 +44,34 @@ module Axn
               "with endpoints registers nothing itself; move the dispatch into an endpoint"
       end
 
-      children.each { |child, child_block| register_endpoint(:"#{name}_#{child}", dsl.__child_dsl__(child_block)) }
+      # Build and validate EVERY child before publishing any: the registry is process-global, so
+      # registering as we go left earlier children live when a later one raised — a rescued
+      # declaration failure or a reload would mix endpoints from different declarations
+      # (Codex review).
+      built = children.map { |child, child_block| [:"#{name}_#{child}", build_endpoint(:"#{name}_#{child}", dsl.__child_dsl__(child_block))] }
+      built.each { |child_name, endpoint| Inbound.register(child_name, endpoint) }
     end
 
     # Each child is a complete, independently valid endpoint by the time it gets here, so the
     # existing per-endpoint validation (__verifier__'s "declared no `verify`" check, Endpoint's
     # respond/static_respond exclusivity) runs per child, unchanged.
     def self.register_endpoint(name, dsl)
-      Inbound.register(
-        name,
-        Inbound::Endpoint.new(
-          name:,
-          verifier: dsl.__verifier__,
-          dispatch: dsl.__dispatch__,
-          respond: dsl.__respond__,
-          static_respond: dsl.__static_respond__,
-          challenge: dsl.__challenge__,
-          unauthorized_headers: dsl.__unauthorized_headers__,
-          challenge_required: dsl.__challenge_required__,
-        ),
-      )
+      Inbound.register(name, build_endpoint(name, dsl))
     end
     private_class_method :register_endpoint
+
+    def self.build_endpoint(name, dsl)
+      Inbound::Endpoint.new(
+        name:,
+        verifier: dsl.__verifier__,
+        dispatch: dsl.__dispatch__,
+        respond: dsl.__respond__,
+        static_respond: dsl.__static_respond__,
+        challenge: dsl.__challenge__,
+        unauthorized_headers: dsl.__unauthorized_headers__,
+        challenge_required: dsl.__challenge_required__,
+      )
+    end
+    private_class_method :build_endpoint
   end
 end

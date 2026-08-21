@@ -8,8 +8,8 @@
   side by side; they line up once `emit` is understood as always-`:auto` (it has no way to *ask* for
   async). Records the reasons the explicit case must not silently downgrade — `async` is typically
   declared because the handler outlives the vendor's ack window, and the async path acks with no
-  handler result where the sync path renders one — and the corollary for a future per-`emit`
-  `async:` override.
+  handler result where the sync path renders one — and the corollary now honored by the shipped
+  per-`emit` `async:` override, which raises rather than degrading.
 - README: correct "swap the lambda body for a DB lookup and nothing else in this gem needs to move"
   in the outbound routing section. Runtime resolution genuinely works (now covered end-to-end by
   spec), but a DB-backed subscriber store additionally wants a secret per subscriber (the signer is
@@ -40,6 +40,11 @@
   `webhook-timestamp` header deliberately diverge across retries.
 
 ### Added (Inbound)
+- **Nested-endpoint fixes:** a child re-declaring `respond` and then `static_respond` (with the
+  parent supplying one of them) was accepted, silently dropping the child's first declaration —
+  a re-declared renderer is now child-owned, so the same-block conflict raises as documented. And a
+  nested `inbound` now builds and validates every child before registering any, so a failure in a
+  later child no longer leaves earlier ones live in the process-global registry.
 - **Nested `inbound` endpoints.** An `inbound` block may now contain `endpoint(name) { … }` blocks,
   each registering as `:"#{parent}_#{child}"` and inheriting every parent declaration (overridable
   by re-declaring) except `dispatch`, which a parent cannot declare. Lets one vendor's
@@ -52,6 +57,9 @@
   would be.
 
 ### Changed (Outbound)
+- **Config now owns an immutable copy of every mutable event value**, not just the `to:` URLs. A
+  `String` `type:`/`vendor:` stayed aliased to the caller's, so `type.replace("other_event")` after
+  boot rewrote `wire_type` and every envelope emitted afterwards, despite the frozen-config contract.
 - **`sign :hmac` copies the Strings it validates.** Validation runs once at declaration, so
   retaining the caller's object let an app mutate `header:` afterwards — `replace("Content-Type")`
   walks past both the field-name grammar and the reserved-header rule, and `Deliver` then overwrites
