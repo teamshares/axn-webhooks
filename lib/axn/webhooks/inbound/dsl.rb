@@ -6,6 +6,22 @@ module Axn
       # Receiver for an `inbound` block: captures declarations (Phase 2: `verify`) and
       # exposes request resolvers. Later phases add dispatch/challenge/respond here.
       class DSL
+        # Every declaration a child `endpoint` inherits. Deliberately excludes @child_endpoints
+        # (nesting is one level deep) and @nested.
+        #
+        # Also excludes @dispatch_spec, which cannot be inherited because a parent declaring
+        # `dispatch` alongside `endpoint` blocks is rejected at registration (see
+        # Axn::Webhooks.inbound). Listing it would be inert, and it would advertise a shared-dispatch
+        # feature that does not work anyway: `dispatch` captures ONE spec hash, so a child
+        # re-declaring it replaces the parent's wholesale — there is no partial override, and a
+        # parent dispatch every child copies verbatim leaves the children differing by nothing
+        # (Codex review asked for this; declined for that reason plus the migration hazard the guard
+        # exists to catch — silently losing Inbound[:vendor] out from under a mounted route).
+        INHERITED_IVARS = %i[
+          @verify_spec @unauthorized_headers @challenge_required
+          @respond_block @static_respond_block @challenge_spec
+        ].freeze
+
         # verify :hmac, **opts | verify :standard_webhooks, **opts | verify { |req| ... }
         def verify(strategy = nil, **opts, &block)
           @verify_spec = { strategy:, opts:, block: }
@@ -48,7 +64,19 @@ module Axn
         # no-dispatch endpoint) always gets the default bare ack (or a declared `static_respond`
         # body — see below), regardless of this declaration — see Endpoint#to_response.
         def respond(&block)
+          # Checked BEFORE the discard below: without a block this stored nil after clearing the
+          # inherited alternative, booting an endpoint with no renderer at all — an undocumented way
+          # to un-declare a parent's renderer, and a typo that silently downgraded responses to bare
+          # acks (Codex review).
+          raise Axn::Webhooks::Error, "inbound endpoint's `respond` requires a block" unless block
+
+          # Endpoint rejects having both renderers set, and a child inherits BOTH ivars — so
+          # overriding an inherited `static_respond` with a `respond` has to clear it, or the child
+          # raises. Clears only an INHERITED one: declaring both in the same block stays an error
+          # rather than silently becoming last-one-wins (Codex review).
+          discard_inherited(:@static_respond_block)
           @respond_block = block
+          claim_ownership(:@respond_block)
         end
 
         # static_respond { text("...") } — a body that does NOT read the handler result (block
@@ -57,14 +85,18 @@ module Axn
         # Endpoint#default_ack. Mutually exclusive with `respond` (Endpoint#initialize raises if
         # both are declared) and never forces sync dispatch (Dispatch#async? never reads it).
         def static_respond(&block)
-          if block && !block.parameters.empty?
+          raise Axn::Webhooks::Error, "inbound endpoint's `static_respond` requires a block" unless block
+
+          if block.parameters.any?
             raise Axn::Webhooks::Error,
                   "inbound endpoint's static_respond block must take no arguments (it never reads the " \
                   "handler's result, unlike respond) — got a parameter; use `respond` instead if you need " \
                   "to read the handler's result"
           end
 
+          discard_inherited(:@respond_block) # see `respond` — cross-form override, inherited only
           @static_respond_block = block
+          claim_ownership(:@static_respond_block)
         end
 
         # challenge ->(req){ req.params["challenge"] }                          — Nylas
@@ -89,6 +121,60 @@ module Axn
         # or retarget the handler (the helper's name is its contract).
         def async(call, **opts) = { **opts, call:, async: true }
         def sync(call, **opts)  = { **opts, call:, async: false }
+
+        # endpoint(:events) { dispatch … } — declares a CHILD endpoint that inherits everything the
+        # parent block declared and may override any of it by re-declaring. One `inbound :slack`
+        # block with two `endpoint` blocks registers Inbound[:slack_interactivity] and
+        # Inbound[:slack_events]; the parent itself registers nothing.
+        def endpoint(name, &block)
+          raise ArgumentError, "`endpoint #{name.inspect}` requires a block" unless block
+          raise ArgumentError, "`endpoint #{name.inspect}` cannot be nested inside another `endpoint` — one level only" if @nested
+
+          @child_endpoints ||= {}
+          raise ArgumentError, "duplicate `endpoint #{name.inspect}` in the same inbound block" if @child_endpoints.key?(name.to_sym)
+
+          @child_endpoints[name.to_sym] = block
+        end
+
+        # Drops an ivar this DSL INHERITED from a parent `endpoint` container, leaving one declared
+        # in this very block untouched. Backs the mutually-exclusive renderer override above.
+        def discard_inherited(ivar)
+          return unless @inherited_ivars&.include?(ivar)
+
+          instance_variable_set(ivar, nil)
+          @inherited_ivars.delete(ivar)
+        end
+
+        # Marks an ivar as belonging to THIS block from here on. Without it, a child that
+        # re-declared `respond` left `@respond_block` still listed as inherited, so a following
+        # `static_respond` discarded the child's OWN block and the pair was accepted — exactly the
+        # same-block conflict the discard rule is supposed to keep raising (Codex review).
+        def claim_ownership(ivar) = @inherited_ivars&.delete(ivar)
+
+        # Internal: declared child endpoints, name => block. Empty for a plain `inbound` block.
+        def __children__ = @child_endpoints || {}
+
+        # Internal: whether `dispatch` was declared directly on THIS DSL. Read instead of
+        # `__dispatch__` so the parent-with-children check doesn't build a Router just to ask.
+        def __dispatch_declared? = !@dispatch_spec.nil?
+
+        # Internal: a fresh DSL seeded with this one's captured declarations, with `block` evaluated
+        # against it — so a child inherits everything and overrides by re-declaring.
+        #
+        # Copies the ivars rather than re-`instance_exec`ing the parent block per child (the obvious
+        # alternative): replaying the parent block would re-run any side effects in it, and would
+        # re-enter `endpoint` recursively, registering each child once per sibling.
+        def __child_dsl__(block)
+          child = self.class.new
+          inherited = INHERITED_IVARS.select { |ivar| instance_variable_defined?(ivar) }
+          inherited.each { |ivar| child.instance_variable_set(ivar, instance_variable_get(ivar)) }
+          # Recorded so `respond`/`static_respond` can tell an inherited value from one declared in
+          # the child's own block, and clear only the former.
+          child.instance_variable_set(:@inherited_ivars, inherited.dup)
+          child.instance_variable_set(:@nested, true)
+          child.instance_exec(&block)
+          child
+        end
 
         # Internal: build the verifier callable from the captured declaration.
         # For challenge-only endpoints (no dispatch, no verify declared), return a no-op verifier

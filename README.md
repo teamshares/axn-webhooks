@@ -509,6 +509,64 @@ sync unless you mark it `async` — a route that acks-async simply produces no r
 block acks it (nil result → bare 2xx), while a sync route's result is rendered. A route marked
 `async` whose handler has no adapter is reported as an exception (the same guard as `mode: :async`).
 
+**A missing adapter is only ever a fallback under `:auto`, never under an explicit request.** The
+two look inconsistent side by side — `:auto` silently runs sync, an explicit `async` 500s, and
+[outbound's `emit`](#async-posture) warns and runs sync — but they line up once you compare
+like for like: `emit` defaults to `:auto`, so its fallback is `:auto` behavior, identical to
+inbound's — and `emit(..., async: true)`, the explicit form, raises here too. The raise fires only when an app declared `async` and the configuration can't honor
+it. Downgrading that silently would be wrong twice over: `async` is usually declared *because* the
+handler outlives the vendor's ack window (Slack's 3s), so running it inline trades a clean 500 for a
+vendor timeout, a redelivery, and duplicate processing — and it changes the response the vendor
+sees, since the async path acks with no handler result while the sync path renders one (a handler
+`fail!` included). It's also the same no-silent-downgrade stance outbound's `to:` takes: a *declared*
+resolver that returns nil delivers nowhere rather than falling back to `subscribers`. That rule is what the shipped per-`emit` `async:` override follows: `emit(..., async: true)` raises
+when no adapter is configured, exactly as an explicitly-`async` inbound route does, rather than
+inheriting `Emit`'s `:auto` fallback.
+
+### Nested endpoints
+
+When several endpoints share a vendor's verification, declare it once and nest the endpoints that
+differ:
+
+```ruby
+Axn::Webhooks.inbound :slack do
+  verify :hmac, secret: ENV.fetch("SLACK_SIGNING_SECRET"), prefix: "v0=",
+                replay: { timestamp: header("X-Slack-Request-Timestamp"), within: 300 }
+  challenge_required { |req| req.params["type"] == "url_verification" }
+
+  endpoint :interactivity do
+    dispatch on: ->(e) { e["type"] }, to: { "block_actions" => async("Actions::Slack::HandleBlockActions") }
+    respond { |result| json(result.response_action) }
+  end
+
+  endpoint :events do
+    dispatch on: ->(e) { e.dig("event", "type") }, to: { "app_mention" => "Actions::Slack::HandleMention" }
+  end
+end
+# => registers Inbound[:slack_interactivity] and Inbound[:slack_events]
+```
+
+* **Each child registers as `:"#{parent}_#{child}"`.** The parent (`Inbound[:slack]`) is **not**
+  registered — a parent with `endpoint` blocks is a container, and declaring a top-level `dispatch`
+  alongside them raises at boot rather than leaving an extra endpoint nobody mounted. A parent
+  `respond`/`static_respond` is fine, and is often the point: it renders nothing on its own, and
+  one shared renderer across a vendor's endpoints is exactly what nesting is for.
+* **Children inherit every parent declaration** — `verify`, `challenge`, `challenge_required`,
+  `unauthorized_headers`, `respond`, `static_respond` — and override any of it by re-declaring it.
+  Siblings are independent; a declaration in one child never leaks into another. `dispatch` is the
+  one thing a parent cannot declare (above), so each child brings its own.
+  A child may swap renderer forms — declaring `static_respond` over an inherited `respond`, or the
+  reverse — and the inherited one is dropped. Declaring both in the *same* block is still an error.
+  There is no way to *un*-declare an inherited block outright: a child that must render nothing
+  needs the parent's `respond` moved down into the siblings that do want it.
+* **One level only.** An `endpoint` inside an `endpoint` raises.
+
+Each child is validated exactly as a standalone endpoint would be, so a child that declares
+`dispatch` without inheriting or declaring a `verify` still fails at boot.
+
+Nesting is sugar, not a new capability: a shared options hash splatted with `**`, or a shared lambda
+passed to `verify(&lambda)`, expresses the same thing and remains a fine choice.
+
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
 
 **Note on Rails autoloading**: `inbound` blocks are evaluated where they're declared — at boot, if
@@ -671,6 +729,34 @@ result.target_count   # => 1
   Each delivery gets its own stable `webhook-id`, generated once per (emission × target) and reused
   across every retry attempt of that delivery, so receivers can dedup. `emit`'s result exposes the
   full list of `webhook_ids` and a `target_count`, so a caller can record what actually went out.
+* **`failed_count`** counts deliveries that came back failed — but **only on the synchronous
+  fallback path**, and it is **always `0` on the async path**, because at `emit` time nothing has
+  failed yet: the deliveries are enqueued, and a later failure is reported by `Deliver` itself
+  (exhaustion via `on_exception`, a permanent 4xx via its own result). Note that is the *path*, not
+  adapter presence — an `emit(..., async: false)` runs inline and counts failures even when an
+  adapter is configured. `emit`'s
+  result stays `ok` even when every delivery failed — fan-out succeeded, and a subscriber being
+  down is not an emit failure. `target_count - failed_count` is the sync-path success count.
+* **Per-call overrides.** `emit` accepts `to:` and `async:`:
+
+  ```ruby
+  Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 },
+                     to:    "https://one-off.example/hook",  # String or Array
+                     async: false)
+  ```
+
+  `to:` **replaces** the event's declared targets for that call — it never merges with them, the
+  same stance a declared `to:` resolver returning nil takes. The event must still be declared (it
+  supplies the wire `type` and `vendor`), and a one-off URL is validated as http(s) at emit time,
+  raising `Axn::Webhooks::Error`. `async: true` **raises** when no adapter is configured rather
+  than running inline — a missing adapter degrades to sync only under `:auto`, never under an
+  explicit request (same rule as an inbound route marked `async`). `async: false` forces the inline
+  path and suppresses the degraded-mode warning, since a caller asking for sync isn't degraded.
+
+  There is deliberately no per-call `headers:`: it is the obvious place to hang a bearer token, and
+  it would be serialized into the async job's args and persist in the queue for the whole retry
+  lifetime — the opposite of the convention `secret:` follows (a callable re-resolved per attempt,
+  never stored). Per-destination config belongs with the DB-backed subscription store.
 * **`vendor`** stamps the same observability facet (`Axn::Webhooks.config.vendor_facet`) inbound
   endpoints already use, letting Datadog/Honeybadger group outbound deliveries by event or
   subscriber. A per-event `vendor:` overrides the block-level default; an event with neither is
@@ -705,6 +791,56 @@ fixed once at emit time (it's part of the dedup identity) — so a retried deliv
 (<value>)` — from `user_agent` in the `outbound` block (a plain value or a zero-arity callable,
 resolved per attempt).
 
+#### `sign :hmac`
+
+For a receiver that expects a plain signature header rather than the Standard Webhooks envelope:
+
+```ruby
+# minimal — one header, signature over the raw body
+sign :hmac, secret: -> { ENV.fetch("PARTNER_SECRET") }, header: "X-Signature"
+# => X-Signature: 3f9a1c…
+
+# …or a replay-protectable signature, Slack-style
+sign :hmac,
+     secret:           -> { ENV.fetch("PARTNER_SECRET") },
+     header:           "X-Signature",
+     timestamp_header: "X-Timestamp",
+     signing_string:   "v0:{timestamp}:{body}",
+     prefix:           "v0="
+# => X-Timestamp: 1755740000
+#    X-Signature: v0=3f9a1c…
+```
+
+`secret:` (plain or zero-arity callable, re-resolved per attempt) and `header:` are required — there
+is no universal signature-header name, the same reason inbound's `verify :hmac` requires
+`signature:`. `digest:` (`:sha256`), `encoding:` (`:hex`), `prefix:` (`nil`) and `signing_string:`
+(`"{body}"`) mirror the inbound verifier's options, so a `sign :hmac` sender and a `verify :hmac`
+receiver configured alike round-trip.
+
+`digest:`, `encoding:` and both header names are validated at declaration time: an unsupported
+digest/encoding, or a header name that isn't a valid HTTP field token (no spaces, colons or
+newlines), fails at boot rather than inside every delivery attempt. `header:` and
+`timestamp_header:` may not be the same name as each other, nor any header the delivery pipeline
+sets after signing: `content-type` and `user-agent` (which `Deliver` merges in afterwards) or
+`content-length`/`transfer-encoding` (which the transport rewrites at send time — the first
+regenerated from the request body, the second deleted outright). In every one
+of those cases the later value replaces the signature and each delivery ships unverifiable. Braces in
+`signing_string:` must be exactly `{timestamp}` or `{body}`; a malformed one (`{time-stamp}`, or an
+unclosed `{timestamp`) is rejected rather than silently signed as literal text, so a literal brace
+is not supported there.
+
+`signing_string:` is a **template**, not a callable: `{timestamp}` and `{body}` are the only
+placeholders, and an unknown one is rejected at declaration time — which a lambda would make
+impossible. Referencing `{timestamp}` without declaring `timestamp_header:` is also rejected: the
+receiver would have no way to reconstruct the signed string. If you need logic a template can't
+express, use the custom `sign { |id:, timestamp:, body:| … }` block, which has always been there.
+
+A secret that resolves to a blank or non-String value raises `Axn::Webhooks::Error` rather than
+signing with an empty key — the error names the value's class or shape, never its bytes.
+
+Note there is no id header: a signature bound to a per-message id is what `:standard_webhooks` is
+for.
+
 ### Transport
 
 The HTTP call is an injectable seam (`.post(url:, body:, headers:) -> Transport::Response`, a
@@ -721,7 +857,11 @@ Mirrors inbound's `:auto`: **async when an axn async adapter is configured** for
 `async :sidekiq`/`async :active_job` global default, per axn's own presence-check semantics — never
 a branch on adapter type), else a **synchronous inline fallback** so the gem works standalone without
 Sidekiq. The sync path is best-effort: no cross-process retries/backoff, and it logs a warning (once
-per `emit` call, not once per subscriber) so the degraded mode is never silent.
+per `emit` call, not once per subscriber) so the degraded mode is never silent. That degrade-rather-
+than-raise behavior is what `:auto` means, and it is the **default**; a caller who explicitly demands
+async with `emit(..., async: true)` gets a raise instead when no adapter is configured, exactly as an
+explicitly-`async` inbound route does (see [per-route sync/async](#per-route-syncasync-on-one-endpoint)
+and the per-call overrides above).
 
 ### Delivery contract
 
@@ -791,7 +931,24 @@ app's own `outbound` block (`to:` / `subscribers`), not in this gem. A general-p
 self-registration store — where receivers register their own endpoint URLs at runtime, no deploy
 required to add a listener — is a real future shape, but it's **intentionally deferred until a real
 use-case justifies it**. The `subscribers`/`to:` lambda is the seam it will slot into with no API
-change: swap the lambda body for a DB lookup and nothing else in this gem needs to move.
+change: both are resolved fresh on **every** `emit`, never memoized at boot, so swapping the lambda
+body for a DB lookup already picks up rows added or removed at runtime.
+
+That much works today. What a DB-backed store also wants, and this gem does **not** have yet:
+
+* **A secret per subscriber.** `sign` installs one process-global signer, and it is handed only
+  `id:`, `timestamp:` and `body:` — no URL, no subscriber handle. A shared secret across every row
+  is the only shape currently expressible.
+* **Validation of what the resolver returns.** A statically declared `to:` array is checked for
+  http(s) URLs at boot; a lambda's return value is not (it can't be). A malformed row is reported to
+  `Axn.config.on_exception` when `Deliver` rejects it, but `emit`'s own result still counts it in
+  `target_count` and still reports `ok`. Validate rows yourself, and treat URLs that came from
+  outside your own deploy as untrusted (there is no SSRF allowlist here).
+* **A way to record what went where.** `webhook_ids` is a bare Array with no URL attached, so
+  persisting a delivery row per subscription means re-resolving and relying on ordering.
+
+Resolution also runs inline in whatever process called `emit`, so a store that raises (a database
+outage) raises out of `emit` — inside your `after_commit`, if that's where you emit from.
 
 ### Boot-time validation
 

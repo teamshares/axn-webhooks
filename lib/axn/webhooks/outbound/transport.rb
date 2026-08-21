@@ -25,6 +25,18 @@ module Axn
           Errno::ETIMEDOUT, SocketError, IOError
         ].freeze
 
+        # Headers this transport owns regardless of what a caller sets. Net::HTTP rewrites both
+        # inside `send_request_with_body`, AFTER the caller's headers have been applied:
+        # Content-Length is regenerated from the body, Transfer-Encoding is deleted outright. A
+        # signature emitted under either name never leaves the process.
+        #
+        # This is the complete set for the built-in transport, established by observation rather
+        # than by reading the stdlib: `spec/.../transport_reserved_headers_spec.rb` drives a real
+        # socket and asserts exactly these two are clobbered while others (Host, Connection,
+        # Accept-Encoding, custom names) survive. The transport_spec stubs `Net::HTTP#request`, so
+        # it cannot see this — the rewriting happens inside the call it replaces.
+        RESERVED_HEADERS = %w[content-length transfer-encoding].freeze
+
         module_function
 
         def post(url:, body:, headers:, open_timeout: 5, read_timeout: 10)

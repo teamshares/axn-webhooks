@@ -14,19 +14,26 @@ module Axn
     # Process-global registration for outbound webhook emission (a single `outbound` block).
     module Outbound
       @config = nil
+      # Guards install/reset! only. `config` READS stay unsynchronized: what's published is a
+      # frozen Config, so a reader either sees the old one or the new one and never a half-built
+      # object — and `config` is read on every delivery attempt, where a lock would be real
+      # overhead protecting nothing.
+      @mutex = Mutex.new
 
       class << self
         def install(config)
-          unless @config.nil?
-            Axn.config.logger.warn(
-              "[axn-webhooks] a second `Axn::Webhooks.outbound` block replaces the first — only one outbound declaration is active at a time",
-            )
-          end
+          @mutex.synchronize do
+            unless @config.nil?
+              Axn.config.logger.warn(
+                "[axn-webhooks] a second `Axn::Webhooks.outbound` block replaces the first — only one outbound declaration is active at a time",
+              )
+            end
 
-          @config = config
+            @config = config
+          end
         end
 
-        def reset! = @config = nil
+        def reset! = @mutex.synchronize { @config = nil }
 
         def config
           @config || raise(Axn::Webhooks::Error, "no `outbound` block declared — call Axn::Webhooks.outbound { … } at boot")
@@ -51,8 +58,15 @@ module Axn
     # ahead of `call!` would raise before axn's executor ever runs -- bypassing `on_exception`
     # reporting for what should be a loud, REPORTED failure (Codex P2 finding). `Emit` resolves its
     # own vendor once it's running inside that boundary.
-    def self.emit(event, data: {})
-      Outbound::Emit.call!(event:, data:)
+    #
+    # `to:` and `async:` are per-call overrides. `to:` REPLACES the event's declared targets for
+    # this call only (never merges) — the event must still be declared, since it supplies the wire
+    # `type` and `vendor`. `async: true` requires a configured adapter and raises without one;
+    # `async: false` forces the inline path. Omitted means today's `:auto`.
+    # rubocop:disable Naming/MethodParameterName
+    def self.emit(event, data: {}, to: nil, async: nil)
+      Outbound::Emit.call!(event:, data:, to:, async:)
     end
+    # rubocop:enable Naming/MethodParameterName
   end
 end

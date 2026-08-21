@@ -60,6 +60,24 @@ module Axn
         setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT, validate: TIMEOUT_VALIDATE
         setting :read_timeout, default: DEFAULT_READ_TIMEOUT, validate: TIMEOUT_VALIDATE
 
+        # The problem with `url` as an outbound target, or nil when there is none. A predicate
+        # rather than a raiser, because its two callers disagree on the error class: a declaration
+        # mistake at boot is an ArgumentError (see validate_url!), while a bad one-off `emit(to:)`
+        # URL is an Axn::Webhooks::Error a caller may rescue at runtime (see Outbound::Emit).
+        def self.url_problem(url)
+          # A non-String (e.g. a `URI`) would parse fine via `#to_s`, but the ORIGINAL object is
+          # what reaches `Deliver`, which `expects :url, type: String` and rejects. Require a
+          # String outright rather than normalizing.
+          return "must be a String (got #{url.class})" unless url.is_a?(String)
+
+          uri = URI.parse(url)
+          return nil if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
+
+          "#{url.inspect} must be http(s)"
+        rescue URI::InvalidURIError
+          "#{url.inspect} is not a valid URL"
+        end
+
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
                        vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil)
           @signer = signer
@@ -75,6 +93,8 @@ module Axn
           self.read_timeout = read_timeout unless read_timeout.nil?
 
           @events.each { |name, spec| validate_event!(name, spec) }
+
+          deep_freeze!
         end
 
         attr_reader :signer
@@ -103,6 +123,56 @@ module Axn
         end
 
         private
+
+        # Freezes the CONTAINERS we own, never the caller's objects: a `to:` resolver, the signer,
+        # an injected transport and a `user_agent` callable all stay mutable — they belong to the
+        # app, and freezing them could break a memoizing resolver. A statically-declared `to:`
+        # Array is ours once validated, so it freezes.
+        def deep_freeze!
+          materialize_settings!
+          @events.each_value do |spec|
+            # COPY rather than freeze in place, and cover EVERY value, not just `to:`: `event to:
+            # SOME_CONSTANT` would otherwise leave the application holding a frozen object it never
+            # froze, while the Strings inside stayed mutable — so `url.replace("ftp://…")` rewrote
+            # the published config past the boot-time validation that already ran on it, and a
+            # mutable `type:`/`vendor:` rewrote `wire_type`/`vendor_for` the same way (Codex review).
+            spec.transform_values! { |value| config_owned(value) }
+            spec.freeze
+          end
+          @events.freeze
+          freeze
+        end
+
+        # Read every declared setting once (so Configurable's lazy memoization happens BEFORE the
+        # freeze) and replace any mutable value with a config-owned copy — `vendor`/`user_agent` are
+        # plain Strings the caller may still hold, and a later `replace()` would otherwise change the
+        # observability facet and the delivery User-Agent header despite the frozen-config contract
+        # (Codex review). Callables, Modules and Numerics come back from config_owned untouched, so
+        # only the copyable shapes are reassigned. Without this, a frozen Config raises FrozenError from the READER of any setting
+        # the `outbound` block never explicitly assigned — `backoff`/`transport` escape only
+        # because their defaults are dynamic (`-> { … }`) and recomputed rather than memoized.
+        #
+        # Derived from Configurable rather than a hand-maintained list: a constant listing the
+        # settings has to be updated in lockstep with every new `setting` declaration, and
+        # forgetting turns that setting's own reader into a FrozenError at runtime. Nothing to keep
+        # in sync now — adding a `setting` is enough.
+        def materialize_settings!
+          Axn::Configurable.declared_settings_for(self.class).each_key do |name|
+            value = public_send(name)
+            owned = config_owned(value)
+            public_send(:"#{name}=", owned) unless owned.equal?(value)
+          end
+        end
+
+        # An immutable copy the config owns, for the shapes an event spec can hold. A callable `to:`
+        # (or anything else the app supplied) is returned untouched — not ours to copy or freeze.
+        def config_owned(value)
+          case value
+          when String then value.dup.freeze
+          when Array then value.map { |element| config_owned(element) }.freeze
+          else value
+          end
+        end
 
         def fetch(event)
           @events.fetch(event.to_sym) do
@@ -143,19 +213,10 @@ module Axn
         end
 
         def validate_url!(name, url)
-          # A non-String (e.g. a `URI` object) would parse fine here via `#to_s`, but the ORIGINAL
-          # object is what stays in `@events` and is later handed to `Deliver` as `url:` — which
-          # `expects :url, type: String` and rejects at emission/delivery time despite passing this
-          # boot-time check (Codex P2 finding). Require a String outright rather than normalizing,
-          # matching the no-silent-coercion stance the `to:` Array/callable check above already takes.
-          raise ArgumentError, "outbound event #{name.inspect} `to:` URL must be a String (got #{url.class})" unless url.is_a?(String)
+          problem = self.class.url_problem(url)
+          return if problem.nil?
 
-          uri = URI.parse(url)
-          return if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
-
-          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{url.inspect} must be http(s)"
-        rescue URI::InvalidURIError
-          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{url.inspect} is not a valid URL"
+          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{problem}"
         end
       end
     end

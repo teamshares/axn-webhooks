@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Documentation
+- README: explain why a missing async adapter degrades to sync under `:auto` (inbound and outbound
+  alike) but raises under an explicitly-declared `async`. The three behaviors read as inconsistent
+  side by side; they line up once `emit`'s *default* is understood as `:auto` (a per-call
+  `async: true`, added in this same release, is the explicit form and raises like inbound does). Records the reasons the explicit case must not silently downgrade — `async` is typically
+  declared because the handler outlives the vendor's ack window, and the async path acks with no
+  handler result where the sync path renders one — and the corollary now honored by the shipped
+  per-`emit` `async:` override, which raises rather than degrading.
+- README: correct "swap the lambda body for a DB lookup and nothing else in this gem needs to move"
+  in the outbound routing section. Runtime resolution genuinely works (now covered end-to-end by
+  spec), but a DB-backed subscriber store additionally wants a secret per subscriber (the signer is
+  process-global and never sees the URL), validation of resolver-returned URLs (only static `to:`
+  arrays are boot-checked; a malformed row is reported but still counted in `emit`'s `target_count`),
+  and a `webhook_id`→URL correlation for persisting delivery records. Also notes that resolution runs
+  inline in the emitting process, so a store outage raises out of `emit`.
 - README: document URL-signing verifiers, and correct the Twilio example. Vendors that sign the
   request URL (Twilio) must strip the trailing slash a mount adds — Rack leaves `PATH_INFO` as `"/"`
   when the mount point is the whole route, so `Request#url` carries a slash the vendor's registered
@@ -24,6 +38,97 @@
   equal-jitter default backoff, the expanded retryable-status list, `Outbound.reset!` as the
   test-teardown API, and that a delivery's envelope-body `timestamp` and its signed
   `webhook-timestamp` header deliberately diverge across retries.
+
+### Added (Inbound)
+- **A bare `respond`/`static_respond` (no block) now raises at declaration** instead of quietly
+  registering an endpoint with no renderer. Under nesting that was also an undocumented way to
+  un-declare a parent's renderer — the block-less call cleared the inherited alternative and then
+  stored `nil` — and on a plain endpoint it silently downgraded responses to bare acknowledgements.
+- **Re-declaring a vendor now replaces its whole registered set.** With nesting, one `inbound :slack`
+  owns N registry keys, so overwriting-only left routes mounted that the new declaration no longer
+  defined — a child dropped from the block, or a vendor switching between nested and plain, kept
+  serving its previous verifier and handler. All four transitions now replace exactly. Replacement
+  reclaims only the keys a declaration still owns, so when two declarations generate the same
+  endpoint name (`inbound :slack` with `endpoint(:events)` vs. a plain `inbound :slack_events`)
+  re-declaring the first can't delete the second's live route; the takeover is warned, naming both.
+- **Nested-endpoint fixes:** a child re-declaring `respond` and then `static_respond` (with the
+  parent supplying one of them) was accepted, silently dropping the child's first declaration —
+  a re-declared renderer is now child-owned, so the same-block conflict raises as documented. And a
+  nested `inbound` now builds and validates every child before registering any, so a failure in a
+  later child no longer leaves earlier ones live in the process-global registry.
+- **Nested `inbound` endpoints.** An `inbound` block may now contain `endpoint(name) { … }` blocks,
+  each registering as `:"#{parent}_#{child}"` and inheriting every parent declaration (overridable
+  by re-declaring) except `dispatch`, which a parent cannot declare. Lets one vendor's
+  `verify`/`challenge`/`respond` be written once across several endpoints.
+  The parent itself registers nothing; declaring a top-level `dispatch` alongside `endpoint` blocks
+  raises at boot, as does nesting an `endpoint` inside an `endpoint` or reusing a child name. A
+  parent `respond`/`static_respond` is allowed and inherited — sharing one renderer across a
+  vendor's endpoints is a primary use — and a child may swap forms, dropping the inherited one,
+  while declaring both in the same block stays an error. Each child is validated exactly as a standalone endpoint
+  would be.
+
+### Changed (Outbound)
+- **`sign :hmac` also rejects `Content-Length`.** The transport regenerates it from the request body
+  at send time, so a signature emitted under that name never left the process — verified on the
+  wire, the receiver saw the body length. Reserved names are `content-type`/`user-agent` (merged in
+  by `Deliver`) plus `content-length`/`transfer-encoding` (rewritten by `Transport` inside
+  `Net::HTTP#send_request_with_body`, after the caller's headers are applied). That transport set is
+  established by observation, not by reading the stdlib: a spec drives a real socket and asserts
+  exactly those two are clobbered while `Host`, `Connection`, `Accept-Encoding` and custom names
+  survive — the existing transport spec stubs `Net::HTTP#request` and so cannot see any of it.
+- **Config now owns an immutable copy of every mutable value it holds** — per-event `to:` URLs,
+  `type:` and `vendor:`, and the block-level `vendor`/`user_agent` settings. Each stayed aliased to
+  the caller's String, so a later `replace()` rewrote `wire_type`, the observability facet, the
+  delivery `User-Agent`, or an already-validated target URL, despite the frozen-config contract.
+  Callables, Modules and Numerics are left untouched — they belong to the app.
+- **`sign :hmac` copies the Strings it validates.** Validation runs once at declaration, so
+  retaining the caller's object let an app mutate `header:` afterwards — `replace("Content-Type")`
+  walks past both the field-name grammar and the reserved-header rule, and `Deliver` then overwrites
+  the signature. `header:`, `timestamp_header:`, `signing_string:` and `prefix:` are now duped and
+  frozen. (`secret:` deliberately isn't: it may be a callable, and a String one is re-read per call.)
+- **`sign :hmac` and per-emit `async:` are validated harder at the boundary.** `digest:`/`encoding:`
+  are checked against `Signature`'s supported sets at declaration time (a typo previously booted
+  fine and raised inside every delivery attempt — on the async path, after the job was enqueued);
+  header names must be valid HTTP field tokens (`Net::HTTP` serializes whatever key it is handed, so
+  a space produced a malformed request and a newline could append wire headers); and `header:`/
+  `timestamp_header:` may not collide case-insensitively, which silently replaced the signature with
+  the timestamp. Neither may name a header `Deliver` manages (`content-type`/`user-agent`),
+  which loses the signature the same way, and a malformed `signing_string:` brace (`{time-stamp}`,
+  `{timestamp`) is rejected instead of being signed as literal text. `emit(async:)` is now `type: :boolean`, so a config-derived `"false"` no longer
+  reads as truthy and demands async.
+- **`emit` accepts per-call `to:` and `async:` overrides.** `to:` (a String or Array) replaces the
+  event's declared targets for one call — never merges — and validates the one-off URL at emit time
+  as an `Axn::Webhooks::Error`. `async: true` raises when no adapter is configured rather than
+  silently running inline (a missing adapter degrades only under `:auto`, never under an explicit
+  request); `async: false` forces the inline path and suppresses the degraded-mode warning. No
+  per-call `headers:` — per-destination config is deferred to the DB-backed subscription store,
+  since a Hash of headers would persist a bearer token in async job args for the whole retry
+  lifetime.
+- **Added `sign :hmac`**, a parametric outbound HMAC preset mirroring inbound's `verify :hmac`
+  (`digest:`/`encoding:`/`prefix:`/`signing_string:`), so a receiver expecting a plain
+  `X-Signature: <hex>` no longer needs a hand-written signer block. `header:` is required; an
+  optional `timestamp_header:` plus a `{timestamp}`/`{body}` template covers Slack-style
+  `v0:ts:body` schemes. The template is validated at declaration time — unknown placeholders, and
+  `{timestamp}` with no header to carry it, are both rejected at boot — as is a `secret:` callable
+  that can't be invoked with zero arguments. A secret resolving to a blank or non-String value
+  raises rather than signing with an empty key, and the error never carries the secret's bytes.
+- **`emit` now exposes `failed_count`.** The synchronous fallback path called `Deliver.call` and
+  discarded the result, so a failed delivery still left `emit` `ok` with the target counted as
+  delivered. `failed_count` is always `0` on the async path (nothing has failed at emit time), and
+  `emit`'s own result deliberately stays `ok` regardless — the count is the surface, not the outcome.
+- **`Outbound::Config` is now genuinely frozen**, making good on the "immutable" claim in its own doc
+  comment. Freezing naively would have broken reads: `Axn::Configurable` memoizes a static default
+  into an ivar on first read, so any setting an `outbound` block never assigned (`max_attempts`,
+  `vendor`, `user_agent`, `open_timeout`, `read_timeout`) raised `FrozenError` **from the reader**.
+  `Config#initialize` now materializes all seven settings before freezing itself, the events map and
+  each event spec — copying a static `to:` array rather than freezing the caller's own object, which
+  previously left an application holding a frozen constant it never froze while its Strings stayed
+  mutable, so a `String#replace` could rewrite the published config past its boot-time validation.
+  The list of settings to materialize is derived from `Axn::Configurable` rather
+  than hand-maintained, so adding a new `setting` needs nothing else — forgetting would otherwise
+  turn that setting's own reader into a `FrozenError`. Caller-supplied objects — the signer, a `to:`
+  resolver, an injected transport — are deliberately left mutable. `Outbound.install`/`reset!` are serialized behind a mutex; `config`
+  reads stay lock-free, which is safe precisely because what they publish is frozen.
 
 ### Fixed (Outbound)
 - **`sign :standard_webhooks, secret:` now accepts a callable**, resolved fresh per signing attempt —
