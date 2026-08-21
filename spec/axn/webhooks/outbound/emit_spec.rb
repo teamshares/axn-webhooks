@@ -4,7 +4,10 @@ require "base64"
 require "json"
 
 RSpec.describe "Axn::Webhooks.emit" do
-  after { Axn::Webhooks::Outbound.reset! }
+  after do
+    Axn::Webhooks::Outbound.reset!
+    Axn::Webhooks.reset_config!
+  end
 
   before do
     Axn::Webhooks.outbound do
@@ -83,5 +86,27 @@ RSpec.describe "Axn::Webhooks.emit" do
     Axn::Webhooks.emit(:lead_signed, data: {})
 
     expect(calls.first[:vendor]).to eq(:internal)
+  end
+
+  it "stamps :vendor on Emit's OWN dimension, not only on the Deliver it enqueues" do
+    # Regression: resolving `@vendor` inside `#call` (see the unknown-event fix above) is too late
+    # for axn's own instrumentation — `dimension`/`tag` facets resolve input-phase, i.e. EAGERLY
+    # BEFORE the body runs, so they'd see `@vendor` still unset and stamp nil (Codex P2 finding).
+    Axn::Webhooks::Outbound.reset!
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+      vendor :internal
+      event :lead_signed, to: ["https://a.example/hook"]
+    end
+    Axn::Webhooks.configure { |c| c.vendor_facet = :dimension }
+
+    events = []
+    callback = ->(*, payload) { events << payload }
+    ActiveSupport::Notifications.subscribed(callback, "axn.call") do
+      Axn::Webhooks.emit(:lead_signed, data: {})
+    end
+
+    payload = events.find { |e| e[:action].instance_of?(Axn::Webhooks::Outbound::Emit) }
+    expect(payload[:dimensions]).to include(vendor: "internal")
   end
 end

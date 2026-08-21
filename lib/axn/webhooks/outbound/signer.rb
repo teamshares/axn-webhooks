@@ -70,10 +70,19 @@ module Axn
             secret = resolve_secret
             raise invalid_secret_error(secret) unless secret.is_a?(String) && secret.start_with?("whsec_")
 
-            decoded = Verifiers::StandardWebhooks.decode_secret(secret)
+            decoded = decode_or_reject(secret)
             raise invalid_secret_error(secret) if decoded.empty?
 
             decoded
+          end
+
+          # Scoped to ONLY the Base64 decode: a callable secret's own resolver can raise its own
+          # ArgumentError for a completely different reason (e.g. a secret-store wrapper rejecting a
+          # malformed response) — wrapping `resolve_secret` in this rescue would silently rewrite
+          # that operational failure as a generic invalid-secret message, discarding the resolver's
+          # actual diagnostic before it ever reaches Axn's exception reporter (Codex P2 finding).
+          def decode_or_reject(secret)
+            Verifiers::StandardWebhooks.decode_secret(secret)
           rescue ArgumentError
             raise invalid_secret_error(secret)
           end

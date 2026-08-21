@@ -68,7 +68,17 @@
 - `Axn::Webhooks.emit` no longer resolves the event's `vendor` ahead of `Emit.call!` — that lookup
   raises the same "unknown outbound event" error `Emit` itself already raises internally, but doing
   it before entering the action bypassed axn's executor (and its `on_exception` reporting) for an
-  unregistered event, silently downgrading what's meant to be a loud, reported failure.
+  unregistered event, silently downgrading what's meant to be a loud, reported failure. `Emit`'s
+  `vendor` reader now computes `Config#vendor_for(event)` fresh on every read rather than caching it
+  into an ivar set inside `#call` — axn resolves `dimension`/`tag` facets input-phase (eagerly,
+  before the body runs), so a value only set inside `#call` read as unset there: `Emit`'s own
+  `:vendor` facet stamped `nil` even though the identical value, threaded down to `Deliver`, stamped
+  correctly.
+- `StandardWebhooksSigner#decoded_secret`'s `rescue ArgumentError` is now scoped to only the Base64
+  decode step, not the whole method — a callable `secret:`'s own resolver raising `ArgumentError`
+  for an unrelated reason (e.g. a secret-store wrapper rejecting a malformed response) was
+  previously rewritten into the generic invalid-secret message, discarding the resolver's actual
+  diagnostic before Axn's exception reporter ever saw it.
 
 ### Added (Outbound)
 - **`vendor`** — a block-level default (and per-event override) that stamps the same

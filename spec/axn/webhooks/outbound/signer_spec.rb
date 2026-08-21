@@ -42,6 +42,19 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
       expect(calls).to eq(2)
     end
 
+    # The broad `rescue ArgumentError` around the whole method previously caught an ArgumentError
+    # raised by the resolver ITSELF (e.g. a secret-store wrapper rejecting a bad response) and
+    # rewrote it as the generic invalid-secret message, discarding the resolver's own diagnostic —
+    # only Base64.strict_decode64's own ArgumentError (invalid base64) is meant to be caught here
+    # (Codex P2 finding).
+    it "preserves an exception raised by the secret resolver itself, rather than rewriting it as an invalid-secret error" do
+      resolver = -> { raise ArgumentError, "secret store returned an invalid response" }
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+
+      expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
+        .to raise_error(ArgumentError, "secret store returned an invalid response")
+    end
+
     it "raises a named error when the resolved secret isn't a decodable whsec_ value" do
       signer = described_class.build(strategy: :standard_webhooks, opts: { secret: "not-whsec" }, block: nil)
 

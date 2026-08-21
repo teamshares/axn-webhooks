@@ -22,7 +22,6 @@ module Axn
         def call
           config = Axn::Webhooks::Outbound.config
           type = config.wire_type(event)
-          @vendor = config.vendor_for(event)
           warn_sync_fallback(type) unless async_configured?
 
           ids = config.targets_for(event).map do |url|
@@ -36,13 +35,16 @@ module Axn
 
         private
 
-        # Overrides the plain `expects :vendor` reader VendorFacet declared above: an unknown event
-        # would otherwise need resolving via `Config#vendor_for` BEFORE this action even runs (see
-        # `Axn::Webhooks.emit`'s comment) to satisfy that expectation, which is exactly what defeats
-        # axn's exception reporting. Resolved once per call, in `#call`, after `wire_type` has
-        # already validated the event -- so both this method and VendorFacet's `dimension`/`tag`
-        # resolvers (which call this same reader) see the config-derived vendor.
-        attr_reader :vendor
+        # Overrides the plain `expects :vendor` reader VendorFacet declared above. Computed FRESH on
+        # every call (not memoized into an ivar set inside `#call`): axn resolves `dimension`/`tag`
+        # facets input-phase, i.e. eagerly BEFORE the body runs, so a value only set inside `#call`
+        # would still read as unset there — Emit's own `:vendor` dimension/tag would stamp nil even
+        # though the identical lookup, threaded down to `Deliver`, stamps correctly (Codex P2
+        # finding). Reading `config.vendor_for(event)` here still keeps `fetch`'s unknown-event raise
+        # inside axn's executor (whichever facet-resolution or body call reaches it first is already
+        # running under axn's own exception-reporting boundary) — the ordering `Axn::Webhooks.emit`'s
+        # comment cares about is never resolving this ahead of `Emit.call!` itself.
+        def vendor = Axn::Webhooks::Outbound.config.vendor_for(event)
 
         # Async when an adapter is configured for Deliver, else a warned best-effort sync fallback
         # (no cross-process retries). Presence check only — never branches on adapter type.
