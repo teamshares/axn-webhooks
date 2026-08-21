@@ -78,14 +78,25 @@ module Axn
 
                   CallableArity.accepts?(v, 1) || "must be a callable accepting the parsed URL"
                 }
+        # Per-destination extra headers (e.g. a subscriber's bearer token), resolved fresh per
+        # DELIVERY ATTEMPT from the Subscriber -- never stored, same convention `sign`'s `secret:`
+        # follows -- so nothing here ever sits in a Sidekiq job payload. 0-arity (ignores the
+        # subscriber) or 1-arity (receives it); nil by default (no extra headers).
+        setting :headers,
+                validate: lambda { |v|
+                  next "must be a callable accepting zero or one arguments (the resolved Subscriber)" unless v.respond_to?(:call)
+
+                  (CallableArity.accepts?(v, 0) || CallableArity.accepts?(v, 1)) ||
+                    "must be a callable accepting zero or one arguments (the resolved Subscriber)"
+                }
 
         # The problem with `url` as an outbound target, or nil when there is none. A predicate
         # rather than a raiser, because its two callers disagree on the error class: a declaration
         # mistake at boot is an ArgumentError (see validate_url!), while a bad one-off `emit(to:)`
         # URL is an Axn::Webhooks::Error a caller may rescue at runtime (see Outbound::Emit). Shape
-        # only (no host policy) -- Emit's one-off `to:` override doesn't have a Config instance's
-        # `allowed_hosts`/`allow_url` in scope at this call site yet; closing that gap is tracked
-        # separately (PRO-3214 follow-up), not silently done here.
+        # only (no host policy) -- `Outbound::Emit#resolve_targets` applies `allowed_hosts`/
+        # `allow_url` itself via `TargetPolicy.check!` for the one-off `to:` override; this predicate
+        # stays a pure URL-shape check so `validate_url!`'s narrower boot-time contract doesn't drift.
         def self.url_problem(url)
           TargetPolicy.parse_url!(url)
           nil
@@ -97,7 +108,7 @@ module Axn
         # call site 1:1; a Hash-options refactor would ripple through every caller for no real gain.
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
                        vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil,
-                       allowed_hosts: nil, allow_url: nil)
+                       allowed_hosts: nil, allow_url: nil, headers: nil)
           # rubocop:enable Metrics/ParameterLists
           @signer = signer
           @events = events # { Symbol => { to:, type:, vendor: } }
@@ -111,6 +122,7 @@ module Axn
           self.open_timeout = open_timeout unless open_timeout.nil?
           self.read_timeout = read_timeout unless read_timeout.nil?
           self.allowed_hosts = allowed_hosts unless allowed_hosts.nil?
+          self.headers = headers unless headers.nil?
           self.allow_url = allow_url unless allow_url.nil?
 
           @events.each { |name, spec| validate_event!(name, spec) }

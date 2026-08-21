@@ -18,6 +18,7 @@ module Axn
           @read_timeout = nil
           @allowed_hosts = nil
           @allow_url = nil
+          @headers = nil
         end
 
         def sign(strategy = nil, **opts, &block)
@@ -56,6 +57,11 @@ module Axn
         # return truthy to allow the target through. Both nil by default (no host policy at all).
         def allow_url(callable = nil, &block) = @allow_url = callable || block
 
+        # Per-destination extra headers (e.g. a subscriber's bearer token) -- resolved fresh per
+        # DELIVERY ATTEMPT from the Subscriber, never stored, same convention `sign`'s `secret:`
+        # follows. 0-arity (ignores the subscriber) or 1-arity (receives it). nil by default.
+        def headers(callable = nil, &block) = @headers = callable || block
+
         # rubocop:disable Naming/MethodParameterName
         def event(name, to: nil, type: nil, vendor: nil)
           @events[name.to_sym] = { to:, type:, vendor: }
@@ -87,6 +93,7 @@ module Axn
             read_timeout: @read_timeout,
             allowed_hosts: @allowed_hosts,
             allow_url: @allow_url,
+            headers: @headers,
           )
         end
       end
