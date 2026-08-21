@@ -40,6 +40,10 @@
   `webhook-timestamp` header deliberately diverge across retries.
 
 ### Added (Inbound)
+- **A bare `respond`/`static_respond` (no block) now raises at declaration** instead of quietly
+  registering an endpoint with no renderer. Under nesting that was also an undocumented way to
+  un-declare a parent's renderer — the block-less call cleared the inherited alternative and then
+  stored `nil` — and on a plain endpoint it silently downgraded responses to bare acknowledgements.
 - **Re-declaring a vendor now replaces its whole registered set.** With nesting, one `inbound :slack`
   owns N registry keys, so overwriting-only left routes mounted that the new declaration no longer
   defined — a child dropped from the block, or a vendor switching between nested and plain, kept

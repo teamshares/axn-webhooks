@@ -273,6 +273,48 @@ RSpec.describe "nested inbound endpoints" do
     end
   end
 
+  it "rejects a bare `respond` rather than silently un-declaring the inherited renderer" do
+    # Without a block, the override logic cleared the inherited alternative and then stored nil —
+    # booting an endpoint with NO renderer. That is both an undocumented way to un-declare a
+    # parent's renderer (the README says there isn't one) and a typo that silently downgrades
+    # responses to bare acks (Codex review).
+    expect do
+      Axn::Webhooks.inbound :slack do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        static_respond { text("parent") }
+
+        endpoint(:events) do
+          dispatch to: "HandlerB"
+          respond
+        end
+      end
+    end.to raise_error(Axn::Webhooks::Error, /`respond` requires a block/)
+  end
+
+  it "rejects a bare `static_respond` the same way" do
+    expect do
+      Axn::Webhooks.inbound :slack do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        respond { |_result| text("parent") }
+
+        endpoint(:events) do
+          dispatch to: "HandlerB"
+          static_respond
+        end
+      end
+    end.to raise_error(Axn::Webhooks::Error, /`static_respond` requires a block/)
+  end
+
+  it "rejects a bare renderer on a plain, unnested endpoint too" do
+    expect do
+      Axn::Webhooks.inbound :vendor do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        dispatch to: "HandlerA"
+        respond
+      end
+    end.to raise_error(Axn::Webhooks::Error, /`respond` requires a block/)
+  end
+
   it "rejects a parent that both declares endpoints and dispatches itself" do
     expect do
       Axn::Webhooks.inbound :slack do

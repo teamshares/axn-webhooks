@@ -64,6 +64,12 @@ module Axn
         # no-dispatch endpoint) always gets the default bare ack (or a declared `static_respond`
         # body — see below), regardless of this declaration — see Endpoint#to_response.
         def respond(&block)
+          # Checked BEFORE the discard below: without a block this stored nil after clearing the
+          # inherited alternative, booting an endpoint with no renderer at all — an undocumented way
+          # to un-declare a parent's renderer, and a typo that silently downgraded responses to bare
+          # acks (Codex review).
+          raise Axn::Webhooks::Error, "inbound endpoint's `respond` requires a block" unless block
+
           # Endpoint rejects having both renderers set, and a child inherits BOTH ivars — so
           # overriding an inherited `static_respond` with a `respond` has to clear it, or the child
           # raises. Clears only an INHERITED one: declaring both in the same block stays an error
@@ -79,7 +85,9 @@ module Axn
         # Endpoint#default_ack. Mutually exclusive with `respond` (Endpoint#initialize raises if
         # both are declared) and never forces sync dispatch (Dispatch#async? never reads it).
         def static_respond(&block)
-          if block && !block.parameters.empty?
+          raise Axn::Webhooks::Error, "inbound endpoint's `static_respond` requires a block" unless block
+
+          if block.parameters.any?
             raise Axn::Webhooks::Error,
                   "inbound endpoint's static_respond block must take no arguments (it never reads the " \
                   "handler's result, unlike respond) — got a parameter; use `respond` instead if you need " \
