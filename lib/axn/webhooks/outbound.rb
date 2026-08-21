@@ -58,8 +58,15 @@ module Axn
     # ahead of `call!` would raise before axn's executor ever runs -- bypassing `on_exception`
     # reporting for what should be a loud, REPORTED failure (Codex P2 finding). `Emit` resolves its
     # own vendor once it's running inside that boundary.
-    def self.emit(event, data: {})
-      Outbound::Emit.call!(event:, data:)
+    #
+    # `to:` and `async:` are per-call overrides. `to:` REPLACES the event's declared targets for
+    # this call only (never merges) — the event must still be declared, since it supplies the wire
+    # `type` and `vendor`. `async: true` requires a configured adapter and raises without one;
+    # `async: false` forces the inline path. Omitted means today's `:auto`.
+    # rubocop:disable Naming/MethodParameterName
+    def self.emit(event, data: {}, to: nil, async: nil)
+      Outbound::Emit.call!(event:, data:, to:, async:)
     end
+    # rubocop:enable Naming/MethodParameterName
   end
 end

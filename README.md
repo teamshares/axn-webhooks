@@ -691,6 +691,26 @@ result.target_count   # => 1
   `Deliver` itself (exhaustion via `on_exception`, a permanent 4xx via its own result). `emit`'s
   result stays `ok` even when every delivery failed — fan-out succeeded, and a subscriber being
   down is not an emit failure. `target_count - failed_count` is the sync-path success count.
+* **Per-call overrides.** `emit` accepts `to:` and `async:`:
+
+  ```ruby
+  Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 },
+                     to:    "https://one-off.example/hook",  # String or Array
+                     async: false)
+  ```
+
+  `to:` **replaces** the event's declared targets for that call — it never merges with them, the
+  same stance a declared `to:` resolver returning nil takes. The event must still be declared (it
+  supplies the wire `type` and `vendor`), and a one-off URL is validated as http(s) at emit time,
+  raising `Axn::Webhooks::Error`. `async: true` **raises** when no adapter is configured rather
+  than running inline — a missing adapter degrades to sync only under `:auto`, never under an
+  explicit request (same rule as an inbound route marked `async`). `async: false` forces the inline
+  path and suppresses the degraded-mode warning, since a caller asking for sync isn't degraded.
+
+  There is deliberately no per-call `headers:`: it is the obvious place to hang a bearer token, and
+  it would be serialized into the async job's args and persist in the queue for the whole retry
+  lifetime — the opposite of the convention `secret:` follows (a callable re-resolved per attempt,
+  never stored). Per-destination config belongs with the DB-backed subscription store.
 * **`vendor`** stamps the same observability facet (`Axn::Webhooks.config.vendor_facet`) inbound
   endpoints already use, letting Datadog/Honeybadger group outbound deliveries by event or
   subscriber. A per-event `vendor:` overrides the block-level default; an event with neither is

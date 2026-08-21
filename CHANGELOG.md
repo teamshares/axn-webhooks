@@ -40,6 +40,14 @@
   `webhook-timestamp` header deliberately diverge across retries.
 
 ### Changed (Outbound)
+- **`emit` accepts per-call `to:` and `async:` overrides.** `to:` (a String or Array) replaces the
+  event's declared targets for one call — never merges — and validates the one-off URL at emit time
+  as an `Axn::Webhooks::Error`. `async: true` raises when no adapter is configured rather than
+  silently running inline (a missing adapter degrades only under `:auto`, never under an explicit
+  request); `async: false` forces the inline path and suppresses the degraded-mode warning. No
+  per-call `headers:` — per-destination config is deferred to the DB-backed subscription store,
+  since a Hash of headers would persist a bearer token in async job args for the whole retry
+  lifetime.
 - **Added `sign :hmac`**, a parametric outbound HMAC preset mirroring inbound's `verify :hmac`
   (`digest:`/`encoding:`/`prefix:`/`signing_string:`), so a receiver expecting a plain
   `X-Signature: <hex>` no longer needs a hand-written signer block. `header:` is required; an
