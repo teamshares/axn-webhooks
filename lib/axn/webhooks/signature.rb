@@ -6,7 +6,7 @@ require "base64"
 module Axn
   module Webhooks
     # The shared HMAC primitive. Pure functions over bytes — no Request, no Rack, no axn.
-    # Both inbound `verify` and (future) outbound `sign` build on this. ALWAYS constant-time.
+    # Both inbound `verify` and outbound `sign` build on this. ALWAYS constant-time.
     module Signature
       DIGESTS = { sha256: "SHA256", sha1: "SHA1", md5: "MD5" }.freeze
       UNITS = { seconds: 1, ms: 1_000, milliseconds: 1_000, microseconds: 1_000_000 }.freeze
@@ -117,7 +117,7 @@ module Axn
         rejected(:signature_mismatch)
       end
 
-      # The encoded expected signature for `payload`. Reused by future outbound signing.
+      # The encoded expected signature for `payload`. Reused by outbound's Signer::StandardWebhooksSigner.
       def compute(secret:, payload:, digest: :sha256, encoding: :hex)
         raw = OpenSSL::HMAC.digest(openssl_digest(digest), secret, payload.to_s)
         encode(raw, encoding)

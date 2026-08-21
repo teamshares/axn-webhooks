@@ -9,7 +9,8 @@ Gem::Specification.new do |spec|
   spec.email = ["kali@teamshares.com"]
 
   spec.summary = "Axn + webhooks = 🔥"
-  spec.description = "Inbound webhook handling for axn: verify signatures, dispatch to handlers, acknowledge. Rails-optional. Outbound signing coming."
+  spec.description = "Webhook handling for axn, both directions: verify/dispatch/acknowledge inbound, " \
+                     "and emit signed, self-retrying deliveries outbound. Rails-optional."
   spec.homepage = "https://github.com/teamshares/axn-webhooks"
   spec.license = "MIT"
 

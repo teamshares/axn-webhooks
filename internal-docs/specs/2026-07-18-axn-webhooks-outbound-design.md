@@ -121,7 +121,7 @@ contract**, documented in the README so single-side (non-gem) consumers can impl
 | -- | -- |
 | **2xx** | success |
 | **5xx, 429, 503 + `Retry-After`, timeout, connection error** | retryable → self-reschedule the next attempt |
-| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet `fail!`, reported once, no retry |
+| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet `fail!`, no retry, NOT reported to `on_exception` (see README) |
 | **unexpected exception** (crash / OOM / network raise mid-flight) | propagates → adapter retries the un-acked job (at-least-once safety net) |
 
 **Self-managed retry engine (one engine, adapter-agnostic).** On a retryable response, `Deliver`

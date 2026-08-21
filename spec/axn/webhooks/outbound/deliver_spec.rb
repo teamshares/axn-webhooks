@@ -29,17 +29,21 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     end.new
   end
 
-  def ok(status, headers = {}) = Axn::Webhooks::Outbound::Transport::Response.new(status:, headers:)
+  def ok(status, headers = {}, body = nil) = Axn::Webhooks::Outbound::Transport::Response.new(status:, headers:, body:)
 
-  def declare!(transport:, max_attempts: 8, backoff: ->(_n) { 60 })
+  def declare!(transport:, max_attempts: 8, backoff: ->(_n) { 60 }, vendor: nil, user_agent: nil)
     t = transport
     ma = max_attempts
     bo = backoff
+    v = vendor
+    ua = user_agent
     Axn::Webhooks.outbound do
       sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
       transport t
       max_attempts ma
       backoff bo
+      vendor v if v
+      user_agent ua if ua
       event :lead_signed, to: ["https://os.example/hook"]
     end
   end
@@ -290,5 +294,177 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     expect(result).not_to be_ok
     expect(result.outcome).to be_failure
     expect(result.outcome).not_to be_exception
+  end
+
+  it "carries the vendor through a self-reschedule" do
+    transport = fake_transport(ok(503))
+    declare!(transport:)
+    configure_adapter!
+    allow(described_class).to receive(:call_async)
+
+    described_class.call(**kwargs, vendor: :internal, attempt: 1)
+
+    expect(described_class).to have_received(:call_async).with(hash_including(vendor: :internal))
+  end
+
+  describe "user-agent" do
+    it "defaults to the bare gem/version string" do
+      transport = fake_transport(ok(202))
+      declare!(transport:)
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]["user-agent"]).to eq("axn-webhooks/#{Axn::Webhooks::VERSION}")
+    end
+
+    it "appends a configured suffix" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, user_agent: "buyout-app")
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]["user-agent"]).to eq("axn-webhooks/#{Axn::Webhooks::VERSION} (buyout-app)")
+    end
+
+    it "resolves a callable suffix per attempt" do
+      calls = 0
+      transport = fake_transport(ok(202))
+      declare!(transport:, user_agent: lambda {
+        calls += 1
+        "deploy-#{calls}"
+      })
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]["user-agent"]).to eq("axn-webhooks/#{Axn::Webhooks::VERSION} (deploy-1)")
+    end
+  end
+
+  describe "permanent-failure messages" do
+    it "includes a truncated receiver body" do
+      transport = fake_transport(ok(422, {}, "validation failed: uuid missing"))
+      declare!(transport:)
+
+      result = described_class.call(**kwargs)
+
+      expect(result.error).to include("HTTP 422")
+      expect(result.error).to include("validation failed: uuid missing")
+    end
+
+    it "truncates a long receiver body" do
+      long_body = "x" * 1000
+      transport = fake_transport(ok(422, {}, long_body))
+      declare!(transport:)
+
+      result = described_class.call(**kwargs)
+
+      expect(result.error.length).to be < long_body.length
+      expect(result.error).to end_with("…")
+    end
+
+    it "omits the body suffix entirely when the receiver sent none" do
+      transport = fake_transport(ok(422))
+      declare!(transport:)
+
+      result = described_class.call(**kwargs)
+
+      expect(result.error).to eq("permanent delivery failure (HTTP 422) for lead_signed to https://os.example/hook")
+    end
+
+    it "scrubs a long binary receiver body instead of raising Encoding::CompatibilityError" do
+      # net/http labels response bodies ASCII-8BIT regardless of actual content; a long body with
+      # non-ASCII bytes hits the ellipsis-append path that previously mixed encodings.
+      binary_body = ("\xFF\xFE" * 300).dup.force_encoding(Encoding::ASCII_8BIT)
+      transport = fake_transport(ok(422, {}, binary_body))
+      declare!(transport:)
+
+      result = described_class.call(**kwargs)
+
+      expect(result.error).to include("HTTP 422")
+      expect(result.error).to end_with("…")
+    end
+
+    it "truncates an ASCII-8BIT body without leaving an invalid byte sequence when the cut splits a multibyte character" do
+      # Labeled ASCII-8BIT (as net/http does) but holding valid UTF-8 multibyte text — byte 500 lands
+      # mid-character, so a raw byteslice alone would leave a dangling invalid sequence.
+      long_body = ("é" * 1000).dup.force_encoding(Encoding::ASCII_8BIT)
+      transport = fake_transport(ok(422, {}, long_body))
+      declare!(transport:)
+
+      result = described_class.call(**kwargs)
+
+      expect(result.error).to end_with("…")
+      expect { result.error.encode(Encoding::UTF_8) }.not_to raise_error
+    end
+  end
+
+  describe "retryable status codes" do
+    it "retries a 408 Request Timeout" do
+      transport = fake_transport(ok(408))
+      declare!(transport:)
+      configure_adapter!
+      allow(described_class).to receive(:call_async)
+
+      result = described_class.call(**kwargs, attempt: 1)
+
+      expect(result).to be_ok
+      expect(described_class).to have_received(:call_async)
+    end
+
+    it "retries a 425 Too Early" do
+      transport = fake_transport(ok(425))
+      declare!(transport:)
+      configure_adapter!
+      allow(described_class).to receive(:call_async)
+
+      result = described_class.call(**kwargs, attempt: 1)
+
+      expect(result).to be_ok
+      expect(described_class).to have_received(:call_async)
+    end
+  end
+
+  describe "transport timeouts" do
+    it "passes the built-in Transport's default timeouts through" do
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+        event :lead_signed, to: ["https://os.example/hook"]
+      end
+      captured = nil
+      allow(Axn::Webhooks::Outbound::Transport).to receive(:post) do |**opts|
+        captured = opts
+        Axn::Webhooks::Outbound::Transport::Response.new(status: 200, headers: {})
+      end
+
+      described_class.call(**kwargs)
+
+      expect(captured[:open_timeout]).to eq(5)
+      expect(captured[:read_timeout]).to eq(10)
+    end
+
+    it "honors a configured timeouts override" do
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+        timeouts open: 1, read: 2
+        event :lead_signed, to: ["https://os.example/hook"]
+      end
+      captured = nil
+      allow(Axn::Webhooks::Outbound::Transport).to receive(:post) do |**opts|
+        captured = opts
+        Axn::Webhooks::Outbound::Transport::Response.new(status: 200, headers: {})
+      end
+
+      described_class.call(**kwargs)
+
+      expect(captured[:open_timeout]).to eq(1)
+      expect(captured[:read_timeout]).to eq(2)
+    end
+
+    it "does NOT pass open_timeout/read_timeout to a custom (non-built-in) transport" do
+      transport = fake_transport(ok(202)) # fake_transport's #post declares no timeout kwargs
+      declare!(transport:)
+
+      expect { described_class.call(**kwargs) }.not_to raise_error
+    end
   end
 end

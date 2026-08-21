@@ -18,6 +18,120 @@
 - README: note that Rails disallows autoloading during initialization, so a custom `verify` block must
   name its constant inside the block rather than at declaration time. (`dispatch to:` was already
   safe — a string handler is resolved via `const_get` per request.)
+- Fixed the gemspec description and two `Signature` comments that still described outbound signing as
+  future work; it has shipped since the initial outbound PR.
+- README: documented the outbound `vendor`/`user_agent`/`timeouts` knobs, boot-time validation, the
+  equal-jitter default backoff, the expanded retryable-status list, `Outbound.reset!` as the
+  test-teardown API, and that a delivery's envelope-body `timestamp` and its signed
+  `webhook-timestamp` header deliberately diverge across retries.
+
+### Fixed (Outbound)
+- **`sign :standard_webhooks, secret:` now accepts a callable**, resolved fresh per signing attempt —
+  matching every inbound `verify` secret's convention (`Resolvers.resolve`), which outbound quietly
+  didn't honor. A `secret:` lambda (the form both this README and every consuming app's initializer
+  use for every other webhook secret, so it resolves per request/attempt rather than being frozen at
+  boot) previously got `.to_s`'d into its `#<Proc:...>` source location and signed with that as the
+  key — every single delivery byte-for-byte unverifiable on the receiving end, and *silently*: the
+  receiver just 401s, `Deliver` classifies a 401 as a permanent failure (quiet `fail!`, deliberately
+  no page), and nothing anywhere named the cause. `Signer::StandardWebhooksSigner` now resolves a
+  callable secret per call; a secret that still isn't a decodable `whsec_<base64>` value after
+  resolution now raises a named `Axn::Webhooks::Error` instead of a bare `ArgumentError` from inside
+  `Base64.strict_decode64`. That check now also rejects a blank secret and one missing the required
+  `whsec_` prefix — both previously decoded "successfully" (an empty or unprefixed value is still
+  valid base64) and signed every delivery with an empty or wrong key, indistinguishable from any
+  other receiver-side misconfiguration. The error message never includes the secret's actual bytes
+  (only its class, or a shape description like "a whsec_-prefixed String that failed to decode") —
+  it can be raised on every delivery attempt (a callable secret re-resolves per call, and may
+  transiently resolve to something malformed), which is exactly when it'd otherwise flow the live
+  signing credential into whatever logger/exception reporter `Axn.config.on_exception` is wired to.
+  A callable `secret:` that cannot be invoked with zero arguments (it's documented arity-free —
+  resolved fresh with no args per signing attempt) is now rejected at boot instead of raising
+  `ArgumentError` on every real signing attempt.
+- A permanent-4xx failure message's truncated response-body snippet no longer risks
+  `Encoding::CompatibilityError` (mixing the ASCII-8BIT net/http labels every response body with, and
+  the UTF-8 ellipsis) or a dangling invalid byte sequence from cutting a multibyte character at the
+  500-byte boundary — both turned an intended quiet `fail!` into an unhandled exception the async
+  adapter would retry.
+- Boot-time URL validation now requires a host, not just an http(s) scheme — `"https:foo"`,
+  `"https:"`, and `"https:///hook"` all parse as scheme-only `https` with no host, previously
+  accepted and left to fail unexpectedly inside `Transport`'s request construction at delivery time.
+  It also now requires a String outright — a non-String `to:` entry (e.g. a `URI` object) parsed
+  fine via `#to_s` here, but the original object is what stayed in the declaration and was later
+  handed to `Deliver` as `url:` (`expects :url, type: String`), rejected at emission time despite
+  passing this check.
+- The `backoff` boot-time check now verifies the callable actually accepts one positional argument
+  (via the new `Outbound::CallableArity`, built on `#parameters`) instead of trusting `#arity` —
+  `->(attempt:) { }` (a required keyword) and `->(a, b, *rest) { }` (needs two positional args) both
+  reported an arity that passed the old check, then raised `ArgumentError` on the very first
+  `config.backoff.call(attempt)`. `user_agent`, if configured as a callable, gets the same
+  zero-argument check — `Deliver` resolves it with no args per delivery attempt.
+- `Axn::Webhooks.emit` no longer resolves the event's `vendor` ahead of `Emit.call!` — that lookup
+  raises the same "unknown outbound event" error `Emit` itself already raises internally, but doing
+  it before entering the action bypassed axn's executor (and its `on_exception` reporting) for an
+  unregistered event, silently downgrading what's meant to be a loud, reported failure. `Emit`'s
+  `vendor` reader now computes `Config#vendor_for(event)` fresh on every read rather than caching it
+  into an ivar set inside `#call` — axn resolves `dimension`/`tag` facets input-phase (eagerly,
+  before the body runs), so a value only set inside `#call` read as unset there: `Emit`'s own
+  `:vendor` facet stamped `nil` even though the identical value, threaded down to `Deliver`, stamped
+  correctly.
+- `StandardWebhooksSigner#decoded_secret`'s `rescue ArgumentError` is now scoped to only the Base64
+  decode step, not the whole method — a callable `secret:`'s own resolver raising `ArgumentError`
+  for an unrelated reason (e.g. a secret-store wrapper rejecting a malformed response) was
+  previously rewritten into the generic invalid-secret message, discarding the resolver's actual
+  diagnostic before Axn's exception reporter ever saw it.
+
+### Added (Outbound)
+- **`vendor`** — a block-level default (and per-event override) that stamps the same
+  `Axn::Webhooks.config.vendor_facet` dimension/tag inbound endpoints already use, onto both `Emit`
+  and `Deliver`. Previously dead: both classes already `include VendorFacet`, but nothing ever passed
+  a `vendor:`, so the facet was always `nil`. `event` is now also stamped as its own unconditional
+  dimension on both — same shape as inbound's `reason`, bounded to the events a sending app declares.
+- **`user_agent`** — a suffix (plain value or zero-arity callable, resolved per attempt) appended to
+  the fixed `axn-webhooks/<version>` User-Agent as `axn-webhooks/<version> (<value>)`. "Which app,
+  which deploy sent this hook" is the first question in any delivery investigation, and there was
+  previously no way to answer it from the header.
+- **`timeouts open:`/`read:`** — a DSL override for the built-in transport's `open_timeout`/
+  `read_timeout` (previously hardcoded 5s/10s with no way to change them short of replacing the whole
+  transport). Only forwarded to the built-in `Transport` — a custom injected transport keeps owning
+  its own timeout configuration, since the documented seam (`.post(url:, body:, headers:)`) makes no
+  promise about accepting timeout kwargs.
+- A permanent-4xx failure message now includes a truncated (500-byte) copy of the receiver's response
+  body — previously discarded entirely (`Transport::Response` carried only `status`/`headers`), so
+  `"permanent delivery failure (HTTP 422) for lead_signed to https://..."` was the whole diagnostic,
+  with no way to see *why* the receiver rejected it. `Transport::Response` gains a `body:` field
+  (defaulting to `nil`, so a custom transport built against the two-field shape keeps working
+  unmodified).
+- `Axn::Webhooks.emit`'s result now exposes `webhook_ids` (one per resolved target) and
+  `target_count` — previously nothing, so a caller had no way to record what an emission actually
+  fanned out to.
+- The default `backoff` curve now applies **equal jitter** (half the computed delay fixed, half
+  random) — previously an exact deterministic curve, so every failing target of a fan-out event
+  retried in lockstep, converging on the same instant against a receiver that was already struggling.
+- `retryable?` now also treats **408 Request Timeout** and **425 Too Early** as retryable, alongside
+  the existing 5xx/429.
+- Boot-time validation on the `outbound` block: `max_attempts` must be a positive Integer; `backoff`
+  must accept the attempt number; `to:` must be an Array or a callable; a statically-declared `to:`
+  URL must be a valid http/https URL with a host; `timeouts open:`/`read:` must each be a positive
+  Numeric. Each previously either behaved unexpectedly at delivery time (an arity-0 `backoff` blows
+  up mid-delivery; a non-Array/non-callable `to:` is silently mangled by `Array(...)`; a non-Numeric
+  timeout, e.g. a String from `ENV.fetch`, raises `NoMethodError` from inside `Net::HTTP`) or crashed
+  as an unhandled exception the async adapter would retry forever (a malformed or hostless static
+  URL raises inside `Transport.post`'s `URI.parse`/`#request_uri`). The `backoff` check inspects
+  `#arity` when the callable has one (a Proc/lambda) and `#method(:call).arity` otherwise (a plain
+  object with its own `def call(attempt)`, which has no `#arity` method) — not the other way around:
+  `Proc#call` is itself variable-arity, so `#method(:call).arity` on a Proc is always `-1` regardless
+  of what it actually declares, which would silently accept a zero-arity one.
+
+  Every one of these checks — along with an unknown `sign` strategy and a missing `sign` declaration
+  — is a pure declaration mistake, decided once when the block is evaluated and never at runtime, so
+  each raises plain `ArgumentError` rather than the gem's own `Axn::Webhooks::Error` (reserved for
+  conditions a caller might legitimately rescue at runtime, e.g. emitting an unregistered event).
+  `max_attempts`/`backoff`/`transport`/`vendor`/`user_agent`/`timeouts` are now declared via
+  `Axn::Configurable::Settings` (the same DSL `Axn::Webhooks` itself and sibling gems use) rather
+  than hand-rolled ivars — `events` stays hand-written, since it's a Hash cross-validated as a whole
+  from one DSL block rather than a flat setting.
+- A second `Axn::Webhooks.outbound` block now logs a warning before silently replacing the first
+  (previously a bare, silent assignment) — only one outbound declaration is ever active at a time.
 
 ### Added
 - `Signature::SIGNATURE_MISSING`, the fifth exported verdict, alongside `OK`, `MISMATCH`, and the two

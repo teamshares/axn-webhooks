@@ -9,7 +9,13 @@ module Axn
       # The HTTP seam. Default is stdlib Net::HTTP (no runtime dependency); a consuming app may
       # inject its own object responding to `.post(url:, body:, headers:)` via Outbound config.
       module Transport
-        Response = Data.define(:status, :headers)
+        # `body:` defaults to nil (via the custom `initialize`) so a custom transport built against
+        # the pre-existing two-field shape keeps working unmodified.
+        Response = Data.define(:status, :headers, :body) do
+          def initialize(status:, headers:, body: nil)
+            super
+          end
+        end
 
         # Raised by a transport for a genuinely retryable network condition. Deliver treats these
         # (and 5xx/429/503) as retryable; anything else raised by a transport is an unexpected
@@ -33,7 +39,7 @@ module Axn
           headers.each { |key, value| request[key] = value }
 
           response = http.request(request)
-          Response.new(status: response.code.to_i, headers: response.to_hash.transform_values(&:first))
+          Response.new(status: response.code.to_i, headers: response.to_hash.transform_values(&:first), body: response.body)
         end
       end
     end

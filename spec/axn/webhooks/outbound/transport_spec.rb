@@ -5,6 +5,12 @@ RSpec.describe Axn::Webhooks::Outbound::Transport do
     resp = described_class::Response.new(status: 204, headers: { "x" => "y" })
     expect(resp.status).to eq(204)
     expect(resp.headers).to eq("x" => "y")
+    expect(resp.body).to be_nil
+  end
+
+  it "accepts an explicit body" do
+    resp = described_class::Response.new(status: 422, headers: {}, body: "bad request")
+    expect(resp.body).to eq("bad request")
   end
 
   it "declares a retryable-network-error set including Timeout::Error" do
@@ -17,7 +23,7 @@ RSpec.describe Axn::Webhooks::Outbound::Transport do
   describe ".post" do
     let(:received_request) { {} }
     let(:fake_response) do
-      instance_double(Net::HTTPResponse, code: "202", to_hash: { "retry-after" => ["30"] })
+      instance_double(Net::HTTPResponse, code: "202", to_hash: { "retry-after" => ["30"] }, body: "queued")
     end
 
     before do
@@ -37,6 +43,7 @@ RSpec.describe Axn::Webhooks::Outbound::Transport do
 
       expect(resp.status).to eq(202)
       expect(resp.headers["retry-after"]).to eq("30")
+      expect(resp.body).to eq("queued")
       expect(received_request[:body]).to eq('{"a":1}')
       expect(received_request[:headers]["webhook-signature"]).to eq("v1,x")
     end
