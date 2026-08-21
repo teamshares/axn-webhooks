@@ -6,6 +6,15 @@ module Axn
       # Receiver for an `inbound` block: captures declarations (Phase 2: `verify`) and
       # exposes request resolvers. Later phases add dispatch/challenge/respond here.
       class DSL
+        # Every declaration a child `endpoint` inherits — uniformly, not a curated subset, so there
+        # is one rule to remember ("children inherit everything, override by re-declaring") rather
+        # than a list to check. Deliberately excludes @child_endpoints (nesting is one level deep)
+        # and @nested.
+        INHERITED_IVARS = %i[
+          @verify_spec @unauthorized_headers @challenge_required
+          @dispatch_spec @respond_block @static_respond_block @challenge_spec
+        ].freeze
+
         # verify :hmac, **opts | verify :standard_webhooks, **opts | verify { |req| ... }
         def verify(strategy = nil, **opts, &block)
           @verify_spec = { strategy:, opts:, block: }
@@ -89,6 +98,43 @@ module Axn
         # or retarget the handler (the helper's name is its contract).
         def async(call, **opts) = { **opts, call:, async: true }
         def sync(call, **opts)  = { **opts, call:, async: false }
+
+        # endpoint(:events) { dispatch … } — declares a CHILD endpoint that inherits everything the
+        # parent block declared and may override any of it by re-declaring. One `inbound :slack`
+        # block with two `endpoint` blocks registers Inbound[:slack_interactivity] and
+        # Inbound[:slack_events]; the parent itself registers nothing.
+        def endpoint(name, &block)
+          raise ArgumentError, "`endpoint #{name.inspect}` requires a block" unless block
+          raise ArgumentError, "`endpoint #{name.inspect}` cannot be nested inside another `endpoint` — one level only" if @nested
+
+          @child_endpoints ||= {}
+          raise ArgumentError, "duplicate `endpoint #{name.inspect}` in the same inbound block" if @child_endpoints.key?(name.to_sym)
+
+          @child_endpoints[name.to_sym] = block
+        end
+
+        # Internal: declared child endpoints, name => block. Empty for a plain `inbound` block.
+        def __children__ = @child_endpoints || {}
+
+        # Internal: whether `dispatch` was declared directly on THIS DSL. Read instead of
+        # `__dispatch__` so the parent-with-children check doesn't build a Router just to ask.
+        def __dispatch_declared? = !@dispatch_spec.nil?
+
+        # Internal: a fresh DSL seeded with this one's captured declarations, with `block` evaluated
+        # against it — so a child inherits everything and overrides by re-declaring.
+        #
+        # Copies the ivars rather than re-`instance_exec`ing the parent block per child (the obvious
+        # alternative): replaying the parent block would re-run any side effects in it, and would
+        # re-enter `endpoint` recursively, registering each child once per sibling.
+        def __child_dsl__(block)
+          child = self.class.new
+          INHERITED_IVARS.each do |ivar|
+            child.instance_variable_set(ivar, instance_variable_get(ivar)) if instance_variable_defined?(ivar)
+          end
+          child.instance_variable_set(:@nested, true)
+          child.instance_exec(&block)
+          child
+        end
 
         # Internal: build the verifier callable from the captured declaration.
         # For challenge-only endpoints (no dispatch, no verify declared), return a no-op verifier

@@ -523,6 +523,44 @@ resolver that returns nil delivers nowhere rather than falling back to `subscrib
 outbound ever gain a per-`emit` `async:` override, it should raise here too rather than inherit the
 `:auto` fallback.
 
+### Nested endpoints
+
+When several endpoints share a vendor's verification, declare it once and nest the endpoints that
+differ:
+
+```ruby
+Axn::Webhooks.inbound :slack do
+  verify :hmac, secret: ENV.fetch("SLACK_SIGNING_SECRET"), prefix: "v0=",
+                replay: { timestamp: header("X-Slack-Request-Timestamp"), within: 300 }
+  challenge_required { |req| req.params["type"] == "url_verification" }
+
+  endpoint :interactivity do
+    dispatch on: ->(e) { e["type"] }, to: { "block_actions" => async("Actions::Slack::HandleBlockActions") }
+    respond { |result| json(result.response_action) }
+  end
+
+  endpoint :events do
+    dispatch on: ->(e) { e.dig("event", "type") }, to: { "app_mention" => "Actions::Slack::HandleMention" }
+  end
+end
+# => registers Inbound[:slack_interactivity] and Inbound[:slack_events]
+```
+
+* **Each child registers as `:"#{parent}_#{child}"`.** The parent (`Inbound[:slack]`) is **not**
+  registered — a parent with `endpoint` blocks is a container, and declaring a top-level
+  `dispatch`/`respond` alongside them raises at boot rather than leaving a third endpoint nobody
+  mounted.
+* **Children inherit everything the parent declared** — `verify`, `challenge`, `challenge_required`,
+  `unauthorized_headers`, `dispatch`, `respond`, `static_respond` — and override any of it by
+  re-declaring it. Siblings are independent; a declaration in one child never leaks into another.
+* **One level only.** An `endpoint` inside an `endpoint` raises.
+
+Each child is validated exactly as a standalone endpoint would be, so a child that declares
+`dispatch` without inheriting or declaring a `verify` still fails at boot.
+
+Nesting is sugar, not a new capability: a shared options hash splatted with `**`, or a shared lambda
+passed to `verify(&lambda)`, expresses the same thing and remains a fine choice.
+
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
 
 **Note on Rails autoloading**: `inbound` blocks are evaluated where they're declared — at boot, if

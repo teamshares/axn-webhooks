@@ -39,6 +39,14 @@
   test-teardown API, and that a delivery's envelope-body `timestamp` and its signed
   `webhook-timestamp` header deliberately diverge across retries.
 
+### Added (Inbound)
+- **Nested `inbound` endpoints.** An `inbound` block may now contain `endpoint(name) { … }` blocks,
+  each registering as `:"#{parent}_#{child}"` and inheriting every parent declaration (overridable
+  by re-declaring). Lets one vendor's `verify`/`challenge` be written once across several endpoints.
+  The parent itself registers nothing; declaring a top-level `dispatch`/`respond` alongside
+  `endpoint` blocks raises at boot, as does nesting an `endpoint` inside an `endpoint` or reusing a
+  child name. Each child is validated exactly as a standalone endpoint would be.
+
 ### Changed (Outbound)
 - **`emit` accepts per-call `to:` and `async:` overrides.** `to:` (a String or Array) replaces the
   event's declared targets for one call — never merges — and validates the one-off URL at emit time
