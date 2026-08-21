@@ -688,13 +688,25 @@ from wherever the triggering event happens:
 Axn::Webhooks.outbound do
   # Standard Webhooks signing (reuses Axn::Webhooks::Signature under the hood) — symmetric with
   # a receiver's own `verify :standard_webhooks`. A custom signer block is accepted in the same slot.
-  # `secret:` may be a plain value or a zero-arity callable, resolved fresh on every signing attempt
-  # (the same convention as every inbound `verify` secret) — so a secret can rotate without a reboot.
-  sign :standard_webhooks, secret: -> { ENV.fetch("WEBHOOK_SIGNING_SECRET") }
+  # `secret:` may be a plain value, a zero-arity callable (resolved fresh on every signing attempt,
+  # so a secret can rotate without a reboot — the same convention as every inbound `verify` secret),
+  # or a ONE-arity callable that receives the resolved Subscriber — a per-subscriber secret.
+  sign :standard_webhooks, secret: ->(subscriber) { Subscription.find(subscriber.id).signing_secret }
 
-  # Default subscriber resolver — the seam a future DB-backed subscription store slots into.
-  # Any event declared with no explicit `to:` falls back to this.
-  subscribers ->(event) { Subscription.urls_for(event) }
+  # Default subscriber resolver — any event declared with no explicit `to:` falls back to this.
+  # A row may be a bare URL String (shown on `lead_signed`/`invoice_paid`/`internal_only` below) or
+  # a `{ url:, id: }` Hash carrying an identity `sign`/`headers`/`Deliver` can key off of.
+  subscribers ->(event) { Subscription.where(event:).map { |s| { url: s.url, id: s.id.to_s } } }
+
+  # Per-destination extra headers (e.g. a subscriber's own bearer token) — resolved fresh per
+  # DELIVERY ATTEMPT from the Subscriber, same convention as `secret:` above: never stored, so
+  # nothing here ever sits in a Sidekiq/ActiveJob payload. 0- or 1-arity; optional.
+  headers ->(subscriber) { { "authorization" => "Bearer #{Subscription.find(subscriber.id).token}" } }
+
+  # A host policy for a resolved target — a static `to:` entry and a runtime `subscribers`/`to:`
+  # row both go through it. Both optional; nil (the default) means any http(s) URL passes.
+  allowed_hosts %w[hooks.partner.example *.customer.example]  # exact match, or a leading `*.` wildcard
+  allow_url ->(uri) { !PRIVATE_IP_RANGES.any? { |r| r.include?(uri.host) } }  # general escape hatch
 
   event :lead_signed, to: ["https://example.com/webhooks/lead_signed"]  # static list
   event :lead_closed                                                    # no `to:` -> resolved via `subscribers`
@@ -710,8 +722,11 @@ Axn::Webhooks.outbound do
 end
 
 result = Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })  # => Axn::Result
-result.webhook_ids    # => ["msg_<uuid>", ...] — one per resolved target
-result.target_count   # => 1
+result.webhook_ids     # => ["msg_<uuid>", ...] — one per ENQUEUED target
+result.target_count    # => 1
+result.deliveries      # => [{ webhook_id: "msg_<uuid>", url: "https://...", subscriber_id: "17" }, ...]
+result.rejected_count  # => 0
+result.rejected        # => [{ target: "...", reason: "..." }, ...] — rows TargetPolicy refused
 ```
 
 * **Symbols are the identity.** `emit(:unknown_event)` raises `Axn::Webhooks::Error` immediately,
@@ -721,14 +736,24 @@ result.target_count   # => 1
 * **Wire `type`** defaults to the symbol as a string (`:lead_signed` → `"lead_signed"`), overridable
   per event with `type:` when a receiver expects a dotted convention or another exact value.
 * **`to:`** accepts a static Array or a lambda (`->(event) { … }`); the block-level `subscribers`
-  resolver is the shared default when an event declares no `to:` at all. A static Array's URLs are
-  validated as http/https at boot; a lambda's return value is not (it can't be, since it depends on
-  runtime state) — validate what it returns yourself if that matters.
+  resolver is the shared default when an event declares no `to:` at all. Either may resolve to a
+  bare URL String or a `{ url:, id: }` Hash — an unknown Hash key (e.g. a stray `secret:`) is
+  rejected rather than silently dropped. A static Array's entries are validated (shape + your
+  `allowed_hosts`/`allow_url` policy, if declared) at boot; a lambda's/`subscribers`' return value
+  is validated identically, but at **every** `emit`, since it depends on runtime state — see
+  [Routing](#routing-sender-owned-config-today) for what "validated" rejects and how.
 * **Fan-out**: `emit` resolves the event's subscribers and enqueues one independent, self-retrying
   `Axn::Webhooks::Outbound::Deliver` per target — one slow/failing subscriber can't block another.
   Each delivery gets its own stable `webhook-id`, generated once per (emission × target) and reused
   across every retry attempt of that delivery, so receivers can dedup. `emit`'s result exposes the
-  full list of `webhook_ids` and a `target_count`, so a caller can record what actually went out.
+  full list of `webhook_ids`, a `target_count` (rows actually **enqueued**), and `deliveries` — one
+  `{ webhook_id:, url:, subscriber_id: }` Hash per target, the correlation to persist a delivery
+  record without re-resolving and trusting ordering.
+* **`rejected_count`/`rejected`.** A row a validated `to:`/`subscribers` resolver returns that fails
+  shape or host-policy validation is **not** counted in `target_count` and is **not** delivered to —
+  it's collected into `rejected` (`{ target:, reason: }` per row) instead, and `rejected_count`
+  reports how many. Reported once per `emit` (not once per bad row) via `Axn.config.on_exception`.
+  `emit` still reports `ok`: the good rows really were enqueued.
 * **`failed_count`** counts deliveries that came back failed — but **only on the synchronous
   fallback path**, and it is **always `0` on the async path**, because at `emit` time nothing has
   failed yet: the deliveries are enqueued, and a later failure is reported by `Deliver` itself
@@ -747,20 +772,25 @@ result.target_count   # => 1
 
   `to:` **replaces** the event's declared targets for that call — it never merges with them, the
   same stance a declared `to:` resolver returning nil takes. The event must still be declared (it
-  supplies the wire `type` and `vendor`), and a one-off URL is validated as http(s) at emit time,
-  raising `Axn::Webhooks::Error`. `async: true` **raises** when no adapter is configured rather
-  than running inline — a missing adapter degrades to sync only under `:auto`, never under an
-  explicit request (same rule as an inbound route marked `async`). `async: false` forces the inline
-  path and suppresses the degraded-mode warning, since a caller asking for sync isn't degraded.
+  supplies the wire `type` and `vendor`), and a one-off URL goes through the same validation
+  (including your `allowed_hosts`/`allow_url`) as a declared target, raising `Axn::Webhooks::Error`
+  rather than being silently rejected — a one-off override is caller-supplied, single-URL, this one
+  call; a typo deserves an immediate raise, unlike a resolver's many rows. `async: true` **raises**
+  when no adapter is configured rather than running inline — a missing adapter degrades to sync only
+  under `:auto`, never under an explicit request (same rule as an inbound route marked `async`).
+  `async: false` forces the inline path and suppresses the degraded-mode warning, since a caller
+  asking for sync isn't degraded.
 
   There is deliberately no per-call `headers:`: it is the obvious place to hang a bearer token, and
   it would be serialized into the async job's args and persist in the queue for the whole retry
   lifetime — the opposite of the convention `secret:` follows (a callable re-resolved per attempt,
-  never stored). Per-destination config belongs with the DB-backed subscription store.
+  never stored). Per-destination headers are the block-level `headers` resolver instead — see
+  [Routing](#routing-sender-owned-config-today).
 * **`vendor`** stamps the same observability facet (`Axn::Webhooks.config.vendor_facet`) inbound
   endpoints already use, letting Datadog/Honeybadger group outbound deliveries by event or
   subscriber. A per-event `vendor:` overrides the block-level default; an event with neither is
-  unstamped.
+  unstamped. A resolved `subscriber_id` is stamped as a **tag** (unbounded cardinality), never a
+  dimension — see [Routing](#routing-sender-owned-config-today).
 
 ### Envelope & signing
 
@@ -811,7 +841,8 @@ sign :hmac,
 #    X-Signature: v0=3f9a1c…
 ```
 
-`secret:` (plain or zero-arity callable, re-resolved per attempt) and `header:` are required — there
+`secret:` (plain value, or a zero- or one-arity callable — see [Routing](#routing-sender-owned-config-today)
+for the one-arity per-subscriber form — re-resolved per attempt) and `header:` are required — there
 is no universal signature-header name, the same reason inbound's `verify :hmac` requires
 `signature:`. `digest:` (`:sha256`), `encoding:` (`:hex`), `prefix:` (`nil`) and `signing_string:`
 (`"{body}"`) mirror the inbound verifier's options, so a `sign :hmac` sender and a `verify :hmac`
@@ -833,7 +864,9 @@ is not supported there.
 placeholders, and an unknown one is rejected at declaration time — which a lambda would make
 impossible. Referencing `{timestamp}` without declaring `timestamp_header:` is also rejected: the
 receiver would have no way to reconstruct the signed string. If you need logic a template can't
-express, use the custom `sign { |id:, timestamp:, body:| … }` block, which has always been there.
+express, use the custom `sign { |id:, timestamp:, body:| … }` block, which has always been there —
+it may also declare `subscriber:` to receive the resolved Subscriber; a block that doesn't declare
+it (or `**`) simply isn't passed one.
 
 A secret that resolves to a blank or non-String value raises `Axn::Webhooks::Error` rather than
 signing with an empty key — the error names the value's class or shape, never its bytes.
@@ -930,24 +963,74 @@ still 503s the response (`Dispatch` rescues the exception either way), but it **
 app's own `outbound` block (`to:` / `subscribers`), not in this gem. A general-purpose DB-backed
 self-registration store — where receivers register their own endpoint URLs at runtime, no deploy
 required to add a listener — is a real future shape, but it's **intentionally deferred until a real
-use-case justifies it**. The `subscribers`/`to:` lambda is the seam it will slot into with no API
+use-case justifies it**. The `subscribers`/`to:` lambda is the seam it slots into with no API
 change: both are resolved fresh on **every** `emit`, never memoized at boot, so swapping the lambda
 body for a DB lookup already picks up rows added or removed at runtime.
 
-That much works today. What a DB-backed store also wants, and this gem does **not** have yet:
+A row may be a bare URL String (today's shape, unchanged) or a `{ url:, id: }` Hash carrying a
+subscriber's own identity — an unknown Hash key (e.g. `secret:`) is rejected rather than silently
+dropped, since it's almost certainly a credential the caller thought they were setting:
 
-* **A secret per subscriber.** `sign` installs one process-global signer, and it is handed only
-  `id:`, `timestamp:` and `body:` — no URL, no subscriber handle. A shared secret across every row
-  is the only shape currently expressible.
-* **Validation of what the resolver returns.** A statically declared `to:` array is checked for
-  http(s) URLs at boot; a lambda's return value is not (it can't be). A malformed row is reported to
-  `Axn.config.on_exception` when `Deliver` rejects it, but `emit`'s own result still counts it in
-  `target_count` and still reports `ok`. Validate rows yourself, and treat URLs that came from
-  outside your own deploy as untrusted (there is no SSRF allowlist here).
-* **A way to record what went where.** `webhook_ids` is a bare Array with no URL attached, so
-  persisting a delivery row per subscription means re-resolving and relying on ordering.
+```ruby
+Axn::Webhooks.outbound do
+  subscribers ->(event) { Subscription.where(event:).map { |s| { url: s.url, id: s.id.to_s } } }
 
-Resolution also runs inline in whatever process called `emit`, so a store that raises (a database
+  # A per-subscriber secret: 1-arity receives the Subscriber, resolved fresh per attempt (never
+  # stored — the same convention every callable secret already followed).
+  sign :standard_webhooks, secret: ->(subscriber) { Subscription.find(subscriber.id).signing_secret }
+
+  # Per-destination extra headers, e.g. a subscriber-specific bearer token. Same per-attempt
+  # resolution, same never-stored guarantee.
+  headers ->(subscriber) { { "authorization" => "Bearer #{Subscription.find(subscriber.id).token}" } }
+
+  # A host policy for anything NOT hand-written into your own deploy.
+  allowed_hosts %w[hooks.partner.example *.customer.example]
+
+  event :lead_closed
+end
+```
+
+**Credentials never enter the job payload.** `Deliver` re-enqueues *itself* on a retry
+(`call_async`), so anything in its `expects` is persisted, plaintext, in the queue backend (Redis
+for Sidekiq) for the life of the retry chain (`max_attempts` × the backoff curve — hours, by
+default). That's why `Deliver` only ever carries a subscriber's **identity** (`subscriber_id`, a
+String) — never a `secret:`/`headers:` value. `sign`'s secret and the `headers` resolver are called
+fresh **per delivery attempt**, from that identity, exactly like every other callable secret in this
+gem. There is deliberately no per-emit `headers:` override for the identical reason (see the
+"Per-call overrides" bullet above) — the block-level `headers` resolver is the seam for that.
+
+**Validation is shared between a static `to:` and a runtime resolver.** Both a statically-declared
+`to:` Array (checked once at boot) and whatever `subscribers`/`to:` resolves to (checked on every
+`emit`) go through the same `TargetPolicy`: shape (a String URL or a `{ url:, id: }` Hash, http(s)
+scheme, a real host) plus your declared `allowed_hosts`/`allow_url`, if any. A row a static Array
+fails at **boot** as an `ArgumentError` (a declaration mistake); a row a resolver returns at
+**runtime** is instead collected into `emit`'s `rejected`/`rejected_count` — the fan-out proceeds
+with the rows that passed, and the rejection is reported once (not once per bad row) via
+`Axn.config.on_exception`.
+
+`allowed_hosts`/`allow_url` are a **host policy, not a network one** — neither resolves DNS, so
+neither is proof against DNS rebinding or a hostname that resolves to a private IP at request time.
+`allowed_hosts` matches case-insensitively; a `*.suffix` entry matches any subdomain of `suffix` but
+**not** the bare suffix itself. `allow_url` is the general escape hatch — called with the parsed
+`URI`, must return truthy — for anything that needs real IP-range logic. Both nil by default (any
+http(s) URL passes, today's behavior unchanged); when both are declared, a target must pass both.
+
+**`emit`'s result now correlates what went where.** `deliveries` is one
+`{ webhook_id:, url:, subscriber_id: }` Hash per **enqueued** target — the piece a DB-backed sender
+needs to persist a delivery record per subscription without re-resolving `subscribers` and trusting
+undocumented ordering. `webhook_ids` is unchanged (still one id per target) but is now derived from
+`deliveries`. **Behavior change**: `target_count` now counts rows actually **enqueued**, not rows
+*resolved* — a malformed row used to get a `webhook_id` and be counted even though its `Deliver` call
+immediately failed its own `expects :url, type: String`; it's now caught earlier and reflected in
+`rejected_count` instead.
+
+**A resolved subscriber's id is observability, not routing.** `Deliver` stamps `subscriber_id` as a
+**tag** — the high-cardinality log/trace facet — never a **dimension** (axn's bounded metrics
+facet, the one `event`/`vendor` already use): a subscriber id off a live table is unbounded, and
+stamping it as a dimension would quietly blow up a metrics backend's cardinality limits the first
+time a real subscriber table is wired up.
+
+Resolution runs inline in whatever process called `emit`, so a store that raises (a database
 outage) raises out of `emit` — inside your `after_commit`, if that's where you emit from.
 
 ### Boot-time validation
@@ -955,9 +1038,14 @@ outage) raises out of `emit` — inside your `after_commit`, if that's where you
 An `outbound` block fails loudly at declaration time — rather than as an unexpected exception mid-
 delivery, which the async adapter would otherwise retry as if it were a network failure — for:
 `max_attempts` that isn't a positive Integer; a `backoff` that doesn't accept the attempt number
-(arity 0); a `to:` that is neither an Array nor a callable; and a statically-declared `to:` URL that
-isn't a valid http/https URL. A callable `to:`'s *return value* isn't validated (it depends on
-runtime state), nor is a callable `secret:`'s.
+(arity 1); a `to:` that is neither an Array nor a callable; a statically-declared `to:` entry that
+fails `TargetPolicy` (shape, or your declared `allowed_hosts`/`allow_url`); a non-Array
+`allowed_hosts`, or one with a non-String/blank entry; an `allow_url` that isn't a callable
+accepting the parsed URL (arity 1); and a `headers` that isn't a callable accepting zero or one
+arguments. A callable `to:`'s/`subscribers`' *return value* isn't validated at boot (it depends on
+runtime state — see [Routing](#routing-sender-owned-config-today) for how it's validated instead,
+at every `emit`), nor is a callable `secret:`'s *resolved value*, though its **arity** is: 0 (ignores
+the subscriber) or 1 (receives it) is accepted, anything else is rejected at declaration time.
 
 ### Testing
 
