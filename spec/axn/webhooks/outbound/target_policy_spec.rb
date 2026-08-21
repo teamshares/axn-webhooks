@@ -1,0 +1,94 @@
+# frozen_string_literal: true
+
+RSpec.describe Axn::Webhooks::Outbound::TargetPolicy do
+  let(:subscriber_class) { Axn::Webhooks::Outbound::Subscriber }
+
+  def check!(raw, allowed_hosts: nil, allow_url: nil)
+    described_class.check!(raw, allowed_hosts:, allow_url:)
+  end
+
+  describe "URL shape (moved verbatim from Config#validate_url!)" do
+    it "accepts a plain http(s) String URL, with or without a host allowlist" do
+      expect(check!("https://x.example/hook")).to eq(subscriber_class.new(url: "https://x.example/hook", id: nil))
+    end
+
+    it "accepts a Hash row and returns the coerced Subscriber" do
+      expect(check!({ url: "https://x.example/hook", id: 17 }))
+        .to eq(subscriber_class.new(url: "https://x.example/hook", id: "17"))
+    end
+
+    it "rejects a non-String URL (e.g. a URI object) instead of letting it through via #to_s" do
+      expect { check!(URI("https://x.example/hook")) }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /must be a String URL or a Hash/)
+    end
+
+    it "rejects a non-http(s) scheme" do
+      expect { check!("file:///etc/passwd") }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /must be http\(s\)/)
+    end
+
+    it "rejects an unparseable URL" do
+      expect { check!("http://[::not-a-host") }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /is not a valid URL/)
+    end
+
+    it "rejects an http(s) scheme with no host" do
+      %w[https:foo https: https:///hook].each do |url|
+        expect { check!(url) }.to raise_error(Axn::Webhooks::InvalidTarget, /must be http\(s\)/), "expected #{url.inspect} to be rejected"
+      end
+    end
+  end
+
+  describe "allowed_hosts" do
+    it "passes an exact host match" do
+      expect(check!("https://hooks.partner.example/x", allowed_hosts: %w[hooks.partner.example]).url)
+        .to eq("https://hooks.partner.example/x")
+    end
+
+    it "rejects a host not on the list" do
+      expect { check!("https://evil.example/x", allowed_hosts: %w[hooks.partner.example]) }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /host.*not allowed/i)
+    end
+
+    it "matches a case-insensitive host" do
+      expect(check!("https://HOOKS.PARTNER.EXAMPLE/x", allowed_hosts: %w[hooks.partner.example]).url)
+        .to eq("https://HOOKS.PARTNER.EXAMPLE/x")
+    end
+
+    it "matches a leading-wildcard entry against any subdomain, but not the bare suffix itself" do
+      expect(check!("https://a.customer.example/x", allowed_hosts: %w[*.customer.example]).url)
+        .to eq("https://a.customer.example/x")
+      expect { check!("https://customer.example/x", allowed_hosts: %w[*.customer.example]) }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /host.*not allowed/i)
+    end
+
+    it "is not consulted when nil (any http(s) URL passes, today's behavior)" do
+      expect(check!("https://anything.example/x", allowed_hosts: nil).url).to eq("https://anything.example/x")
+    end
+  end
+
+  describe "allow_url" do
+    it "passes a URL the predicate approves, and receives the parsed URI" do
+      seen = nil
+      check!("https://x.example/hook", allow_url: lambda { |uri|
+        seen = uri
+        true
+      })
+      expect(seen).to be_a(URI)
+      expect(seen.host).to eq("x.example")
+    end
+
+    it "rejects a URL the predicate refuses" do
+      expect { check!("https://x.example/hook", allow_url: ->(_uri) { false }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /rejected by allow_url/)
+    end
+  end
+
+  describe "conjunction of both guards" do
+    it "requires BOTH allowed_hosts and allow_url to pass" do
+      expect do
+        check!("https://hooks.partner.example/x", allowed_hosts: %w[hooks.partner.example], allow_url: ->(_uri) { false })
+      end.to raise_error(Axn::Webhooks::InvalidTarget, /rejected by allow_url/)
+    end
+  end
+end
