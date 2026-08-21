@@ -551,9 +551,10 @@ end
   alongside them raises at boot rather than leaving an extra endpoint nobody mounted. A parent
   `respond`/`static_respond` is fine, and is often the point: it renders nothing on its own, and
   one shared renderer across a vendor's endpoints is exactly what nesting is for.
-* **Children inherit everything the parent declared** — `verify`, `challenge`, `challenge_required`,
-  `unauthorized_headers`, `dispatch`, `respond`, `static_respond` — and override any of it by
-  re-declaring it. Siblings are independent; a declaration in one child never leaks into another.
+* **Children inherit every parent declaration** — `verify`, `challenge`, `challenge_required`,
+  `unauthorized_headers`, `respond`, `static_respond` — and override any of it by re-declaring it.
+  Siblings are independent; a declaration in one child never leaks into another. `dispatch` is the
+  one thing a parent cannot declare (above), so each child brings its own.
   Note there is no way to *un*-declare an inherited block: a child that must not render the parent's
   `respond` needs that `respond` moved down into the siblings that do want it.
 * **One level only.** An `endpoint` inside an `endpoint` raises.

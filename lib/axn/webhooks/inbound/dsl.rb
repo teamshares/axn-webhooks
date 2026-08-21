@@ -6,13 +6,20 @@ module Axn
       # Receiver for an `inbound` block: captures declarations (Phase 2: `verify`) and
       # exposes request resolvers. Later phases add dispatch/challenge/respond here.
       class DSL
-        # Every declaration a child `endpoint` inherits — uniformly, not a curated subset, so there
-        # is one rule to remember ("children inherit everything, override by re-declaring") rather
-        # than a list to check. Deliberately excludes @child_endpoints (nesting is one level deep)
-        # and @nested.
+        # Every declaration a child `endpoint` inherits. Deliberately excludes @child_endpoints
+        # (nesting is one level deep) and @nested.
+        #
+        # Also excludes @dispatch_spec, which cannot be inherited because a parent declaring
+        # `dispatch` alongside `endpoint` blocks is rejected at registration (see
+        # Axn::Webhooks.inbound). Listing it would be inert, and it would advertise a shared-dispatch
+        # feature that does not work anyway: `dispatch` captures ONE spec hash, so a child
+        # re-declaring it replaces the parent's wholesale — there is no partial override, and a
+        # parent dispatch every child copies verbatim leaves the children differing by nothing
+        # (Codex review asked for this; declined for that reason plus the migration hazard the guard
+        # exists to catch — silently losing Inbound[:vendor] out from under a mounted route).
         INHERITED_IVARS = %i[
           @verify_spec @unauthorized_headers @challenge_required
-          @dispatch_spec @respond_block @static_respond_block @challenge_spec
+          @respond_block @static_respond_block @challenge_spec
         ].freeze
 
         # verify :hmac, **opts | verify :standard_webhooks, **opts | verify { |req| ... }

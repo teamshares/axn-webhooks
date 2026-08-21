@@ -52,8 +52,32 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
     end
 
     it "rejects a header explicitly declared as nil or blank (e.g. an unset ENV var)" do
-      expect { build(secret: "s", header: nil) }.to raise_error(ArgumentError, /requires a `header:`/)
-      expect { build(secret: "s", header: "") }.to raise_error(ArgumentError, /requires a `header:`/)
+      expect { build(secret: "s", header: nil) }.to raise_error(ArgumentError, /`header:` must be a non-empty String/)
+      expect { build(secret: "s", header: "  ") }.to raise_error(ArgumentError, /`header:` must be a non-empty String/)
+    end
+
+    it "rejects a non-String header name, which would reach Net::HTTP as a garbage key" do
+      # `false.to_s` is "false" and `123.to_s` is "123", so a `to_s`-based blank check accepts both
+      # and publishes a signer that emits `{ false => "<sig>" }` (Codex review).
+      expect { build(secret: "s", header: false) }.to raise_error(ArgumentError, /`header:` must be a non-empty String/)
+      expect { build(secret: "s", header: 123) }.to raise_error(ArgumentError, /`header:` must be a non-empty String/)
+    end
+
+    it "rejects a non-String timestamp_header, which would sign a timestamp it never emits" do
+      # `timestamp_header: false` passes a `to_s` check and satisfies the {timestamp}-needs-a-header
+      # rule, but `call`'s `if @timestamp_header` is falsey — so the receiver gets a timestamp-bound
+      # signature with no timestamp to reconstruct it from (Codex review).
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: false, signing_string: "{timestamp}:{body}") }
+        .to raise_error(ArgumentError, /`timestamp_header:` must be a non-empty String/)
+    end
+
+    it "rejects a timestamp_header colliding with the signature header, case-insensitively" do
+      # The timestamp assignment lands second and OVERWRITES the signature, so every delivery ships
+      # unverifiable — silently. HTTP header names are case-insensitive (Codex review).
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "X-Sig") }
+        .to raise_error(ArgumentError, /same header name/)
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "x-sig") }
+        .to raise_error(ArgumentError, /same header name/)
     end
 
     it "rejects an unknown template placeholder" do

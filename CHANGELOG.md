@@ -42,7 +42,8 @@
 ### Added (Inbound)
 - **Nested `inbound` endpoints.** An `inbound` block may now contain `endpoint(name) { … }` blocks,
   each registering as `:"#{parent}_#{child}"` and inheriting every parent declaration (overridable
-  by re-declaring). Lets one vendor's `verify`/`challenge` be written once across several endpoints.
+  by re-declaring) except `dispatch`, which a parent cannot declare. Lets one vendor's
+  `verify`/`challenge`/`respond` be written once across several endpoints.
   The parent itself registers nothing; declaring a top-level `dispatch` alongside `endpoint` blocks
   raises at boot, as does nesting an `endpoint` inside an `endpoint` or reusing a child name. A
   parent `respond`/`static_respond` is allowed and inherited — sharing one renderer across a

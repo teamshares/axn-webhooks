@@ -36,20 +36,23 @@ module Axn
 
           def initialize(secret:, header:, digest: :sha256, encoding: :hex, prefix: nil,
                          signing_string: DEFAULT_SIGNING_STRING, timestamp_header: nil)
-            raise ArgumentError, "sign :hmac requires a `header:` naming the signature header to emit" if header.to_s.empty?
+            validate_header_name!(:header, header)
+            unless timestamp_header.nil?
+              validate_header_name!(:timestamp_header, timestamp_header)
+              # The timestamp assignment in `call` lands SECOND and would overwrite the signature,
+              # shipping every delivery unverifiable — silently. HTTP header names are
+              # case-insensitive, so compare that way (Codex review).
+              if header.casecmp?(timestamp_header)
+                raise ArgumentError,
+                      "sign :hmac `header:` and `timestamp_header:` are the same header name " \
+                      "(#{header.inspect}) — the timestamp would overwrite the signature"
+              end
+            end
 
             # Same reasoning as :standard_webhooks — `resolved_secret` calls with NO arguments, so a
             # callable needing one boots fine and raises on every real signing attempt.
             if secret.respond_to?(:call) && !CallableArity.accepts?(secret, 0)
               raise ArgumentError, "sign :hmac secret callable must accept zero arguments (resolved with no args per signing attempt)"
-            end
-
-            # A blank `timestamp_header:` (e.g. an unset env var) is truthy, so without this every
-            # delivery would emit a header with an EMPTY NAME rather than failing at declaration
-            # time the way a blank `header:` does — and it would satisfy the {timestamp}-needs-a-
-            # header check below while leaving the receiver nothing to read (Codex review).
-            if !timestamp_header.nil? && timestamp_header.to_s.empty?
-              raise ArgumentError, "sign :hmac `timestamp_header:` must be a non-empty header name when given"
             end
 
             validate_template!(signing_string, timestamp_header)
@@ -80,6 +83,20 @@ module Axn
           end
 
           private
+
+          # A `to_s`-based blank check is not enough: `false.to_s` is "false" and `123.to_s` is
+          # "123", so both pass it and publish a signer that emits `{ false => "<sig>" }` for the
+          # transport to choke on mid-delivery — a boot-time declaration mistake turned into a
+          # repeatedly-retried delivery exception. For `timestamp_header:` a `false` is worse than
+          # useless: it satisfies the {timestamp}-needs-a-header rule below while `call`'s
+          # `if @timestamp_header` skips emitting it, leaving the receiver a timestamp-bound
+          # signature it cannot reconstruct (Codex review).
+          def validate_header_name!(option, value)
+            return if value.is_a?(String) && !value.strip.empty?
+
+            raise ArgumentError,
+                  "sign :hmac `#{option}:` must be a non-empty String header name (got #{value.inspect})"
+          end
 
           def render(timestamp:, body:)
             @signing_string.gsub(/\{(\w+)\}/) { Regexp.last_match(1) == "timestamp" ? timestamp.to_s : body }
