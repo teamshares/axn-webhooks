@@ -307,6 +307,68 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
     expect(described_class).to have_received(:call_async).with(hash_including(vendor: :internal))
   end
 
+  describe "subscriber identity (PRO-3214)" do
+    it "defaults subscriber_id to nil -- a declared to: Array (no DB-backed row) has no identity to carry" do
+      transport = fake_transport(ok(202))
+      declare!(transport:)
+
+      expect { described_class.call(**kwargs) }.not_to raise_error
+    end
+
+    # Omitting `subscriber_id:` here would silently drop identity on attempt 2 -- the same class of
+    # regression `deliver_spec` already guards for `vendor:` above.
+    it "carries subscriber_id through a self-reschedule" do
+      transport = fake_transport(ok(503))
+      declare!(transport:)
+      configure_adapter!
+      allow(described_class).to receive(:call_async)
+
+      described_class.call(**kwargs, subscriber_id: "17", attempt: 1)
+
+      expect(described_class).to have_received(:call_async).with(hash_including(subscriber_id: "17"))
+    end
+
+    it "stamps subscriber_id as a high-cardinality TAG, not a bounded metrics dimension" do
+      # A subscriber id off a DB table is unbounded -- axn's `dimension` is the metrics facet and
+      # must stay bounded (the same rule Deliver's own `event` dimension and VendorFacet follow);
+      # `tag` is the log/trace facet with no metrics-billing cost. Getting this backwards would
+      # quietly blow up a metrics backend's cardinality limits the first time a real subscriber
+      # table is wired up.
+      transport = fake_transport(ok(202))
+      declare!(transport:)
+
+      events = []
+      callback = ->(*, payload) { events << payload }
+      ActiveSupport::Notifications.subscribed(callback, "axn.call") do
+        described_class.call(**kwargs, subscriber_id: "17")
+      end
+
+      payload = events.find { |e| e[:action].instance_of?(described_class) }
+      expect(payload[:tags]).to include(subscriber_id: "17")
+      expect(payload[:dimensions]).not_to include(subscriber_id: anything)
+    end
+
+    it "includes subscriber_id in the exhaustion report context, so a paged exhaustion names the subscription" do
+      transport = fake_transport(ok(500))
+      declare!(transport:, max_attempts: 3)
+      configure_adapter!
+      allow(described_class).to receive(:call_async)
+
+      captured = []
+      original_on_exception = Axn.config.instance_variable_get(:@on_exception)
+      Axn.config.on_exception = ->(_e, context:, **) { captured << context }
+
+      begin
+        described_class.call(**kwargs, subscriber_id: "17", attempt: 3)
+
+        expect(captured.size).to eq(1)
+        expect(captured.first).to include(subscriber_id: "17")
+      ensure
+        Axn.config.instance_variable_set(:@on_exception, original_on_exception)
+      end
+    end
+  end
+
   describe "user-agent" do
     it "defaults to the bare gem/version string" do
       transport = fake_transport(ok(202))

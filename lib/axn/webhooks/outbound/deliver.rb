@@ -24,10 +24,21 @@ module Axn
         expects :body, type: String
         expects :event, type: String
         expects :attempt, type: Integer, default: 1
+        # A DB-backed subscriber's own identity (its String id, not a secret/token) -- nil for
+        # today's declared-Array `to:` (no row to identify). Threaded through so a per-attempt
+        # secret/header resolver and the exhaustion report can name which subscription this was.
+        expects :subscriber_id, type: String, allow_blank: true, default: nil
 
         # Bounded to the events a sending app declares — same shape as inbound's unconditional
         # `reason` dimension, not a per-request identity.
         dimension :event, -> { event }
+        # UNBOUNDED (a subscriber id off a DB table, unlike `event`) -- axn's `dimension` is the
+        # metrics facet and must stay bounded; `tag` is the high-cardinality log/trace facet with no
+        # metrics-billing cost (see Axn.config.logger.debug config comment near vendor_facet, and
+        # `Axn::Webhooks::VendorFacet`'s own dimension/tag split). Getting this backwards would
+        # quietly blow up a metrics backend's cardinality limits the first time a real subscriber
+        # table is wired up.
+        tag :subscriber_id, -> { subscriber_id }
 
         # Only reports when `@exhaustion_error` was set by `retry_or_exhaust!`'s exhaustion branch
         # (see `report_exhaustion_if_needed`) -- a permanent-4xx `fail!` (in `#call`) also fires
@@ -139,7 +150,8 @@ module Axn
           end
 
           delay = [config.backoff.call(attempt), parse_retry_after(retry_after)].compact.max
-          self.class.call_async(url:, webhook_id:, body:, event:, vendor:, attempt: attempt + 1, _async: { wait: delay })
+          self.class.call_async(url:, webhook_id:, body:, event:, vendor:, subscriber_id:, attempt: attempt + 1,
+                                _async: { wait: delay })
         end
 
         def terminal_message
@@ -208,7 +220,7 @@ module Axn
           # exhaustion into a raise the async adapter would retry. `action: self` routes the warn to
           # the running instance, matching axn's own internal best_effort callers.
           Axn::Extensions.best_effort("reporting outbound delivery exhaustion", action: self) do
-            Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt: })
+            Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt:, subscriber_id: })
           end
         end
       end
