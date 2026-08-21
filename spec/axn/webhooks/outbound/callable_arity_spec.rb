@@ -107,4 +107,26 @@ RSpec.describe Axn::Webhooks::Outbound::CallableArity do
       expect(described_class.prefers_zero_args?(obj)).to be(true)
     end
   end
+
+  describe ".accepts_positional?" do
+    it "is true for a single required positional param" do
+      expect(described_class.accepts_positional?(->(x) { x })).to be(true)
+    end
+
+    it "is true for a single optional positional param" do
+      expect(described_class.accepts_positional?(proc { |x = 1| x })).to be(true)
+    end
+
+    it "is true for a splat" do
+      expect(described_class.accepts_positional?(->(*x) { x })).to be(true)
+    end
+
+    it "is false for a purely keyword signature" do
+      expect(described_class.accepts_positional?(->(id:) { id })).to be(false)
+    end
+
+    it "is false for a truly empty signature" do
+      expect(described_class.accepts_positional?(-> {})).to be(false)
+    end
+  end
 end

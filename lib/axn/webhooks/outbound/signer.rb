@@ -48,11 +48,22 @@ module Axn
           def initialize(block)
             @block = block
             @accepted = CallableArity.accepted_keywords(block)
+            # A block declaring NO keywords at all but at least one POSITIONAL param (`sign { |options|
+            # … }`) is the historical "options Hash" shape: Ruby auto-converts trailing keyword
+            # arguments into a Hash for a lone positional parameter (true for both a Proc/block and a
+            # lambda alike), which is exactly what the ORIGINAL unconditional `.call(id:, timestamp:,
+            # body:)` relied on. Filtering down to `**{}` (zero keywords accepted) calls with ZERO
+            # arguments instead -- fine for a Proc (leaves `options` nil, tolerated) but a REQUIRED-arity
+            # lambda raises outright; either way `options` never gets the data (Codex P1 finding).
+            @wants_positional_hash = @accepted != :all && @accepted.empty? && CallableArity.accepts_positional?(block)
             validate_required_keywords!
           end
 
           def call(id:, timestamp:, body:, subscriber: nil)
-            @block.call(**filtered({ id:, timestamp:, body:, subscriber: }))
+            full = { id:, timestamp:, body:, subscriber: }
+            return @block.call(full) if @wants_positional_hash
+
+            @block.call(**filtered(full))
           end
 
           private

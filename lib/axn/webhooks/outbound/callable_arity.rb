@@ -78,6 +78,14 @@ module Axn
         def raw_arity(callable)
           callable.respond_to?(:arity) ? callable.arity : callable.method(:call).arity
         end
+
+        # Whether `callable` declares at least one POSITIONAL parameter (required, optional, or
+        # rest) -- used by `Signer::CustomSigner` to detect the historical "single options-hash
+        # positional" custom-signer shape (`sign { |options| … }`, no keyword params at all).
+        def accepts_positional?(callable)
+          params = callable.respond_to?(:parameters) ? callable.parameters : callable.method(:call).parameters
+          params.any? { |(type, _)| %i[req opt rest].include?(type) }
+        end
       end
     end
   end

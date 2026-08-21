@@ -153,6 +153,17 @@ module Axn
             return
           end
 
+          # Net::HTTP itself raises `ArgumentError: header field value cannot include CR/LF` for a
+          # value containing either -- unlike a malformed KEY (above), which it happily serializes
+          # verbatim. Left unvalidated, a permanently-malformed value would raise an UNEXPECTED
+          # exception on every attempt, which the async adapter reads as a transient crash and
+          # retries forever, rather than being dropped like every other malformed entry here
+          # (Codex P2 finding).
+          if value.match?(/[\r\n]/)
+            Axn.config.logger.warn("[axn-webhooks] dropping custom header #{key.inspect} -- value contains CR/LF")
+            return
+          end
+
           if reserved.any? { |r| r.casecmp?(key) }
             Axn.config.logger.warn(
               "[axn-webhooks] dropping custom header #{key.inspect} -- collides with a header Deliver or the active signer already sets",

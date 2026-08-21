@@ -518,6 +518,23 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(headers).not_to include("X Bad")
     end
 
+    # Codex P2 finding, round 4: the built-in Transport's underlying Net::HTTP raises
+    # `ArgumentError: header field value cannot include CR/LF` for a header VALUE containing
+    # CR/LF (unlike a malformed KEY, which it accepts and serializes verbatim -- see the round-1
+    # finding above). Left unvalidated, a permanently-malformed subscriber value would raise an
+    # UNEXPECTED exception on every attempt, which the async adapter reads as a transient crash
+    # and retries forever -- rather than being dropped like every other malformed header entry.
+    it "drops (with a warning) a custom header value containing CR/LF instead of raising mid-delivery" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "x-custom" => "line1\r\nline2" } })
+      expect(Axn.config.logger).to receive(:warn)
+
+      result = nil
+      expect { result = described_class.call(**kwargs) }.not_to raise_error
+      expect(result).to be_ok
+      expect(transport.calls.first[:headers]).not_to include("x-custom")
+    end
+
     it "lets a headers callable that raises propagate as an unexpected exception (adapter retries the un-acked job)" do
       transport = fake_transport(ok(202))
       declare!(transport:, headers: -> { raise "header store is down" })

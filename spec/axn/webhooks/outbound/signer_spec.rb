@@ -287,6 +287,28 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
           described_class.build(strategy: nil, opts: {}, block: ->(id:, vendor:) { "#{id}#{vendor}" })
         end.to raise_error(ArgumentError, /requires.*vendor:.*never supplies/)
       end
+
+      # Codex P1 finding, round 4: on Ruby 3.2 (this project's version), a Proc/block with a
+      # SINGLE POSITIONAL param and NO keyword params auto-converts trailing keyword arguments
+      # into a Hash bound to that one param -- a Ruby quirk specific to blocks/Procs (a lambda
+      # enforces arity strictly and never received this treatment). The pre-existing
+      # `CustomSigner#call(id:, timestamp:, body:) = @block.call(id:, timestamp:, body:)`
+      # (unconditionally kwargs-only) relied on exactly that conversion to support a
+      # `sign { |options| ... }` custom signer. Filtering down to `**{}` (this shape declares NO
+      # keywords) called it with ZERO arguments instead, leaving `options` nil.
+      it "preserves the historical options-Hash shape: a block with ONE positional param and no keywords" do
+        seen = nil
+        signer = described_class.build(strategy: nil, opts: {}, block: lambda { |options|
+          seen = options
+          { "x-sig" => "#{options[:id]}:#{options[:timestamp]}:#{options[:body]}" }
+        })
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        result = signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        expect(seen).to eq(id: "m", timestamp: 5, body: "abc", subscriber:)
+        expect(result).to eq("x-sig" => "m:5:abc")
+      end
     end
   end
 

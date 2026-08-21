@@ -5,6 +5,15 @@ module Axn
     module Outbound
       # Receiver for the `Axn::Webhooks.outbound do … end` block.
       class DSL
+        # Distinguishes "argument omitted" from "an explicit falsy value was passed" for
+        # `allow_url`/`headers` below -- `callable = nil` as the default can't tell `allow_url`
+        # (nothing given) apart from `allow_url false` (a caller-supplied, non-callable value that
+        # must be rejected at boot). `callable || block` treated both identically, silently
+        # DISABLING the host policy / header resolver for an explicit `false` rather than
+        # surfacing the setting's own "must be a callable" validation error (Codex P1 finding).
+        UNSET = Object.new.freeze
+        private_constant :UNSET
+
         def initialize
           @events = {}
           @sign_spec = nil
@@ -55,12 +64,12 @@ module Axn
 
         # A general escape hatch alongside `allowed_hosts` -- called with the parsed URI, must
         # return truthy to allow the target through. Both nil by default (no host policy at all).
-        def allow_url(callable = nil, &block) = @allow_url = callable || block
+        def allow_url(callable = UNSET, &block) = @allow_url = resolve_settable(callable, block)
 
         # Per-destination extra headers (e.g. a subscriber's bearer token) -- resolved fresh per
         # DELIVERY ATTEMPT from the Subscriber, never stored, same convention `sign`'s `secret:`
         # follows. 0-arity (ignores the subscriber) or 1-arity (receives it). nil by default.
-        def headers(callable = nil, &block) = @headers = callable || block
+        def headers(callable = UNSET, &block) = @headers = resolve_settable(callable, block)
 
         # rubocop:disable Naming/MethodParameterName
         def event(name, to: nil, type: nil, vendor: nil)
@@ -95,6 +104,17 @@ module Axn
             allow_url: @allow_url,
             headers: @headers,
           )
+        end
+
+        private
+
+        # `callable` is UNSET only when the method was called with no positional argument at
+        # all -- an explicit non-callable value (including `false`) must survive to `Config`'s
+        # own setting validator rather than being silently coerced into "not set".
+        def resolve_settable(callable, block)
+          return block if block
+
+          UNSET.equal?(callable) ? nil : callable
         end
       end
     end

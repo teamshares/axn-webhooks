@@ -182,6 +182,19 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
         .to raise_error(ArgumentError, /allow_url got invalid value.*must be a callable/)
     end
 
+    # Codex P1 finding: `allow_url(callable = nil, &block) = @allow_url = callable || block` turns
+    # an explicit `allow_url false` into `nil` -- SILENTLY disabling the host policy entirely
+    # (with no allowed_hosts either, every URL would then pass) rather than surfacing the
+    # boot-time "must be a callable" error a genuinely non-callable value should raise.
+    it "rejects an explicit `allow_url false` rather than silently disabling the policy" do
+      expect do
+        outbound! do
+          allow_url false
+          event :x, to: ["https://a.example/hook"]
+        end
+      end.to raise_error(ArgumentError, /allow_url got invalid value.*must be a callable/)
+    end
+
     it "rejects a zero-arity allow_url at boot (it needs the parsed URI to do anything useful)" do
       expect do
         outbound! do

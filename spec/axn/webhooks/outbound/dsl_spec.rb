@@ -282,6 +282,22 @@ RSpec.describe "Axn::Webhooks.outbound" do
         end.to raise_error(ArgumentError, /headers got invalid value.*must be a callable/)
       end
 
+      # Codex P1 finding: `headers(callable = nil, &block) = @headers = callable || block` turns
+      # an explicit `headers false` into `nil` (Ruby's `||` treats `false` same as `nil`) --
+      # SILENTLY disabling the whole feature rather than surfacing the boot-time "must be a
+      # callable" error a genuinely non-callable value should raise. The identical bug shape
+      # applies to `allow_url` (its own dedicated test lives in resolve_subscribers_spec.rb-
+      # adjacent boot validation below).
+      it "rejects an explicit `headers false` rather than silently treating it as unset" do
+        expect do
+          Axn::Webhooks.outbound do
+            sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+            headers false
+            event :x, to: ["https://x"]
+          end
+        end.to raise_error(ArgumentError, /headers got invalid value.*must be a callable/)
+      end
+
       it "accepts a zero-arity headers callable" do
         expect do
           Axn::Webhooks.outbound do
