@@ -76,8 +76,10 @@
   into an ivar on first read, so any setting an `outbound` block never assigned (`max_attempts`,
   `vendor`, `user_agent`, `open_timeout`, `read_timeout`) raised `FrozenError` **from the reader**.
   `Config#initialize` now materializes all seven settings before freezing itself, the events map and
-  each event spec. Caller-supplied objects — the signer, a `to:` resolver, an injected transport —
-  are deliberately left mutable. `Outbound.install`/`reset!` are serialized behind a mutex; `config`
+  each event spec. The list of settings to materialize is derived from `Axn::Configurable` rather
+  than hand-maintained, so adding a new `setting` needs nothing else — forgetting would otherwise
+  turn that setting's own reader into a `FrozenError`. Caller-supplied objects — the signer, a `to:`
+  resolver, an injected transport — are deliberately left mutable. `Outbound.install`/`reset!` are serialized behind a mutex; `config`
   reads stay lock-free, which is safe precisely because what they publish is frozen.
 
 ### Fixed (Outbound)

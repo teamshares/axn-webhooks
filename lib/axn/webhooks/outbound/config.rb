@@ -23,14 +23,6 @@ module Axn
         DEFAULT_OPEN_TIMEOUT = 5
         DEFAULT_READ_TIMEOUT = 10
 
-        # Every Configurable setting declared below. Read once in `initialize` before freezing:
-        # Configurable memoizes a STATIC default into an ivar on first read, so a frozen Config
-        # would otherwise raise FrozenError from the reader of any setting the `outbound` block
-        # never explicitly assigned. `backoff`/`transport` escape only because their defaults are
-        # dynamic (`-> { … }`) and recomputed per read — an inconsistency to design around, not
-        # rely on.
-        SETTING_NAMES = %i[max_attempts backoff transport vendor user_agent open_timeout read_timeout].freeze
-
         setting :max_attempts, default: DEFAULT_MAX_ATTEMPTS,
                                validate: ->(v) { (v.is_a?(Integer) && v.positive?) || "must be a positive Integer" }
         # The default itself IS a callable (not a value computed BY one) — a bare Proc default would
@@ -137,13 +129,26 @@ module Axn
         # app, and freezing them could break a memoizing resolver. A statically-declared `to:`
         # Array is ours once validated, so it freezes.
         def deep_freeze!
-          SETTING_NAMES.each { |name| public_send(name) }
+          materialize_settings!
           @events.each_value do |spec|
             spec[:to].freeze if spec[:to].is_a?(Array)
             spec.freeze
           end
           @events.freeze
           freeze
+        end
+
+        # Read every declared setting once, so Configurable's lazy memoization happens BEFORE the
+        # freeze. Without this, a frozen Config raises FrozenError from the READER of any setting
+        # the `outbound` block never explicitly assigned — `backoff`/`transport` escape only
+        # because their defaults are dynamic (`-> { … }`) and recomputed rather than memoized.
+        #
+        # Derived from Configurable rather than a hand-maintained list: a constant listing the
+        # settings has to be updated in lockstep with every new `setting` declaration, and
+        # forgetting turns that setting's own reader into a FrozenError at runtime. Nothing to keep
+        # in sync now — adding a `setting` is enough.
+        def materialize_settings!
+          Axn::Configurable.declared_settings_for(self.class).each_key { |name| public_send(name) }
         end
 
         def fetch(event)

@@ -33,6 +33,20 @@ RSpec.describe "Axn::Webhooks::Outbound::Config immutability" do
     expect(config.read_timeout).to eq(10)
   end
 
+  it "materializes every DECLARED setting before freezing, so a setting added later is covered too" do
+    # The guard that matters for anyone ADDING a setting: `deep_freeze!` derives the list from
+    # Configurable rather than from a hand-maintained constant, so a new `setting :foo` cannot be
+    # forgotten and start raising FrozenError from its own reader.
+    config = declare_minimal!
+
+    declared = Axn::Configurable.declared_settings_for(Axn::Webhooks::Outbound::Config).keys
+    expect(declared).not_to be_empty
+
+    declared.each do |name|
+      expect { config.public_send(name) }.not_to raise_error, "reading #{name} after freeze raised"
+    end
+  end
+
   it "rejects mutation of a setting" do
     expect { declare_minimal!.max_attempts = 3 }.to raise_error(FrozenError)
   end
