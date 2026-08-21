@@ -182,6 +182,54 @@ RSpec.describe "nested inbound endpoints" do
     expect(Axn::Webhooks::Inbound.registered).to be_empty
   end
 
+  describe "re-declaring a vendor replaces its whole registered set" do
+    # A declaration owns a SET of registry keys once nesting exists, so re-declaring has to be able
+    # to REMOVE keys, not just overwrite them. Otherwise a route the new declaration doesn't define
+    # stays mounted with its old verifier and handler (Codex review).
+    def declare_two
+      Axn::Webhooks.inbound(:slack) do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        endpoint(:events) { dispatch to: "HandlerA" }
+        endpoint(:interactivity) { dispatch to: "HandlerB" }
+      end
+    end
+
+    def declare_one
+      Axn::Webhooks.inbound(:slack) do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        endpoint(:events) { dispatch to: "HandlerA" }
+      end
+    end
+
+    def declare_plain
+      Axn::Webhooks.inbound(:slack) do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        dispatch to: "HandlerA"
+      end
+    end
+
+    it "drops a child the new declaration no longer defines" do
+      declare_two
+      declare_one
+
+      expect(Axn::Webhooks::Inbound.registered).to eq([:slack_events])
+    end
+
+    it "drops every child when the vendor becomes a plain endpoint" do
+      declare_two
+      declare_plain
+
+      expect(Axn::Webhooks::Inbound.registered).to eq([:slack])
+    end
+
+    it "drops the plain endpoint when the vendor gains children" do
+      declare_plain
+      declare_two
+
+      expect(Axn::Webhooks::Inbound.registered).to contain_exactly(:slack_events, :slack_interactivity)
+    end
+  end
+
   it "rejects a parent that both declares endpoints and dispatches itself" do
     expect do
       Axn::Webhooks.inbound :slack do

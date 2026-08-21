@@ -132,9 +132,18 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
       # Hash keys are case-SENSITIVE so both survive the merge, but Net::HTTP is case-INSENSITIVE
       # and the later assignment wins — silently replacing the signature (Codex review).
       expect { build(secret: "s", header: "Content-Type") }
-        .to raise_error(ArgumentError, /Deliver sets itself/)
+        .to raise_error(ArgumentError, /delivery pipeline controls/)
       expect { build(secret: "s", header: "X-Sig", timestamp_header: "User-Agent") }
-        .to raise_error(ArgumentError, /Deliver sets itself/)
+        .to raise_error(ArgumentError, /delivery pipeline controls/)
+    end
+
+    it "rejects Content-Length, which the transport regenerates from the body at send time" do
+      # Verified on the wire: Net::HTTP rewrites it during send, so the signature never leaves the
+      # process — `Content-Length: 5` arrived where the signature should have been (Codex review).
+      expect { build(secret: "s", header: "Content-Length") }
+        .to raise_error(ArgumentError, /delivery pipeline controls/)
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "content-length") }
+        .to raise_error(ArgumentError, /delivery pipeline controls/)
     end
 
     it "rejects an unsupported digest at declaration time, not on every delivery" do

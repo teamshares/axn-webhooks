@@ -40,6 +40,10 @@
   `webhook-timestamp` header deliberately diverge across retries.
 
 ### Added (Inbound)
+- **Re-declaring a vendor now replaces its whole registered set.** With nesting, one `inbound :slack`
+  owns N registry keys, so overwriting-only left routes mounted that the new declaration no longer
+  defined — a child dropped from the block, or a vendor switching between nested and plain, kept
+  serving its previous verifier and handler. All four transitions now replace exactly.
 - **Nested-endpoint fixes:** a child re-declaring `respond` and then `static_respond` (with the
   parent supplying one of them) was accepted, silently dropping the child's first declaration —
   a re-declared renderer is now child-owned, so the same-block conflict raises as documented. And a
@@ -57,6 +61,10 @@
   would be.
 
 ### Changed (Outbound)
+- **`sign :hmac` also rejects `Content-Length`.** The transport regenerates it from the request body
+  at send time, so a signature emitted under that name never left the process — verified on the
+  wire, the receiver saw the body length. Reserved names are now `content-type`/`user-agent` (set by
+  `Deliver`) plus `content-length` (set by `Transport`).
 - **Config now owns an immutable copy of every mutable value it holds** — per-event `to:` URLs,
   `type:` and `vendor:`, and the block-level `vendor`/`user_agent` settings. Each stayed aliased to
   the caller's String, so a later `replace()` rewrote `wire_type`, the observability facet, the

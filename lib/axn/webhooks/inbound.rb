@@ -10,12 +10,35 @@ module Axn
     # `Axn::Webhooks.inbound(:vendor) { ... }` and looked up as `Inbound[:vendor]`.
     module Inbound
       @registry = {}
+      # declaration name => the registry keys it owns. Once one `inbound :slack` can produce N
+      # endpoints, re-declaring it has to be able to REMOVE keys, not just overwrite them.
+      @declared = {}
 
       class << self
         def register(name, endpoint) = @registry[name.to_sym] = endpoint
         def [](name) = @registry.fetch(name.to_sym) { raise KeyError, "no inbound webhook registered for #{name.inspect}" }
         def registered = @registry.keys
-        def reset! = @registry.clear
+
+        # Publish everything one `inbound <name>` declaration defines, dropping whatever that same
+        # declaration registered last time. Covers every transition — fewer children, more children,
+        # nested becoming plain, plain becoming nested — each of which previously left a route
+        # mounted with its old verifier and handler (Codex review).
+        #
+        # Ownership is per declaration name, so two declarations whose names collide (`inbound
+        # :slack` with `endpoint(:events)` vs. a plain `inbound :slack_events`) still race for the
+        # shared key, last writer winning. That predates nesting and needs a real naming decision,
+        # not bookkeeping.
+        def replace_declaration(name, endpoints)
+          key = name.to_sym
+          (@declared[key] || []).each { |registered_name| @registry.delete(registered_name) }
+          endpoints.each { |endpoint_name, endpoint| @registry[endpoint_name] = endpoint }
+          @declared[key] = endpoints.keys
+        end
+
+        def reset!
+          @registry.clear
+          @declared.clear
+        end
       end
     end
 
@@ -30,7 +53,7 @@ module Axn
       dsl = Inbound::DSL.new
       dsl.instance_exec(&block)
       children = dsl.__children__
-      return register_endpoint(name, dsl) if children.empty?
+      return Inbound.replace_declaration(name, { name.to_sym => build_endpoint(name, dsl) }) if children.empty?
 
       # A parent with children is a container, not an endpoint. A top-level `dispatch` is what
       # would make it look like one, and registering both it and the children would leave an extra
@@ -49,17 +72,12 @@ module Axn
       # declaration failure or a reload would mix endpoints from different declarations
       # (Codex review).
       built = children.map { |child, child_block| [:"#{name}_#{child}", build_endpoint(:"#{name}_#{child}", dsl.__child_dsl__(child_block))] }
-      built.each { |child_name, endpoint| Inbound.register(child_name, endpoint) }
+      Inbound.replace_declaration(name, built.to_h)
     end
 
     # Each child is a complete, independently valid endpoint by the time it gets here, so the
     # existing per-endpoint validation (__verifier__'s "declared no `verify`" check, Endpoint's
     # respond/static_respond exclusivity) runs per child, unchanged.
-    def self.register_endpoint(name, dsl)
-      Inbound.register(name, build_endpoint(name, dsl))
-    end
-    private_class_method :register_endpoint
-
     def self.build_endpoint(name, dsl)
       Inbound::Endpoint.new(
         name:,

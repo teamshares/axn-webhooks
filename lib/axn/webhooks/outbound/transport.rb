@@ -25,6 +25,11 @@ module Axn
           Errno::ETIMEDOUT, SocketError, IOError
         ].freeze
 
+        # Headers this transport owns regardless of what a caller sets: Net::HTTP regenerates
+        # Content-Length from the request body during send, so a signature emitted under that name
+        # never leaves the process — verified on the wire, the receiver sees the body length.
+        RESERVED_HEADERS = %w[content-length].freeze
+
         module_function
 
         def post(url:, body:, headers:, open_timeout: 5, read_timeout: 10)

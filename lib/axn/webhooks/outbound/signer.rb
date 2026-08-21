@@ -119,11 +119,16 @@ module Axn
                     "letters, digits and !#$%&'*+-.^_`|~ only, with no spaces, colons or newlines"
             end
 
-            return unless Deliver::MANAGED_HEADERS.any? { |managed| managed.casecmp?(value) }
+            # Everything set AFTER the signer runs: Deliver merges its own content-type/user-agent,
+            # and the transport regenerates content-length from the body at send time. Any of them
+            # emitted as the signature or timestamp header is silently replaced downstream.
+            # Resolved here rather than at load time — signer.rb is required before deliver.rb.
+            reserved = Deliver::MANAGED_HEADERS + Transport::RESERVED_HEADERS
+            return unless reserved.any? { |managed| managed.casecmp?(value) }
 
             raise ArgumentError,
-                  "sign :hmac `#{option}:` is #{value.inspect}, a header Deliver sets itself " \
-                  "(#{Deliver::MANAGED_HEADERS.join(', ')}) — it is merged in afterwards and would replace this one"
+                  "sign :hmac `#{option}:` is #{value.inspect}, a header the delivery pipeline controls " \
+                  "(#{reserved.join(', ')}) — it is set after signing and would replace this one"
           end
 
           def render(timestamp:, body:)
