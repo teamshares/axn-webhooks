@@ -47,10 +47,19 @@
   The parent itself registers nothing; declaring a top-level `dispatch` alongside `endpoint` blocks
   raises at boot, as does nesting an `endpoint` inside an `endpoint` or reusing a child name. A
   parent `respond`/`static_respond` is allowed and inherited — sharing one renderer across a
-  vendor's endpoints is a primary use. Each child is validated exactly as a standalone endpoint
+  vendor's endpoints is a primary use — and a child may swap forms, dropping the inherited one,
+  while declaring both in the same block stays an error. Each child is validated exactly as a standalone endpoint
   would be.
 
 ### Changed (Outbound)
+- **`sign :hmac` and per-emit `async:` are validated harder at the boundary.** `digest:`/`encoding:`
+  are checked against `Signature`'s supported sets at declaration time (a typo previously booted
+  fine and raised inside every delivery attempt — on the async path, after the job was enqueued);
+  header names must be valid HTTP field tokens (`Net::HTTP` serializes whatever key it is handed, so
+  a space produced a malformed request and a newline could append wire headers); and `header:`/
+  `timestamp_header:` may not collide case-insensitively, which silently replaced the signature with
+  the timestamp. `emit(async:)` is now `type: :boolean`, so a config-derived `"false"` no longer
+  reads as truthy and demands async.
 - **`emit` accepts per-call `to:` and `async:` overrides.** `to:` (a String or Array) replaces the
   event's declared targets for one call — never merges — and validates the one-off URL at emit time
   as an `Axn::Webhooks::Error`. `async: true` raises when no adapter is configured rather than

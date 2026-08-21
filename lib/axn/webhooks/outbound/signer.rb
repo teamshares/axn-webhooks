@@ -33,6 +33,10 @@ module Axn
         class HmacSigner
           PLACEHOLDERS = %w[timestamp body].freeze
           DEFAULT_SIGNING_STRING = "{body}"
+          # RFC 7230 field-name token. Net::HTTP stores whatever key it is handed and serializes it
+          # straight into the header line, so a space yields a malformed request and a newline
+          # appends attacker-shaped wire headers — neither caught until delivery (Codex review).
+          HEADER_NAME = /\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\z/
 
           def initialize(secret:, header:, digest: :sha256, encoding: :hex, prefix: nil,
                          signing_string: DEFAULT_SIGNING_STRING, timestamp_header: nil)
@@ -54,6 +58,12 @@ module Axn
             if secret.respond_to?(:call) && !CallableArity.accepts?(secret, 0)
               raise ArgumentError, "sign :hmac secret callable must accept zero arguments (resolved with no args per signing attempt)"
             end
+
+            # Both are finite sets in Signature; an unvalidated typo boots fine and then raises
+            # inside EVERY delivery attempt — on the async path, after the job is enqueued, so it
+            # retries the same broken config (Codex review).
+            raise ArgumentError, "sign :hmac unsupported digest: #{digest.inspect}" unless Signature::DIGESTS.key?(digest)
+            raise ArgumentError, "sign :hmac unsupported encoding: #{encoding.inspect}" unless Signature::ENCODINGS.include?(encoding)
 
             validate_template!(signing_string, timestamp_header)
 
@@ -92,10 +102,15 @@ module Axn
           # `if @timestamp_header` skips emitting it, leaving the receiver a timestamp-bound
           # signature it cannot reconstruct (Codex review).
           def validate_header_name!(option, value)
-            return if value.is_a?(String) && !value.strip.empty?
+            unless value.is_a?(String) && !value.strip.empty?
+              raise ArgumentError,
+                    "sign :hmac `#{option}:` must be a non-empty String header name (got #{value.inspect})"
+            end
+            return if value.match?(HEADER_NAME)
 
             raise ArgumentError,
-                  "sign :hmac `#{option}:` must be a non-empty String header name (got #{value.inspect})"
+                  "sign :hmac `#{option}:` must be a valid HTTP header name (got #{value.inspect}) — " \
+                  "letters, digits and !#$%&'*+-.^_`|~ only, with no spaces, colons or newlines"
           end
 
           def render(timestamp:, body:)

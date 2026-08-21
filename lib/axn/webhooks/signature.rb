@@ -9,6 +9,9 @@ module Axn
     # Both inbound `verify` and outbound `sign` build on this. ALWAYS constant-time.
     module Signature
       DIGESTS = { sha256: "SHA256", sha1: "SHA1", md5: "MD5" }.freeze
+      # Named so a caller can validate an `encoding:` up front rather than discovering it inside
+      # `encode` mid-request (Outbound::Signer::HmacSigner does exactly that at declaration time).
+      ENCODINGS = %i[hex base64 base64_urlsafe].freeze
       UNITS = { seconds: 1, ms: 1_000, milliseconds: 1_000, microseconds: 1_000_000 }.freeze
 
       # Infer the unit from the timestamp's magnitude, per-timestamp. The default, because a vendor

@@ -100,6 +100,31 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         .to raise_error(ArgumentError, /`timestamp_header:`/)
     end
 
+    it "rejects header names that are not valid HTTP field tokens" do
+      # Net::HTTP stores whatever key it is handed and serializes it into the header line, so a
+      # space produces a malformed request and a newline can append wire headers (Codex review).
+      expect { build(secret: "s", header: "X Signature") }
+        .to raise_error(ArgumentError, /valid HTTP header name/)
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "X\nInjected: evil") }
+        .to raise_error(ArgumentError, /valid HTTP header name/)
+      expect { build(secret: "s", header: "X-Sig:") }
+        .to raise_error(ArgumentError, /valid HTTP header name/)
+    end
+
+    it "accepts the punctuation RFC 7230 allows in a field name" do
+      expect { build(secret: "s", header: "X-Custom_Sig.v1") }.not_to raise_error
+    end
+
+    it "rejects an unsupported digest at declaration time, not on every delivery" do
+      expect { build(secret: "s", header: "X-Sig", digest: :sha265) }
+        .to raise_error(ArgumentError, /unsupported digest/)
+    end
+
+    it "rejects an unsupported encoding at declaration time, not on every delivery" do
+      expect { build(secret: "s", header: "X-Sig", encoding: :base64_url) }
+        .to raise_error(ArgumentError, /unsupported encoding/)
+    end
+
     it "rejects a secret callable that requires an argument" do
       expect { build(secret: ->(x) { x }, header: "X-Sig") }
         .to raise_error(ArgumentError, /must accept zero arguments/)

@@ -64,6 +64,11 @@ module Axn
         # no-dispatch endpoint) always gets the default bare ack (or a declared `static_respond`
         # body — see below), regardless of this declaration — see Endpoint#to_response.
         def respond(&block)
+          # Endpoint rejects having both renderers set, and a child inherits BOTH ivars — so
+          # overriding an inherited `static_respond` with a `respond` has to clear it, or the child
+          # raises. Clears only an INHERITED one: declaring both in the same block stays an error
+          # rather than silently becoming last-one-wins (Codex review).
+          discard_inherited(:@static_respond_block)
           @respond_block = block
         end
 
@@ -80,6 +85,7 @@ module Axn
                   "to read the handler's result"
           end
 
+          discard_inherited(:@respond_block) # see `respond` — cross-form override, inherited only
           @static_respond_block = block
         end
 
@@ -120,6 +126,15 @@ module Axn
           @child_endpoints[name.to_sym] = block
         end
 
+        # Drops an ivar this DSL INHERITED from a parent `endpoint` container, leaving one declared
+        # in this very block untouched. Backs the mutually-exclusive renderer override above.
+        def discard_inherited(ivar)
+          return unless @inherited_ivars&.include?(ivar)
+
+          instance_variable_set(ivar, nil)
+          @inherited_ivars.delete(ivar)
+        end
+
         # Internal: declared child endpoints, name => block. Empty for a plain `inbound` block.
         def __children__ = @child_endpoints || {}
 
@@ -135,9 +150,11 @@ module Axn
         # re-enter `endpoint` recursively, registering each child once per sibling.
         def __child_dsl__(block)
           child = self.class.new
-          INHERITED_IVARS.each do |ivar|
-            child.instance_variable_set(ivar, instance_variable_get(ivar)) if instance_variable_defined?(ivar)
-          end
+          inherited = INHERITED_IVARS.select { |ivar| instance_variable_defined?(ivar) }
+          inherited.each { |ivar| child.instance_variable_set(ivar, instance_variable_get(ivar)) }
+          # Recorded so `respond`/`static_respond` can tell an inherited value from one declared in
+          # the child's own block, and clear only the former.
+          child.instance_variable_set(:@inherited_ivars, inherited.dup)
           child.instance_variable_set(:@nested, true)
           child.instance_exec(&block)
           child

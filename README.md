@@ -555,8 +555,10 @@ end
   `unauthorized_headers`, `respond`, `static_respond` — and override any of it by re-declaring it.
   Siblings are independent; a declaration in one child never leaks into another. `dispatch` is the
   one thing a parent cannot declare (above), so each child brings its own.
-  Note there is no way to *un*-declare an inherited block: a child that must not render the parent's
-  `respond` needs that `respond` moved down into the siblings that do want it.
+  A child may swap renderer forms — declaring `static_respond` over an inherited `respond`, or the
+  reverse — and the inherited one is dropped. Declaring both in the *same* block is still an error.
+  There is no way to *un*-declare an inherited block outright: a child that must render nothing
+  needs the parent's `respond` moved down into the siblings that do want it.
 * **One level only.** An `endpoint` inside an `endpoint` raises.
 
 Each child is validated exactly as a standalone endpoint would be, so a child that declares
@@ -812,6 +814,12 @@ is no universal signature-header name, the same reason inbound's `verify :hmac` 
 `signature:`. `digest:` (`:sha256`), `encoding:` (`:hex`), `prefix:` (`nil`) and `signing_string:`
 (`"{body}"`) mirror the inbound verifier's options, so a `sign :hmac` sender and a `verify :hmac`
 receiver configured alike round-trip.
+
+`digest:`, `encoding:` and both header names are validated at declaration time: an unsupported
+digest/encoding, or a header name that isn't a valid HTTP field token (no spaces, colons or
+newlines), fails at boot rather than inside every delivery attempt. `header:` and
+`timestamp_header:` may not be the same name, case-insensitively — the timestamp would otherwise
+overwrite the signature and every delivery would ship unverifiable.
 
 `signing_string:` is a **template**, not a callable: `{timestamp}` and `{body}` are the only
 placeholders, and an unknown one is rejected at declaration time — which a lambda would make

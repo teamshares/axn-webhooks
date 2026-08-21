@@ -97,6 +97,54 @@ RSpec.describe "nested inbound endpoints" do
     expect(Axn::Webhooks::Inbound[:slack_events].instance_variable_get(:@static_respond)).not_to be_nil
   end
 
+  it "lets a child override an inherited `respond` with a `static_respond` (and the reverse)" do
+    # Both renderer ivars are inherited, but Endpoint rejects having both set — so a cross-form
+    # override has to clear the inherited one or it raises (Codex review).
+    Axn::Webhooks.inbound :slack do
+      verify :hmac, secret: "s", signature: header("X-Sig")
+      respond { |result| text(result.to_s) }
+
+      endpoint(:events) do
+        dispatch to: "HandlerB"
+        static_respond { text("ok") }
+      end
+    end
+
+    endpoint = Axn::Webhooks::Inbound[:slack_events]
+    expect(endpoint.instance_variable_get(:@static_respond)).not_to be_nil
+    expect(endpoint.instance_variable_get(:@respond)).to be_nil
+  end
+
+  it "lets a child override an inherited `static_respond` with a `respond`" do
+    Axn::Webhooks.inbound :slack do
+      verify :hmac, secret: "s", signature: header("X-Sig")
+      static_respond { text("ok") }
+
+      endpoint(:events) do
+        dispatch to: "HandlerB"
+        respond { |result| text(result.to_s) }
+      end
+    end
+
+    endpoint = Axn::Webhooks::Inbound[:slack_events]
+    expect(endpoint.instance_variable_get(:@respond)).not_to be_nil
+    expect(endpoint.instance_variable_get(:@static_respond)).to be_nil
+  end
+
+  it "still rejects declaring BOTH renderers in the same block — clearing only applies to inherited" do
+    expect do
+      Axn::Webhooks.inbound :slack do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+
+        endpoint(:events) do
+          dispatch to: "HandlerB"
+          respond { |result| text(result.to_s) }
+          static_respond { text("ok") }
+        end
+      end
+    end.to raise_error(Axn::Webhooks::Error, /declares both/)
+  end
+
   it "rejects a parent that both declares endpoints and dispatches itself" do
     expect do
       Axn::Webhooks.inbound :slack do

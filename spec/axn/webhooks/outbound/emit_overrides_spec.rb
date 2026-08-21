@@ -70,6 +70,15 @@ RSpec.describe "Axn::Webhooks.emit per-call overrides" do
       expect(Axn::Webhooks::Outbound::Deliver).to have_received(:call_async).once
     end
 
+    it "rejects a non-boolean async:, rather than treating any truthy value as true" do
+      # `async: "false"` from config/ENV is truthy, so without a type check it demanded async and
+      # raised the missing-adapter error — the exact opposite of what the caller asked for
+      # (Codex review).
+      expect { Axn::Webhooks.emit(:lead_signed, async: "false") }
+        .to raise_error(Axn::InboundValidationError, /async/i)
+      expect(calls).to be_empty
+    end
+
     it "async: false runs inline even when an adapter is configured" do
       allow(Axn::Webhooks::Outbound::Deliver).to receive(:_async_adapter).and_return(:sidekiq)
       allow(Axn::Webhooks::Outbound::Deliver).to receive(:call_async)

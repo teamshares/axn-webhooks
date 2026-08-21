@@ -16,7 +16,9 @@ module Axn
         # Array of them; `async:` is a tri-state — nil (:auto), true (demand async), false (force
         # sync). `allow_blank` on both: nil is the "not given" signal, and `false` is blank too.
         expects :to, allow_blank: true, default: nil
-        expects :async, allow_blank: true, default: nil
+        # `type: :boolean` is the tri-state guard: without it a config-derived `async: "false"` is
+        # truthy and demands async — the exact opposite of what the caller asked for (Codex review).
+        expects :async, type: :boolean, allow_nil: true, default: nil
 
         exposes :webhook_ids, type: Array, allow_blank: true, default: []
         exposes :target_count, type: Integer, default: 0
