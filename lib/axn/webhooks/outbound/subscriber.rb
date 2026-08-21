@@ -34,6 +34,13 @@ module Axn
           private
 
           def coerce_hash(raw)
+            # A key that isn't a Symbol/String (e.g. an Integer, from a raw DB row map) has no
+            # #to_sym -- letting `to_sym` raise a bare NoMethodError here would propagate past
+            # `resolve_subscribers`'s per-row `rescue Axn::Webhooks::InvalidTarget`, aborting the
+            # WHOLE fan-out instead of rejecting just this one malformed row (Codex P2 finding).
+            non_symbolizable = raw.keys.reject { |k| k.is_a?(Symbol) || k.is_a?(String) }
+            raise Axn::Webhooks::InvalidTarget, "Hash has non-Symbol/String key(s): #{non_symbolizable.inspect}" if non_symbolizable.any?
+
             symbolized = raw.to_h { |k, v| [k.to_sym, v] }
             unknown = symbolized.keys - %i[url id]
             raise Axn::Webhooks::InvalidTarget, "Hash has unknown key(s): #{unknown.inspect}" if unknown.any?

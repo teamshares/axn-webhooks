@@ -93,6 +93,46 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections.first[:reason]).to match(/unknown key.*secret/)
     end
 
+    # Codex P1 finding: a rejected row's raw value used to be `.inspect`ed verbatim into
+    # `rejections` -- which `Emit` both exposes via `result.rejected` AND reports through
+    # `Axn.config.on_exception`. A row a caller mistakenly tried to smuggle a live credential
+    # through (exactly the shape the test above proves gets REJECTED) would otherwise have that
+    # credential copied straight into logs/exception reporters by the rejection path itself.
+    it "never leaks a rejected row's raw values (only :url/:id) into the rejection's :target" do
+      config = outbound! do
+        subscribers ->(_event) { [{ url: "https://a.example/hook", secret: "live-key-do-not-leak" }] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
+    end
+
+    # Codex P1 finding: `Kernel#Array` on a bare Hash converts it to `[[k, v], ...]` pairs (Hash
+    # responds to #to_a), NOT `[hash]` -- a `subscribers`/`to:` resolver that returns ONE row
+    # directly, rather than wrapping it in an Array (an easy mistake: "return the row" is the
+    # natural mental model when there's exactly one match), silently delivered to NOBODY: both
+    # pseudo-rows failed validation and the real subscriber never got a webhook.
+    it "treats a resolver's single bare Hash return value as one row, not a Hash-of-pairs to mangle" do
+      config = outbound! do
+        subscribers ->(_event) { { url: "https://a.example/hook", id: "17" } }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.subscribers.map(&:url)).to eq(["https://a.example/hook"])
+      expect(resolution.rejections).to eq([])
+    end
+
+    it "treats a per-event to: resolver's single bare Hash return value as one row too" do
+      config = outbound! do
+        event :lead_signed, to: ->(_event) { { url: "https://a.example/hook", id: "17" } }
+      end
+      resolution = config.resolve_subscribers(:lead_signed)
+
+      expect(resolution.subscribers.map(&:url)).to eq(["https://a.example/hook"])
+    end
+
     it "still raises loudly on an unknown EVENT (unaffected by per-row rejection)" do
       config = outbound! { event :lead_signed, to: ["https://a.example/hook"] }
       expect { config.resolve_subscribers(:nope) }.to raise_error(Axn::Webhooks::Error, /unknown outbound event/)

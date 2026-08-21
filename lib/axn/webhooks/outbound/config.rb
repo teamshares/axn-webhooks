@@ -165,10 +165,10 @@ module Axn
 
           subscribers = []
           rejections = []
-          Array(raw).each do |target|
+          wrap_targets(raw).each do |target|
             subscribers << TargetPolicy.check!(target, allowed_hosts:, allow_url:)
           rescue Axn::Webhooks::InvalidTarget => e
-            rejections << { target: target.inspect, reason: e.message }
+            rejections << { target: redact_target(target), reason: e.message }
           end
 
           Resolution.new(subscribers:, rejections:)
@@ -186,6 +186,32 @@ module Axn
         end
 
         private
+
+        # `Kernel#Array` on a bare Hash converts it to `[[k, v], ...]` PAIRS (Hash responds to
+        # `#to_a`), not `[hash]` -- so a `subscribers`/`to:` resolver returning ONE row directly
+        # (an easy mistake: "return the row" is the natural instinct when there's exactly one
+        # match) would otherwise have both halves of that Hash treated as separate malformed
+        # targets, and the real subscriber delivered to NOBODY (Codex review). A `Subscriber`
+        # already coerced (or anything else array-like) still goes through plain `Array()`.
+        def wrap_targets(raw)
+          return [] if raw.nil?
+          return [raw] if raw.is_a?(Hash) || raw.is_a?(Subscriber)
+
+          Array(raw)
+        end
+
+        # A safe-to-log stand-in for a rejected row: `target.inspect` verbatim would otherwise
+        # copy a live credential straight into `emit`'s exposed `rejected` AND the `on_exception`
+        # report -- exactly the row shape `Subscriber.coerce` rejects for carrying an unknown key
+        # like `secret:` in the first place (Codex P1 finding). Only the two keys `Subscriber`
+        # actually recognizes are shown as-is; every other key's NAME survives (so the rejection
+        # reason -- "unknown key(s): [...]" -- and this stay legible together) but its value never
+        # does. A non-Hash target (nil, a URI, ...) has nothing to redact.
+        def redact_target(target)
+          return target.inspect unless target.is_a?(Hash)
+
+          target.to_h { |k, v| [k, %w[url id].include?(k.to_s) ? v : "<redacted>"] }.inspect
+        end
 
         # Freezes the CONTAINERS we own, never the caller's objects: a `to:` resolver, the signer,
         # an injected transport and a `user_agent` callable all stay mutable — they belong to the

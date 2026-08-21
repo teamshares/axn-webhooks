@@ -175,6 +175,22 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
       expect(seen).to equal(subscriber)
     end
+
+    # Codex P1 finding — see signer_spec.rb's identical case for StandardWebhooksSigner: an
+    # optional-arg secret (used for some unrelated reason, pre-dating subscriber-awareness) must
+    # keep resolving with ITS OWN default, not silently start receiving the Subscriber.
+    it "prefers a zero-arg call for an optional-arg secret, using ITS OWN default rather than the subscriber" do
+      seen = []
+      signer = build(secret: lambda { |app = :the_default|
+        seen << app
+        "s3kr1t"
+      }, header: "X-Signature")
+      subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+      signer.call(id: "m", timestamp: 1, body: "b", subscriber:)
+
+      expect(seen).to eq([:the_default])
+    end
   end
 
   describe "defensive copies of validated options" do

@@ -120,7 +120,10 @@ module Axn
           callable = config.headers
           return nil if callable.nil?
 
-          CallableArity.accepts?(callable, 1) ? callable.call(subscriber) : callable.call
+          # Same precedence as the signing secret (Codex P1 finding there): prefer a zero-arg call
+          # whenever the callable can accept one, so an optional-arg `headers` resolver keeps its
+          # own default rather than silently receiving the Subscriber just because it COULD.
+          CallableArity.accepts?(callable, 0) ? callable.call : callable.call(subscriber)
         end
 
         # Net::HTTP requires String keys/values; a non-String pair would otherwise raise mid-flight,
@@ -132,6 +135,17 @@ module Axn
         def add_custom_header(out, key, value, reserved)
           unless key.is_a?(String) && value.is_a?(String)
             Axn.config.logger.warn("[axn-webhooks] dropping custom header with a non-String key or value: #{key.inspect} => #{value.inspect}")
+            return
+          end
+
+          # The built-in Transport rejects CR/LF in a header VALUE, but a String KEY containing
+          # CR/LF (or a space/colon) would otherwise reach `request[key] = value` unchanged --
+          # Net::HTTP serializes whatever key it's handed straight into the wire header line, so a
+          # subscriber-controlled `headers` resolver could inject an entirely separate header
+          # (Codex P1 finding). Same grammar `sign :hmac`'s own header options are validated
+          # against at boot.
+          unless key.match?(Signer::HEADER_NAME)
+            Axn.config.logger.warn("[axn-webhooks] dropping custom header with an invalid HTTP field-name: #{key.inspect}")
             return
           end
 

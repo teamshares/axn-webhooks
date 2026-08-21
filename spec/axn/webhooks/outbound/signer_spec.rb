@@ -149,6 +149,28 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
         expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }.not_to raise_error
       end
+
+      # Codex P1 finding: a PRE-EXISTING secret resolver with an optional positional arg for some
+      # UNRELATED reason -- e.g. `->(app = Rails.application) { app.credentials.webhook_secret }` --
+      # is `CallableArity.accepts?(secret, 1)` == true (it CAN take one arg), so naively preferring
+      # the 1-arg call would start passing it a Subscriber where it previously always defaulted,
+      # breaking every delivery after upgrading. The fix must prefer a ZERO-arg call whenever the
+      # callable can accept one, and pass the subscriber ONLY when it genuinely cannot be invoked
+      # with zero args (a REQUIRED single positional) -- which is exactly the shape that was
+      # REJECTED at boot before subscriber-awareness existed, so there is no prior behavior to break.
+      it "prefers a zero-arg call for an optional-arg secret, using ITS OWN default rather than the subscriber" do
+        seen = []
+        resolver = lambda { |app = :the_default|
+          seen << app
+          secret
+        }
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}", subscriber:)
+
+        expect(seen).to eq([:the_default])
+      end
     end
   end
 

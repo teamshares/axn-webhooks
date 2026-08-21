@@ -465,6 +465,25 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers]).not_to include("sym_key", "str_key")
     end
 
+    # Codex P1 finding: the built-in Transport (net/http) rejects CR/LF in a header VALUE, but a
+    # non-empty String KEY containing CR/LF (or a space/colon) passed the old check unchanged --
+    # `request[key] = value` serializes whatever key it's handed straight into the wire header
+    # line, so a subscriber-controlled `headers` resolver could inject an entirely separate header.
+    # This is the exact grammar `sign :hmac`'s own `header:`/`timestamp_header:` are already
+    # validated against (Signer::HEADER_NAME) -- a custom header name now goes through the same
+    # check.
+    it "drops (with a warning) a custom header key that isn't a valid HTTP field-name token" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "X-Foo\r\nX-Injected: evil" => "value", "X Bad" => "v" } })
+      expect(Axn.config.logger).to receive(:warn).twice
+
+      described_class.call(**kwargs)
+
+      headers = transport.calls.first[:headers]
+      expect(headers.keys.join).not_to include("\r\n")
+      expect(headers).not_to include("X Bad")
+    end
+
     it "lets a headers callable that raises propagate as an unexpected exception (adapter retries the un-acked job)" do
       transport = fake_transport(ok(202))
       declare!(transport:, headers: -> { raise "header store is down" })

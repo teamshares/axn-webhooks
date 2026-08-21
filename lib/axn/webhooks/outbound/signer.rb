@@ -9,6 +9,15 @@ module Axn
       module Signer
         module_function
 
+        # RFC 7230 field-name token. Net::HTTP stores whatever key it is handed and serializes it
+        # straight into the header line, so a space yields a malformed request and a newline
+        # appends attacker-shaped wire headers — neither caught until delivery (Codex review).
+        # Module-level (not nested under HmacSigner) so `Deliver`'s per-destination `headers`
+        # merge (PRO-3214) can hold a subscriber-supplied header name to the SAME grammar, rather
+        # than duplicating it — the identical injection risk, just from runtime data instead of a
+        # `sign :hmac` declaration (Codex P1 finding).
+        HEADER_NAME = /\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\z/
+
         def build(strategy:, opts:, block:)
           return CustomSigner.new(block) if block
 
@@ -69,10 +78,6 @@ module Axn
         class HmacSigner
           PLACEHOLDERS = %w[timestamp body].freeze
           DEFAULT_SIGNING_STRING = "{body}"
-          # RFC 7230 field-name token. Net::HTTP stores whatever key it is handed and serializes it
-          # straight into the header line, so a space yields a malformed request and a newline
-          # appends attacker-shaped wire headers — neither caught until delivery (Codex review).
-          HEADER_NAME = /\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\z/
 
           def initialize(secret:, header:, digest: :sha256, encoding: :hex, prefix: nil,
                          signing_string: DEFAULT_SIGNING_STRING, timestamp_header: nil)
@@ -213,7 +218,15 @@ module Axn
           # plain value) resolves exactly as it did before subscriber-awareness existed.
           def resolved_secret(subscriber)
             secret = if @secret.respond_to?(:call)
-                       CallableArity.accepts?(@secret, 1) ? @secret.call(subscriber) : @secret.call
+                       # Prefer a ZERO-arg call whenever the callable can accept one: a PRE-EXISTING
+                       # secret resolver with an unrelated optional arg (e.g. `->(app =
+                       # Rails.application) { ... }`) must keep using ITS OWN default, not silently
+                       # start receiving the Subscriber just because it COULD accept one arg. Only a
+                       # callable that genuinely cannot be invoked with zero args (a REQUIRED single
+                       # positional) gets the subscriber -- and that shape was rejected at boot
+                       # entirely before subscriber-awareness existed, so there is no prior behavior
+                       # to preserve for it (Codex P1 finding).
+                       CallableArity.accepts?(@secret, 0) ? @secret.call : @secret.call(subscriber)
                      else
                        @secret
                      end
@@ -267,7 +280,9 @@ module Axn
           def resolve_secret(subscriber)
             return @secret unless @secret.respond_to?(:call)
 
-            CallableArity.accepts?(@secret, 1) ? @secret.call(subscriber) : @secret.call
+            # See the identical precedence rationale on HmacSigner#resolved_secret above (Codex P1
+            # finding): prefer zero-arg, so an optional-arg secret keeps its own default.
+            CallableArity.accepts?(@secret, 0) ? @secret.call : @secret.call(subscriber)
           end
 
           def decoded_secret(subscriber)

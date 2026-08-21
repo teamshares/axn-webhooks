@@ -40,6 +40,15 @@ RSpec.describe Axn::Webhooks::Outbound::Subscriber do
         .to raise_error(Axn::Webhooks::InvalidTarget, /unknown key.*secret/)
     end
 
+    # Codex P2 finding: `symbolized = raw.to_h { |k, v| [k.to_sym, v] }` raises bare NoMethodError
+    # for a key that doesn't respond to #to_sym (e.g. an Integer) -- uncaught by
+    # `resolve_subscribers`'s per-row `rescue Axn::Webhooks::InvalidTarget`, so one row with a
+    # stray non-Symbol/String key aborted the WHOLE emit rather than being rejected on its own.
+    it "raises InvalidTarget (not NoMethodError) on a Hash key that doesn't respond to #to_sym" do
+      expect { described_class.coerce({ 1 => "https://x.example/hook", url: "https://x.example/hook" }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /key/)
+    end
+
     it "raises on anything that isn't a String, Hash, or Subscriber" do
       expect { described_class.coerce(nil) }
         .to raise_error(Axn::Webhooks::InvalidTarget, /must be a String URL or a Hash/)
