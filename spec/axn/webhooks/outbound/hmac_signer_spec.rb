@@ -156,9 +156,24 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         .to raise_error(ArgumentError, /unsupported encoding/)
     end
 
-    it "rejects a secret callable that requires an argument" do
-      expect { build(secret: ->(x) { x }, header: "X-Sig") }
-        .to raise_error(ArgumentError, /must accept zero arguments/)
+    it "rejects a secret callable that needs more than the subscriber (PRO-3214 widens 0-arity to 0-or-1)" do
+      expect { build(secret: ->(a, b) { "#{a}#{b}" }, header: "X-Sig") }
+        .to raise_error(ArgumentError, /must accept zero or one arguments/)
+    end
+  end
+
+  describe "per-subscriber secret (PRO-3214)" do
+    it "resolves a 1-arity secret callable with the Subscriber given to #call" do
+      seen = nil
+      signer = build(secret: lambda { |sub|
+        seen = sub
+        "s3kr1t"
+      }, header: "X-Signature")
+      subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+      signer.call(id: "m", timestamp: 1, body: "b", subscriber:)
+
+      expect(seen).to equal(subscriber)
     end
   end
 

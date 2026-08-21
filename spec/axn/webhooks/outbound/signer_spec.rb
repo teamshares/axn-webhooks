@@ -105,22 +105,50 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         .to raise_error(Axn::Webhooks::Error, /Integer/)
     end
 
-    # `resolve_secret` calls `@secret.call` with NO arguments (a signing secret is documented as
-    # arity-free, unlike a subscriber resolver) — a callable that actually requires one would
+    # `resolve_secret` calls `@secret.call` with NO arguments, or with the `Subscriber` for a
+    # PRO-3214 per-subscriber secret (one required arg) — a callable needing MORE than that would
     # otherwise boot successfully and raise ArgumentError on every real signing attempt, converted
     # into an Axn::Webhooks::Error `Deliver` can't classify as retryable and left for the async
     # adapter's unbounded exception retries instead of the bounded outbound retry engine (Codex P2
-    # finding). Reject at construction (boot) instead.
-    it "rejects a secret callable that cannot be invoked with zero arguments" do
+    # finding, widened for the subscriber-aware case). Reject at construction (boot) instead.
+    it "rejects a secret callable that needs more than the subscriber" do
       expect do
-        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(app) { app.fetch(:secret) } }, block: nil)
-      end.to raise_error(ArgumentError, /secret callable must accept zero arguments/)
+        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(a, b) { "#{a}#{b}" } }, block: nil)
+      end.to raise_error(ArgumentError, /secret callable must accept zero or one arguments/)
+    end
+
+    it "rejects a secret callable requiring a keyword (same arity pitfall CallableArity exists for)" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(subscriber:) { subscriber } }, block: nil)
+      end.to raise_error(ArgumentError, /secret callable must accept zero or one arguments/)
     end
 
     it "accepts a secret callable with an optional argument (zero-arg invocation still works)" do
       expect do
         described_class.build(strategy: :standard_webhooks, opts: { secret: ->(_app = nil) { secret } }, block: nil)
       end.not_to raise_error
+    end
+
+    describe "per-subscriber secret (PRO-3214)" do
+      it "resolves a 1-arity secret callable with the Subscriber given to #call" do
+        seen = nil
+        resolver = lambda do |sub|
+          seen = sub
+          secret
+        end
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}", subscriber:)
+
+        expect(seen).to equal(subscriber)
+      end
+
+      it "still resolves a 0-arity secret with no subscriber in scope (today's shape, unchanged)" do
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: -> { secret } }, block: nil)
+
+        expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }.not_to raise_error
+      end
     end
   end
 
@@ -131,6 +159,56 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         block: ->(id:, timestamp:, body:) { { "x-sig" => "#{id}:#{timestamp}:#{body.bytesize}" } }
       )
       expect(signer.call(id: "m", timestamp: 5, body: "abc")).to eq("x-sig" => "m:5:3")
+    end
+
+    describe "subscriber-awareness (PRO-3214)" do
+      it "keeps working byte-for-byte for a block declaring only the original (id:, timestamp:, body:)" do
+        # The kwarg set widens (subscriber: is now always passed) but a block that never asked for
+        # it must not see an unexpected-keyword ArgumentError -- CustomSigner filters down to what
+        # the block actually declares.
+        signer = described_class.build(
+          strategy: nil, opts: {},
+          block: ->(id:, timestamp:, body:) { { "x-sig" => "#{id}:#{timestamp}:#{body}" } }
+        )
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        expect(signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)).to eq("x-sig" => "m:5:abc")
+      end
+
+      it "passes the Subscriber through to a block that declares subscriber:" do
+        seen = nil
+        signer = described_class.build(
+          strategy: nil, opts: {},
+          block: lambda { |id:, timestamp:, body:, subscriber:|
+            seen = subscriber
+            { "x-sig" => "#{id}:#{timestamp}:#{body}" }
+          }
+        )
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        expect(seen).to equal(subscriber)
+      end
+
+      it "passes everything through unfiltered to a block that double-splats" do
+        received = nil
+        signer = described_class.build(strategy: nil, opts: {}, block: lambda { |**kw|
+          received = kw
+          {}
+        })
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        expect(received).to eq(id: "m", timestamp: 5, body: "abc", subscriber:)
+      end
+
+      it "rejects at boot (not on the first delivery) a block that can't accept id:/timestamp:/body:" do
+        expect do
+          described_class.build(strategy: nil, opts: {}, block: ->(subscriber:) { subscriber })
+        end.to raise_error(ArgumentError, /sign block must accept.*id:.*timestamp:.*body:/)
+      end
     end
   end
 
