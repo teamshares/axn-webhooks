@@ -48,6 +48,24 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
                                              Axn::Webhooks::Outbound::Subscriber.new(url: "https://b.example/hook", id: "2"),
                                            ])
     end
+
+    it "copies a static Hash row instead of freezing the caller's own object (mirrors the String-row fix)" do
+      # Same hazard `config_immutability_spec` already pins for a plain String `to:` entry: a Hash
+      # row is caller-supplied too (`event to: SOME_CONSTANT_ARRAY`), so mutating it after boot must
+      # not rewrite the already-validated config underneath it.
+      app_row = { url: +"https://a.example/hook", id: "17" }
+      config = outbound! { event :lead_signed, to: [app_row] }
+
+      expect(app_row).not_to be_frozen
+      expect(app_row[:url]).not_to be_frozen
+
+      app_row[:url].replace("ftp://bad.example/hook")
+      app_row[:id] = "rewritten"
+
+      resolution = config.resolve_subscribers(:lead_signed)
+      expect(resolution.subscribers.first.url).to eq("https://a.example/hook")
+      expect(resolution.subscribers.first.id).to eq("17")
+    end
   end
 
   describe "per-row rejection" do

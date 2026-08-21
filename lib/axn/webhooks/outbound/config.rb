@@ -164,9 +164,13 @@ module Axn
 
         # Back-compat convenience for callers that only want the resolved URLs and don't care about
         # a malformed row -- e.g. today's `Emit` fan-out. Silently drops rejections; a caller that
-        # needs to know about (or report) them wants `resolve_subscribers` directly.
+        # needs to know about (or report) them wants `resolve_subscribers` directly. Frozen: for a
+        # static `to:` Array, `resolve_subscribers` used to return the SAME frozen Array `deep_freeze!`
+        # already produced; going through `Subscriber`/`.map` builds a fresh one, which `.map` never
+        # freezes on its own -- `targets_for`'s own immutability contract (asserted in
+        # config_immutability_spec.rb) has to be re-established here explicitly.
         def targets_for(event)
-          resolve_subscribers(event).subscribers.map(&:url)
+          resolve_subscribers(event).subscribers.map(&:url).freeze
         end
 
         private
@@ -213,10 +217,18 @@ module Axn
 
         # An immutable copy the config owns, for the shapes an event spec can hold. A callable `to:`
         # (or anything else the app supplied) is returned untouched — not ours to copy or freeze.
+        # Hash (PRO-3214's `{ url:, id: }` row, inside a static `to:` Array) copies key-for-key
+        # rather than freezing the caller's Hash in place — the identical hazard this whole method
+        # exists to close, for a shape `to:`'s own String handling doesn't reach: `row[:url] =
+        # "ftp://…"` after boot would otherwise rewrite a validated target through a Hash the app
+        # still holds a mutable reference to. Its own keys aren't recursed into (a caller's Hash key
+        # is a Symbol or String literal, never something a boot-time mutation-safety fix cares
+        # about); only values are.
         def config_owned(value)
           case value
           when String then value.dup.freeze
           when Array then value.map { |element| config_owned(element) }.freeze
+          when Hash then value.to_h { |k, v| [k, config_owned(v)] }.freeze
           else value
           end
         end
