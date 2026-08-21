@@ -820,9 +820,10 @@ receiver configured alike round-trip.
 `digest:`, `encoding:` and both header names are validated at declaration time: an unsupported
 digest/encoding, or a header name that isn't a valid HTTP field token (no spaces, colons or
 newlines), fails at boot rather than inside every delivery attempt. `header:` and
-`timestamp_header:` may not be the same name as each other, nor either of `content-type`/
-`user-agent` (which `Deliver` sets itself and merges in afterwards) — in every one of those cases
-the later value would replace the signature and each delivery would ship unverifiable. Braces in
+`timestamp_header:` may not be the same name as each other, nor any header the delivery pipeline
+sets after signing: `content-type` and `user-agent` (which `Deliver` merges in afterwards) or
+`content-length` (which the transport regenerates from the request body at send time). In every one
+of those cases the later value replaces the signature and each delivery ships unverifiable. Braces in
 `signing_string:` must be exactly `{timestamp}` or `{body}`; a malformed one (`{time-stamp}`, or an
 unclosed `{timestamp`) is rejected rather than silently signed as literal text, so a literal brace
 is not supported there.
