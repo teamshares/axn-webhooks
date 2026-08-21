@@ -31,19 +31,27 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
 
   def ok(status, headers = {}, body = nil) = Axn::Webhooks::Outbound::Transport::Response.new(status:, headers:, body:)
 
-  def declare!(transport:, max_attempts: 8, backoff: ->(_n) { 60 }, vendor: nil, user_agent: nil)
+  def declare!(transport:, max_attempts: 8, backoff: ->(_n) { 60 }, vendor: nil, user_agent: nil,
+               headers: nil, sign_block: nil)
     t = transport
     ma = max_attempts
     bo = backoff
     v = vendor
     ua = user_agent
+    h = headers
+    sb = sign_block
     Axn::Webhooks.outbound do
-      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+      if sb
+        sign(&sb)
+      else
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+      end
       transport t
       max_attempts ma
       backoff bo
       vendor v if v
       user_agent ua if ua
+      headers h if h
       event :lead_signed, to: ["https://os.example/hook"]
     end
   end
@@ -366,6 +374,88 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       ensure
         Axn.config.instance_variable_set(:@on_exception, original_on_exception)
       end
+    end
+  end
+
+  describe "per-destination headers (PRO-3214)" do
+    it "merges a zero-arity headers callable's Hash into the request" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "x-static" => "1" } })
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]["x-static"]).to eq("1")
+    end
+
+    it "resolves a one-arity headers callable with the Subscriber (url + subscriber_id)" do
+      seen = nil
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: lambda { |sub|
+        seen = sub
+        { "authorization" => "Bearer token-for-#{sub.id}" }
+      })
+
+      described_class.call(**kwargs, subscriber_id: "17")
+
+      expect(seen).to eq(Axn::Webhooks::Outbound::Subscriber.new(url: "https://os.example/hook", id: "17"))
+      expect(transport.calls.first[:headers]["authorization"]).to eq("Bearer token-for-17")
+    end
+
+    it "adds nothing when headers is not declared (default nil)" do
+      transport = fake_transport(ok(202))
+      declare!(transport:)
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers].keys).to match_array(%w[webhook-id webhook-timestamp webhook-signature content-type user-agent])
+    end
+
+    # The generalized MANAGED_HEADERS hazard (Codex, on HmacSigner's own header:/timestamp_header:):
+    # Ruby Hash keys are case-SENSITIVE so a differently-cased duplicate survives a plain `.merge`,
+    # but Net::HTTP is case-INSENSITIVE and the LATER assignment wins -- so a same-position .merge
+    # would silently ship a subscriber-controlled "Content-Type" over the real one and nothing would
+    # ever say so. Validating names against merge order alone would fail exactly this silently.
+    it "drops (with a warning) a custom header colliding with a Deliver-managed header, case-insensitively" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "Content-Type" => "text/evil", "CONTENT-TYPE" => "also-evil" } })
+      expect(Axn.config.logger).to receive(:warn).with(/dropping custom header/i).twice
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]["content-type"]).to eq("application/json")
+    end
+
+    it "drops (with a warning) a custom header colliding with a header the active SIGNER just emitted, case-insensitively" do
+      # Standard Webhooks emits "webhook-signature" -- a subscriber row supplying a differently-cased
+      # duplicate must not be the thing that ships, or the receiver silently gets an unverifiable
+      # delivery with no error anywhere.
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "Webhook-Signature" => "not-the-real-one" } })
+      expect(Axn.config.logger).to receive(:warn).with(/dropping custom header.*Webhook-Signature/)
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]["webhook-signature"]).to start_with("v1,")
+    end
+
+    it "drops (with a warning) a non-String key or value instead of raising mid-delivery" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { sym_key: "v", "str_key" => 123 } })
+      expect(Axn.config.logger).to receive(:warn).twice
+
+      result = nil
+      expect { result = described_class.call(**kwargs) }.not_to raise_error
+      expect(result).to be_ok
+      expect(transport.calls.first[:headers]).not_to include("sym_key", "str_key")
+    end
+
+    it "lets a headers callable that raises propagate as an unexpected exception (adapter retries the un-acked job)" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { raise "header store is down" })
+
+      result = described_class.call(**kwargs)
+
+      expect(result.outcome).to be_exception
     end
   end
 

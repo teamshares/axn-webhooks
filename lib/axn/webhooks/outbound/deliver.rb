@@ -89,10 +89,60 @@ module Axn
         end
 
         # Sign per attempt with a FRESH timestamp (so the receiver's replay window accepts a retry),
-        # reusing the stable webhook_id for idempotent dedup.
+        # reusing the stable webhook_id for idempotent dedup. Merge order is deliberate: custom
+        # (PRO-3214's per-destination `headers`) -> signer -> Deliver-managed, so the signer and
+        # Deliver always win a same-position `.merge`. That alone isn't the whole defense (Net::HTTP
+        # is case-insensitive, Hash keys are not, so a DIFFERENTLY-cased duplicate survives the merge
+        # and Net::HTTP still picks the later one) -- `custom_headers` below additionally drops any
+        # subscriber-supplied name that collides, case-insensitively, with either bucket.
         def signed_headers
-          config.signer.call(id: webhook_id, timestamp: Time.now.to_i, body:)
-                .merge("content-type" => "application/json", "user-agent" => user_agent) # MANAGED_HEADERS
+          subscriber = Subscriber.new(url:, id: subscriber_id)
+          signer_headers = config.signer.call(id: webhook_id, timestamp: Time.now.to_i, body:, subscriber:)
+
+          custom_headers(subscriber, signer_headers)
+            .merge(signer_headers)
+            .merge("content-type" => "application/json", "user-agent" => user_agent) # MANAGED_HEADERS
+        end
+
+        # Per-destination extra headers (PRO-3214) -- a malformed or colliding entry is DROPPED with
+        # a warning, not raised: a bad row from a `headers` resolver shouldn't crash an otherwise-
+        # deliverable attempt (a `headers` callable that itself raises is a different matter and
+        # propagates unchanged -- see `resolve_custom_headers`).
+        def custom_headers(subscriber, signer_headers)
+          raw = resolve_custom_headers(subscriber)
+          return {} if raw.nil?
+
+          reserved = MANAGED_HEADERS + signer_headers.keys
+          raw.each_with_object({}) { |(key, value), out| add_custom_header(out, key, value, reserved) }
+        end
+
+        def resolve_custom_headers(subscriber)
+          callable = config.headers
+          return nil if callable.nil?
+
+          CallableArity.accepts?(callable, 1) ? callable.call(subscriber) : callable.call
+        end
+
+        # Net::HTTP requires String keys/values; a non-String pair would otherwise raise mid-flight,
+        # a boot-clean declaration turned into a per-attempt crash. A key colliding, CASE-
+        # INSENSITIVELY, with a Deliver-managed header or one the signer just emitted this attempt is
+        # dropped for the reason `signed_headers`' comment gives: Hash keys don't collide there, but
+        # Net::HTTP's header line does, silently, and it is always the LATER assignment that survives
+        # -- which a subscriber-controlled row must never be allowed to be for webhook-signature.
+        def add_custom_header(out, key, value, reserved)
+          unless key.is_a?(String) && value.is_a?(String)
+            Axn.config.logger.warn("[axn-webhooks] dropping custom header with a non-String key or value: #{key.inspect} => #{value.inspect}")
+            return
+          end
+
+          if reserved.any? { |r| r.casecmp?(key) }
+            Axn.config.logger.warn(
+              "[axn-webhooks] dropping custom header #{key.inspect} -- collides with a header Deliver or the active signer already sets",
+            )
+            return
+          end
+
+          out[key] = value
         end
 
         def user_agent
