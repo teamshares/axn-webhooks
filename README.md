@@ -685,6 +685,12 @@ result.target_count   # => 1
   Each delivery gets its own stable `webhook-id`, generated once per (emission × target) and reused
   across every retry attempt of that delivery, so receivers can dedup. `emit`'s result exposes the
   full list of `webhook_ids` and a `target_count`, so a caller can record what actually went out.
+* **`failed_count`** counts deliveries that came back failed — but **only on the synchronous
+  fallback path**, and it is **always `0` when an async adapter is configured**, because at `emit`
+  time nothing has failed yet: the deliveries are enqueued, and a later failure is reported by
+  `Deliver` itself (exhaustion via `on_exception`, a permanent 4xx via its own result). `emit`'s
+  result stays `ok` even when every delivery failed — fan-out succeeded, and a subscriber being
+  down is not an emit failure. `target_count - failed_count` is the sync-path success count.
 * **`vendor`** stamps the same observability facet (`Axn::Webhooks.config.vendor_facet`) inbound
   endpoints already use, letting Datadog/Honeybadger group outbound deliveries by event or
   subscriber. A per-event `vendor:` overrides the block-level default; an event with neither is

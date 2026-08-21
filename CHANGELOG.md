@@ -40,6 +40,10 @@
   `webhook-timestamp` header deliberately diverge across retries.
 
 ### Changed (Outbound)
+- **`emit` now exposes `failed_count`.** The synchronous fallback path called `Deliver.call` and
+  discarded the result, so a failed delivery still left `emit` `ok` with the target counted as
+  delivered. `failed_count` is always `0` on the async path (nothing has failed at emit time), and
+  `emit`'s own result deliberately stays `ok` regardless — the count is the surface, not the outcome.
 - **`Outbound::Config` is now genuinely frozen**, making good on the "immutable" claim in its own doc
   comment. Freezing naively would have broken reads: `Axn::Configurable` memoizes a static default
   into an ivar on first read, so any setting an `outbound` block never assigned (`max_attempts`,

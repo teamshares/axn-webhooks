@@ -25,7 +25,10 @@ RSpec.describe "outbound subscribers resolved at emit time" do
     end
 
     calls = enqueued
-    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { |**kw| calls << kw }
+    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) do |**kw|
+      calls << kw
+      instance_double(Axn::Result, ok?: true)
+    end
   end
 
   def urls_delivered_to = enqueued.map { |kw| kw[:url] }

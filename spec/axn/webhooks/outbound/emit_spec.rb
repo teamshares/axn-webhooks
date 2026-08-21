@@ -16,7 +16,7 @@ RSpec.describe "Axn::Webhooks.emit" do
     end
     # Capture Deliver enqueues without running HTTP. Deliver has no adapter in the test env, so the
     # Emit fan-out uses the sync inline path unless we stub; stub call to record instead.
-    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call)
+    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call).and_return(instance_double(Axn::Result, ok?: true))
   end
 
   it "raises loudly on an unknown event" do
@@ -40,7 +40,10 @@ RSpec.describe "Axn::Webhooks.emit" do
 
   it "fans out one delivery per target, each with a distinct webhook-id and the wire type" do
     calls = []
-    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { |**kw| calls << kw }
+    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) do |**kw|
+      calls << kw
+      instance_double(Axn::Result, ok?: true)
+    end
 
     Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })
 
@@ -65,7 +68,10 @@ RSpec.describe "Axn::Webhooks.emit" do
 
   it "exposes the resolved webhook_ids and target_count" do
     calls = []
-    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { |**kw| calls << kw }
+    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) do |**kw|
+      calls << kw
+      instance_double(Axn::Result, ok?: true)
+    end
 
     result = Axn::Webhooks.emit(:lead_signed, data: {})
 
@@ -81,7 +87,10 @@ RSpec.describe "Axn::Webhooks.emit" do
       event :lead_signed, to: ["https://a.example/hook"]
     end
     calls = []
-    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { |**kw| calls << kw }
+    allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) do |**kw|
+      calls << kw
+      instance_double(Axn::Result, ok?: true)
+    end
 
     Axn::Webhooks.emit(:lead_signed, data: {})
 
@@ -108,5 +117,35 @@ RSpec.describe "Axn::Webhooks.emit" do
 
     payload = events.find { |e| e[:action].instance_of?(Axn::Webhooks::Outbound::Emit) }
     expect(payload[:dimensions]).to include(vendor: "internal")
+  end
+  describe "failed_count" do
+    it "counts sync-path deliveries that failed, without failing the emit itself" do
+      # Two targets (see the outer `before`): one delivers, one fails.
+      results = [instance_double(Axn::Result, ok?: true), instance_double(Axn::Result, ok?: false)]
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) { results.shift }
+
+      result = Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })
+
+      expect(result).to be_ok # fan-out succeeded; a subscriber being down is not an emit failure
+      expect(result.target_count).to eq(2)
+      expect(result.failed_count).to eq(1)
+    end
+
+    it "is 0 when every sync delivery succeeds" do
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call).and_return(instance_double(Axn::Result, ok?: true))
+
+      expect(Axn::Webhooks.emit(:lead_signed).failed_count).to eq(0)
+    end
+
+    it "is always 0 on the async path, where nothing has failed yet at emit time" do
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:_async_adapter).and_return(:sidekiq)
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call_async)
+
+      result = Axn::Webhooks.emit(:lead_signed)
+
+      expect(result.failed_count).to eq(0)
+      expect(result.target_count).to eq(2)
+      expect(Axn::Webhooks::Outbound::Deliver).not_to have_received(:call)
+    end
   end
 end
