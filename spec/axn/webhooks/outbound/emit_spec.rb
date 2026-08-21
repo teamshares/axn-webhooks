@@ -148,4 +148,102 @@ RSpec.describe "Axn::Webhooks.emit" do
       expect(Axn::Webhooks::Outbound::Deliver).not_to have_received(:call)
     end
   end
+
+  describe "DB-backed subscribers (PRO-3214)" do
+    def declare_with_rows!(rows)
+      Axn::Webhooks::Outbound.reset!
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+        subscribers ->(_event) { rows }
+        event :lead_closed
+      end
+    end
+
+    it "threads a Hash row's id to Deliver as subscriber_id" do
+      declare_with_rows!([{ url: "https://a.example/hook", id: "17" }])
+      calls = []
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) do |**kw|
+        calls << kw
+        instance_double(Axn::Result, ok?: true)
+      end
+
+      Axn::Webhooks.emit(:lead_closed)
+
+      expect(calls.first[:subscriber_id]).to eq("17")
+    end
+
+    it "leaves subscriber_id nil for a bare String row (today's shape, unchanged)" do
+      declare_with_rows!(["https://a.example/hook"])
+      calls = []
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) do |**kw|
+        calls << kw
+        instance_double(Axn::Result, ok?: true)
+      end
+
+      Axn::Webhooks.emit(:lead_closed)
+
+      expect(calls.first[:subscriber_id]).to be_nil
+    end
+
+    it "exposes deliveries correlating each webhook_id to its url and subscriber_id" do
+      declare_with_rows!([{ url: "https://a.example/hook", id: "1" }, { url: "https://b.example/hook", id: "2" }])
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call).and_return(instance_double(Axn::Result, ok?: true))
+
+      result = Axn::Webhooks.emit(:lead_closed)
+
+      expect(result.deliveries).to match_array([
+                                                 { webhook_id: result.webhook_ids[0], url: "https://a.example/hook", subscriber_id: "1" },
+                                                 { webhook_id: result.webhook_ids[1], url: "https://b.example/hook", subscriber_id: "2" },
+                                               ])
+      expect(result.webhook_ids).to eq(result.deliveries.map { |d| d[:webhook_id] })
+    end
+
+    it "rejects a malformed row without failing the emit, reports it once, and excludes it from target_count" do
+      declare_with_rows!(["https://good.example/hook", { url: nil }])
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call).and_return(instance_double(Axn::Result, ok?: true))
+      reported = []
+      allow(Axn.config).to receive(:on_exception) { |error, **kw| reported << { error:, context: kw[:context] } }
+
+      result = Axn::Webhooks.emit(:lead_closed)
+
+      expect(result).to be_ok
+      expect(result.target_count).to eq(1)
+      expect(result.rejected_count).to eq(1)
+      expect(result.rejected.first).to include(reason: a_string_matching(/must be a String/))
+      expect(reported.size).to eq(1) # once per emit, not once per rejected row
+    end
+
+    it "does not report anything when there are no rejections" do
+      declare_with_rows!(["https://good.example/hook"])
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call).and_return(instance_double(Axn::Result, ok?: true))
+      expect(Axn.config).not_to receive(:on_exception)
+
+      result = Axn::Webhooks.emit(:lead_closed)
+
+      expect(result.rejected_count).to eq(0)
+      expect(result.rejected).to eq([])
+    end
+  end
+
+  describe "per-call to: override honors the declared host policy (PRO-3214)" do
+    before do
+      Axn::Webhooks::Outbound.reset!
+      Axn::Webhooks.outbound do
+        sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('secret')}"
+        allowed_hosts %w[good.example]
+        event :lead_signed, to: ["https://good.example/hook"]
+      end
+    end
+
+    it "raises a rescuable runtime error for a one-off to: URL the allowlist refuses" do
+      expect { Axn::Webhooks.emit(:lead_signed, to: "https://evil.example/hook") }
+        .to raise_error(Axn::Webhooks::Error, /not allowed/)
+    end
+
+    it "still allows a one-off to: URL the allowlist accepts" do
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call).and_return(instance_double(Axn::Result, ok?: true))
+
+      expect { Axn::Webhooks.emit(:lead_signed, to: "https://good.example/hook") }.not_to raise_error
+    end
+  end
 end
