@@ -59,27 +59,46 @@ module Axn
         TIMEOUT_VALIDATE = ->(v) { (v.is_a?(Numeric) && v.positive?) || "must be a positive Numeric" }
         setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT, validate: TIMEOUT_VALIDATE
         setting :read_timeout, default: DEFAULT_READ_TIMEOUT, validate: TIMEOUT_VALIDATE
+        # A host policy, not a network one: neither this nor `allow_url` resolves DNS, so neither is
+        # proof against DNS rebinding or a hostname that later resolves to a private IP. Both nil by
+        # default (any http(s) URL passes), so an existing `outbound` block is unaffected. See
+        # TargetPolicy for the actual matching semantics (case-insensitive, `*.suffix` wildcard).
+        setting :allowed_hosts,
+                validate: lambda { |v|
+                  next true if v.is_a?(Array) && v.all? { |h| h.is_a?(String) && !h.strip.empty? }
+
+                  "must be an Array of non-empty host Strings"
+                }
+        # Required arity 1 (the parsed URI) -- unlike `user_agent`/a signing `secret`, there is no
+        # useful zero-arg reading of a URL-allow predicate; matches `backoff`'s "the callable's whole
+        # purpose is examining its argument" precedent.
+        setting :allow_url,
+                validate: lambda { |v|
+                  next "must be a callable accepting the parsed URL" unless v.respond_to?(:call)
+
+                  CallableArity.accepts?(v, 1) || "must be a callable accepting the parsed URL"
+                }
 
         # The problem with `url` as an outbound target, or nil when there is none. A predicate
         # rather than a raiser, because its two callers disagree on the error class: a declaration
         # mistake at boot is an ArgumentError (see validate_url!), while a bad one-off `emit(to:)`
-        # URL is an Axn::Webhooks::Error a caller may rescue at runtime (see Outbound::Emit).
+        # URL is an Axn::Webhooks::Error a caller may rescue at runtime (see Outbound::Emit). Shape
+        # only (no host policy) -- Emit's one-off `to:` override doesn't have a Config instance's
+        # `allowed_hosts`/`allow_url` in scope at this call site yet; closing that gap is tracked
+        # separately (PRO-3214 follow-up), not silently done here.
         def self.url_problem(url)
-          # A non-String (e.g. a `URI`) would parse fine via `#to_s`, but the ORIGINAL object is
-          # what reaches `Deliver`, which `expects :url, type: String` and rejects. Require a
-          # String outright rather than normalizing.
-          return "must be a String (got #{url.class})" unless url.is_a?(String)
-
-          uri = URI.parse(url)
-          return nil if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
-
-          "#{url.inspect} must be http(s)"
-        rescue URI::InvalidURIError
-          "#{url.inspect} is not a valid URL"
+          TargetPolicy.parse_url!(url)
+          nil
+        rescue Axn::Webhooks::InvalidTarget => e
+          e.message
         end
 
+        # rubocop:disable Metrics/ParameterLists -- one kwarg per DSL setting, mirroring `DSL#__config__`'s
+        # call site 1:1; a Hash-options refactor would ripple through every caller for no real gain.
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
-                       vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil)
+                       vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil,
+                       allowed_hosts: nil, allow_url: nil)
+          # rubocop:enable Metrics/ParameterLists
           @signer = signer
           @events = events # { Symbol => { to:, type:, vendor: } }
           @default_subscribers = default_subscribers
@@ -91,6 +110,8 @@ module Axn
           self.user_agent = user_agent unless user_agent.nil?
           self.open_timeout = open_timeout unless open_timeout.nil?
           self.read_timeout = read_timeout unless read_timeout.nil?
+          self.allowed_hosts = allowed_hosts unless allowed_hosts.nil?
+          self.allow_url = allow_url unless allow_url.nil?
 
           @events.each { |name, spec| validate_event!(name, spec) }
 
@@ -110,16 +131,42 @@ module Axn
           fetch(event)[:vendor] || vendor
         end
 
+        # `resolve_subscribers`'s return value: `subscribers` is the Array of validated `Subscriber`s
+        # to actually fan out to; `rejections` is `{ target:, reason: }` for every row TargetPolicy
+        # refused. Rejection is PER ROW -- one malformed subscriber (or one your `allowed_hosts`/
+        # `allow_url` policy refuses) never discards the rest of a fan-out.
+        Resolution = Data.define(:subscribers, :rejections)
+
         # A DECLARED per-event `to:` always wins, even when it resolves to zero targets — a static
         # Array as-is (including `[]`), or a lambda `->(event){…}` invoked (arity-aware, matching
         # Resolvers.resolve) and its result wrapped in Array (nil -> []). The block-level
         # `subscribers` resolver is ONLY consulted when the event declared no `to:` at all
         # (spec[:to].nil?) — never as a fallback for a declared resolver returning nil.
-        def targets_for(event)
+        #
+        # Every raw entry -- a bare URL String (today's shape) or a `{ url:, id: }` Hash (a
+        # DB-backed row) -- goes through the SAME `TargetPolicy` a statically-declared `to:` Array
+        # was already checked against at boot (`validate_event!` below), so a runtime resolver can
+        # never see a looser bar than a hand-written Array does.
+        def resolve_subscribers(event)
           spec = fetch(event)
-          return Array(resolve_to(spec[:to], event)) unless spec[:to].nil?
+          raw = spec[:to].nil? ? call_resolver(@default_subscribers, event) : resolve_to(spec[:to], event)
 
-          Array(call_resolver(@default_subscribers, event))
+          subscribers = []
+          rejections = []
+          Array(raw).each do |target|
+            subscribers << TargetPolicy.check!(target, allowed_hosts:, allow_url:)
+          rescue Axn::Webhooks::InvalidTarget => e
+            rejections << { target: target.inspect, reason: e.message }
+          end
+
+          Resolution.new(subscribers:, rejections:)
+        end
+
+        # Back-compat convenience for callers that only want the resolved URLs and don't care about
+        # a malformed row -- e.g. today's `Emit` fan-out. Silently drops rejections; a caller that
+        # needs to know about (or report) them wants `resolve_subscribers` directly.
+        def targets_for(event)
+          resolve_subscribers(event).subscribers.map(&:url)
         end
 
         private
@@ -181,10 +228,14 @@ module Axn
           end
         end
 
+        # Arity-aware via `CallableArity` (not bare `#arity`): a plain callable OBJECT -- a very
+        # plausible DB-store shape, e.g. `Subscription::Store.new` -- has no `#arity` of its own and
+        # would NoMethodError here before this fix. `CallableArity.accepts?` falls back to
+        # `callable.method(:call).parameters` for exactly that case.
         def call_resolver(callable, event)
           return nil if callable.nil?
 
-          callable.arity.zero? ? callable.call : callable.call(event)
+          CallableArity.accepts?(callable, 1) ? callable.call(event) : callable.call
         end
 
         # `to:` is "declared" whenever spec[:to] is non-nil — a static value (Array, including
@@ -209,14 +260,19 @@ module Axn
                   "outbound event #{name.inspect} `to:` must be an Array of URLs or a callable (got #{spec[:to].class})"
           end
 
-          spec[:to].each { |url| validate_url!(name, url) }
+          spec[:to].each { |target| validate_target!(name, target) }
         end
 
-        def validate_url!(name, url)
-          problem = self.class.url_problem(url)
-          return if problem.nil?
-
-          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{problem}"
+        # Delegates to the SAME `TargetPolicy` a runtime-resolved row goes through
+        # (`resolve_subscribers`), including the declared `allowed_hosts`/`allow_url` -- so a static
+        # `to:` entry your own host policy would reject fails loudly at boot instead of silently
+        # (well, loudly, but confusingly late) at the first emit. A pure declaration mistake, so this
+        # raises plain ArgumentError like `max_attempts`/`backoff` above, not the runtime
+        # `InvalidTarget` `resolve_subscribers` collects into `rejections`.
+        def validate_target!(name, target)
+          TargetPolicy.check!(target, allowed_hosts:, allow_url:)
+        rescue Axn::Webhooks::InvalidTarget => e
+          raise ArgumentError, "outbound event #{name.inspect} `to:` #{e.message}"
         end
       end
     end

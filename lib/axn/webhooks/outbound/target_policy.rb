@@ -6,9 +6,10 @@ module Axn
   module Webhooks
     module Outbound
       # The single place a resolved subscriber row is validated -- shared by `Config`'s boot-time
-      # check of a static `to:` Array and `Config#resolve_targets`'s per-emission check of whatever
-      # `subscribers`/`to:` resolved to at runtime, so the two paths can never drift apart (they used
-      # to: only the static path was checked; see this file's origin, `Config#validate_url!`).
+      # check of a static `to:` Array and `Config#resolve_subscribers`'s per-emission check of
+      # whatever `subscribers`/`to:` resolved to at runtime, so the two paths can never drift apart
+      # (they used to: only the static path was checked; see this file's origin,
+      # `Config#validate_url!`).
       #
       # `allowed_hosts`/`allow_url` are a HOST policy, not a network one: neither resolves DNS, so
       # neither is proof against DNS rebinding or a hostname that resolves to a private IP at request
@@ -30,14 +31,14 @@ module Axn
           # object is what a static `to:` entry keeps in `@events` and what `Deliver` is later handed
           # as `url:` (`expects :url, type: String`) -- accepted here, rejected at delivery time
           # instead. Require a String outright rather than normalizing.
-          raise Axn::Webhooks::InvalidTarget, "target must be a String URL or a Hash (got #{url.class})" unless url.is_a?(String)
+          raise Axn::Webhooks::InvalidTarget, "URL must be a String (got #{url.class})" unless url.is_a?(String)
 
           uri = URI.parse(url)
-          raise Axn::Webhooks::InvalidTarget, "target URL #{url.inspect} must be http(s)" unless http_uri?(uri)
+          raise Axn::Webhooks::InvalidTarget, "URL #{url.inspect} must be http(s)" unless http_uri?(uri)
 
           uri
         rescue URI::InvalidURIError
-          raise Axn::Webhooks::InvalidTarget, "target URL #{url.inspect} is not a valid URL"
+          raise Axn::Webhooks::InvalidTarget, "URL #{url.inspect} is not a valid URL"
         end
 
         def http_uri?(uri) = %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
@@ -47,7 +48,7 @@ module Axn
 
           return if allowed_hosts.any? { |pattern| host_matches?(pattern, uri.host) }
 
-          raise Axn::Webhooks::InvalidTarget, "target host #{uri.host.inspect} is not allowed (allowed_hosts: #{allowed_hosts.inspect})"
+          raise Axn::Webhooks::InvalidTarget, "host #{uri.host.inspect} is not allowed (allowed_hosts: #{allowed_hosts.inspect})"
         end
 
         # A bare entry is an exact (case-insensitive) host match; a `*.suffix` entry matches any
@@ -63,11 +64,14 @@ module Axn
           end
         end
 
+        # `allow_url` is always called with the parsed URI (arity 1 required at boot — see Config's
+        # setting validator — matching the same "the callable's whole purpose is examining its
+        # argument" precedent `backoff` already sets, rather than the zero-OR-one tolerance
+        # `user_agent`/a signing `secret` get).
         def check_allow_url!(uri, allow_url)
           return if allow_url.nil?
 
-          allowed = CallableArity.accepts?(allow_url, 1) ? allow_url.call(uri) : allow_url.call
-          raise Axn::Webhooks::InvalidTarget, "target URL #{uri} was rejected by allow_url" unless allowed
+          raise Axn::Webhooks::InvalidTarget, "URL #{uri} was rejected by allow_url" unless allow_url.call(uri)
         end
       end
     end

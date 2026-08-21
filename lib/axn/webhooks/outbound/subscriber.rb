@@ -27,7 +27,7 @@ module Axn
             when Hash then coerce_hash(raw)
             else
               raise Axn::Webhooks::InvalidTarget,
-                    "target must be a String URL or a Hash (got #{raw.class})"
+                    "must be a String URL or a Hash (got #{raw.class})"
             end
           end
 
@@ -36,8 +36,8 @@ module Axn
           def coerce_hash(raw)
             symbolized = raw.to_h { |k, v| [k.to_sym, v] }
             unknown = symbolized.keys - %i[url id]
-            raise Axn::Webhooks::InvalidTarget, "target Hash has unknown key(s): #{unknown.inspect}" if unknown.any?
-            raise Axn::Webhooks::InvalidTarget, "target Hash must include :url (got #{raw.inspect})" unless symbolized.key?(:url)
+            raise Axn::Webhooks::InvalidTarget, "Hash has unknown key(s): #{unknown.inspect}" if unknown.any?
+            raise Axn::Webhooks::InvalidTarget, "Hash must include :url (got #{raw.inspect})" unless symbolized.key?(:url)
 
             new(url: symbolized[:url], id: symbolized[:id]&.to_s)
           end

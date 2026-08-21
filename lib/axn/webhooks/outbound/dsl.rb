@@ -16,6 +16,8 @@ module Axn
           @user_agent = nil
           @open_timeout = nil
           @read_timeout = nil
+          @allowed_hosts = nil
+          @allow_url = nil
         end
 
         def sign(strategy = nil, **opts, &block)
@@ -43,6 +45,16 @@ module Axn
           @open_timeout = open
           @read_timeout = read
         end
+
+        # A host policy for resolved targets (both a static `to:` Array and a runtime
+        # `subscribers`/`to:` lambda's return value go through the same check) -- see TargetPolicy
+        # for exact matching semantics. Splat-friendly: `allowed_hosts "a.example", "b.example"` and
+        # `allowed_hosts %w[a.example b.example]` both work.
+        def allowed_hosts(*values) = @allowed_hosts = values.flatten
+
+        # A general escape hatch alongside `allowed_hosts` -- called with the parsed URI, must
+        # return truthy to allow the target through. Both nil by default (no host policy at all).
+        def allow_url(callable = nil, &block) = @allow_url = callable || block
 
         # rubocop:disable Naming/MethodParameterName
         def event(name, to: nil, type: nil, vendor: nil)
@@ -73,6 +85,8 @@ module Axn
             user_agent: @user_agent,
             open_timeout: @open_timeout,
             read_timeout: @read_timeout,
+            allowed_hosts: @allowed_hosts,
+            allow_url: @allow_url,
           )
         end
       end
