@@ -37,7 +37,13 @@ module Axn
         # unexpected-keyword ArgumentError the moment a widened caller starts also offering
         # `subscriber:`. A block declaring `**` receives everything unfiltered.
         class CustomSigner
-          REQUIRED_KEYWORDS = %i[id timestamp body].freeze
+          # The only kwargs a signer is ever called with. A block may ignore any/all of them --
+          # `sign { { "X-API-Key" => key } }` (zero params) is a legitimate, pre-existing pattern:
+          # Ruby blocks are always non-lambda Procs, which silently tolerate being called with
+          # kwargs they never declared (Codex P1 finding: an earlier version of this check
+          # REQUIRED every block to declare id:/timestamp:/body:, rejecting that working
+          # configuration at boot even though it was never actually broken).
+          SUPPLIED_KEYWORDS = %i[id timestamp body subscriber].freeze
 
           def initialize(block)
             @block = block
@@ -57,18 +63,21 @@ module Axn
             kwargs.slice(*@accepted)
           end
 
-          # A block incompatible with the original 3-kwarg contract would otherwise boot fine and
-          # raise ArgumentError on the very first real delivery attempt -- the same class of Codex
-          # finding the rest of this file guards against for `secret`/`backoff`/`user_agent`.
+          # The one shape that genuinely fails on every call: a block REQUIRING a keyword outside
+          # `SUPPLIED_KEYWORDS` (e.g. `sign { |id:, vendor:| … }`) -- `vendor:` is never one of the
+          # kwargs a signer is called with, so every real signing attempt would raise "missing
+          # keyword: vendor". A block that merely ignores some/all of id:/timestamp:/body:/
+          # subscriber: -- including declaring NONE of them -- is fine; Ruby's own Proc/block
+          # semantics already tolerate that.
           def validate_required_keywords!
             return if @accepted == :all
 
-            missing = REQUIRED_KEYWORDS - @accepted
-            return if missing.empty?
+            unsupplied = CallableArity.required_keywords(@block) - SUPPLIED_KEYWORDS
+            return if unsupplied.empty?
 
             raise ArgumentError,
-                  "sign block must accept #{REQUIRED_KEYWORDS.map { |k| "#{k}:" }.join(', ')} " \
-                  "(missing #{missing.map { |k| "#{k}:" }.join(', ')})"
+                  "sign block requires #{unsupplied.map { |k| "#{k}:" }.join(', ')}, which this gem " \
+                  "never supplies (only #{SUPPLIED_KEYWORDS.map { |k| "#{k}:" }.join(', ')} are ever passed)"
           end
         end
 

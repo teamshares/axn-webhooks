@@ -22,7 +22,7 @@ module Axn
           # field the caller thought they were setting (Codex-style finding this design heads off).
           def coerce(raw)
             case raw
-            when Subscriber then raw
+            when Subscriber then coerce_subscriber(raw)
             when String then new(url: raw, id: nil)
             when Hash then coerce_hash(raw)
             else
@@ -32,6 +32,19 @@ module Axn
           end
 
           private
+
+          # A resolver may construct a Subscriber directly (`Subscriber.new(url:, id: some_record.id)`)
+          # rather than going through the Hash path -- and unlike `coerce_hash`'s `&.to_s`, a
+          # bare `Subscriber.new` applies no such normalization. An Integer id would then reach
+          # `Emit` as `subscriber_id` and fail `Deliver`'s `expects :subscriber_id, type: String`
+          # despite passing every check here (Codex P2 finding). Returns the SAME object when its
+          # id is already normalized (nil or a String), so the existing "passed through unchanged"
+          # identity contract holds for the common case.
+          def coerce_subscriber(raw)
+            return raw if raw.id.nil? || raw.id.is_a?(String)
+
+            new(url: raw.url, id: raw.id.to_s)
+          end
 
           def coerce_hash(raw)
             # A key that isn't a Symbol/String (e.g. an Integer, from a raw DB row map) has no

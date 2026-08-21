@@ -2,9 +2,22 @@
 
 RSpec.describe Axn::Webhooks::Outbound::Subscriber do
   describe ".coerce" do
-    it "passes a Subscriber through unchanged" do
+    it "passes a Subscriber through unchanged when its id is already a String (or nil)" do
       sub = described_class.new(url: "https://x.example/hook", id: "17")
       expect(described_class.coerce(sub)).to equal(sub)
+
+      nil_id_sub = described_class.new(url: "https://x.example/hook")
+      expect(described_class.coerce(nil_id_sub)).to equal(nil_id_sub)
+    end
+
+    # Codex P2 finding: a resolver constructing `Subscriber.new(url:, id: 17)` directly (an
+    # Integer, not stringified) skipped the stringification the Hash-row path applies via
+    # `coerce_hash`'s `symbolized[:id]&.to_s`. `Emit` then forwards the Integer as `subscriber_id`,
+    # but `Deliver` declares that `expects :subscriber_id, type: String` -- so this otherwise-valid
+    # target failed DELIVERY validation, despite passing every check `resolve_subscribers` runs.
+    it "stringifies a prebuilt Subscriber's non-String id, matching the Hash-row path" do
+      sub = described_class.new(url: "https://x.example/hook", id: 17)
+      expect(described_class.coerce(sub)).to eq(described_class.new(url: "https://x.example/hook", id: "17"))
     end
 
     it "wraps a bare String URL with a nil id (today's shape, unchanged)" do

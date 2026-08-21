@@ -39,6 +39,17 @@ module Axn
           params.select { |(type, _)| %i[key keyreq].include?(type) }.map { |(_, name)| name }
         end
 
+        # Which keyword names `callable.call(**kwargs)` REQUIRES — a strict subset of
+        # `accepted_keywords` (excludes optional `:key` params). Used to catch a callable that
+        # needs a keyword outside a fixed supplied set (e.g. `sign { |id:, vendor:| … }`, where
+        # `vendor:` is never one of the kwargs this gem passes a signer) — the one shape that
+        # genuinely fails on every call, as opposed to a callable that simply ignores some/all of
+        # what it's offered (which Ruby's own Proc/block semantics already tolerate fine).
+        def required_keywords(callable)
+          params = callable.respond_to?(:parameters) ? callable.parameters : callable.method(:call).parameters
+          params.select { |(type, _)| type == :keyreq }.map { |(_, name)| name }
+        end
+
         # The ORIGINAL `subscribers`/`to:` resolver dispatch rule, preserved byte-for-byte (Codex P2
         # finding): "pass the event unless the callable's raw arity is EXACTLY zero." Deliberately
         # raw #arity, not #parameters-based: a Proc (non-lambda) with a single OPTIONAL/default

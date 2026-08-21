@@ -246,10 +246,46 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         expect(received).to eq(id: "m", timestamp: 5, body: "abc", subscriber:)
       end
 
-      it "rejects at boot (not on the first delivery) a block that can't accept id:/timestamp:/body:" do
+      # Codex P1 finding, round 3: `sign { { "X-API-Key" => key } }` -- a ZERO-param block that
+      # ignores id:/timestamp:/body: entirely -- is a legitimate, PRE-EXISTING pattern: a Ruby
+      # block (always a non-lambda Proc, never a lambda) silently tolerates being called with
+      # kwargs it never declared. The original boot check demanded the block declare ALL of
+      # id:/timestamp:/body:, rejecting this working configuration at declaration time even though
+      # it was never actually broken.
+      it "accepts a zero-param block that ignores id:/timestamp:/body: entirely (a legitimate static-header signer)" do
         expect do
-          described_class.build(strategy: nil, opts: {}, block: ->(subscriber:) { subscriber })
-        end.to raise_error(ArgumentError, /sign block must accept.*id:.*timestamp:.*body:/)
+          described_class.build(strategy: nil, opts: {}, block: -> { { "x-api-key" => "static-key" } })
+        end.not_to raise_error
+      end
+
+      it "the accepted zero-param block still works at call time, receiving nothing" do
+        signer = described_class.build(strategy: nil, opts: {}, block: -> { { "x-api-key" => "static-key" } })
+        expect(signer.call(id: "m", timestamp: 5, body: "abc")).to eq("x-api-key" => "static-key")
+      end
+
+      # A block that only wants the subscriber (ignoring id:/timestamp:/body:) is the identical
+      # legitimate shape -- there's nothing broken about a custom signer that keys its header
+      # purely off subscriber identity.
+      it "accepts (and correctly calls) a block that declares only subscriber:, ignoring id:/timestamp:/body:" do
+        seen = nil
+        signer = described_class.build(strategy: nil, opts: {}, block: lambda { |subscriber:|
+          seen = subscriber
+          { "x-subscriber" => subscriber&.id.to_s }
+        })
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        result = signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        expect(seen).to equal(subscriber)
+        expect(result).to eq("x-subscriber" => "17")
+      end
+
+      # What SHOULD still be caught at boot: a block requiring a keyword this gem can never
+      # supply (outside id:/timestamp:/body:/subscriber:) -- that genuinely fails on every call.
+      it "still rejects at boot a block requiring a keyword this gem never supplies" do
+        expect do
+          described_class.build(strategy: nil, opts: {}, block: ->(id:, vendor:) { "#{id}#{vendor}" })
+        end.to raise_error(ArgumentError, /requires.*vendor:.*never supplies/)
       end
     end
   end
