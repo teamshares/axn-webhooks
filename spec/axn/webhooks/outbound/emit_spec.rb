@@ -185,6 +185,24 @@ RSpec.describe "Axn::Webhooks.emit" do
       expect(calls.first[:subscriber_id]).to be_nil
     end
 
+    # A DB-backed row is IDENTITY ONLY (url + id) -- Subscriber.coerce rejects an unknown Hash key
+    # like `secret:`/`headers:` outright (see subscriber_spec.rb), and `enqueue` only ever threads
+    # url/webhook_id/body/event/vendor/subscriber_id through to Deliver. Asserted explicitly here
+    # because this is the whole point of the design: no credential ever sits in Deliver.call's
+    # kwargs, which for the async path means no credential ever sits in the queue backend's payload.
+    it "never threads a secret/token/headers key to Deliver, even if a row tried to smuggle one" do
+      calls = []
+      allow(Axn::Webhooks::Outbound::Deliver).to receive(:call) do |**kw|
+        calls << kw
+        instance_double(Axn::Result, ok?: true)
+      end
+      declare_with_rows!([{ url: "https://a.example/hook", id: "17" }])
+
+      Axn::Webhooks.emit(:lead_closed)
+
+      expect(calls.first.keys).to match_array(%i[url webhook_id body event vendor subscriber_id])
+    end
+
     it "exposes deliveries correlating each webhook_id to its url and subscriber_id" do
       declare_with_rows!([{ url: "https://a.example/hook", id: "1" }, { url: "https://b.example/hook", id: "2" }])
       allow(Axn::Webhooks::Outbound::Deliver).to receive(:call).and_return(instance_double(Axn::Result, ok?: true))

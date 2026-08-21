@@ -336,6 +336,22 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(described_class).to have_received(:call_async).with(hash_including(subscriber_id: "17"))
     end
 
+    # The whole point of resolving secret/headers PER ATTEMPT (never storing them) is that a
+    # re-enqueue -- which persists its kwargs in the queue backend's payload for the life of the
+    # retry chain -- carries only the subscriber's IDENTITY, never a credential.
+    it "never carries a secret/token/headers key into the re-enqueued job" do
+      transport = fake_transport(ok(503))
+      declare!(transport:, headers: -> { { "authorization" => "Bearer secret-token" } })
+      configure_adapter!
+      allow(described_class).to receive(:call_async)
+
+      described_class.call(**kwargs, subscriber_id: "17", attempt: 1)
+
+      expect(described_class).to have_received(:call_async) do |**call_kwargs|
+        expect(call_kwargs.keys).to match_array(%i[url webhook_id body event vendor subscriber_id attempt _async])
+      end
+    end
+
     it "stamps subscriber_id as a high-cardinality TAG, not a bounded metrics dimension" do
       # A subscriber id off a DB table is unbounded -- axn's `dimension` is the metrics facet and
       # must stay bounded (the same rule Deliver's own `event` dimension and VendorFacet follow);
