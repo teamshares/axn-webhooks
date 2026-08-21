@@ -822,7 +822,8 @@ digest/encoding, or a header name that isn't a valid HTTP field token (no spaces
 newlines), fails at boot rather than inside every delivery attempt. `header:` and
 `timestamp_header:` may not be the same name as each other, nor any header the delivery pipeline
 sets after signing: `content-type` and `user-agent` (which `Deliver` merges in afterwards) or
-`content-length` (which the transport regenerates from the request body at send time). In every one
+`content-length`/`transfer-encoding` (which the transport rewrites at send time — the first
+regenerated from the request body, the second deleted outright). In every one
 of those cases the later value replaces the signature and each delivery ships unverifiable. Braces in
 `signing_string:` must be exactly `{timestamp}` or `{body}`; a malformed one (`{time-stamp}`, or an
 unclosed `{timestamp`) is rejected rather than silently signed as literal text, so a literal brace

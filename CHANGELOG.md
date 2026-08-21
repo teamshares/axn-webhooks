@@ -66,8 +66,12 @@
 ### Changed (Outbound)
 - **`sign :hmac` also rejects `Content-Length`.** The transport regenerates it from the request body
   at send time, so a signature emitted under that name never left the process — verified on the
-  wire, the receiver saw the body length. Reserved names are now `content-type`/`user-agent` (set by
-  `Deliver`) plus `content-length` (set by `Transport`).
+  wire, the receiver saw the body length. Reserved names are `content-type`/`user-agent` (merged in
+  by `Deliver`) plus `content-length`/`transfer-encoding` (rewritten by `Transport` inside
+  `Net::HTTP#send_request_with_body`, after the caller's headers are applied). That transport set is
+  established by observation, not by reading the stdlib: a spec drives a real socket and asserts
+  exactly those two are clobbered while `Host`, `Connection`, `Accept-Encoding` and custom names
+  survive — the existing transport spec stubs `Net::HTTP#request` and so cannot see any of it.
 - **Config now owns an immutable copy of every mutable value it holds** — per-event `to:` URLs,
   `type:` and `vendor:`, and the block-level `vendor`/`user_agent` settings. Each stayed aliased to
   the caller's String, so a later `replace()` rewrote `wire_type`, the observability facet, the
