@@ -13,6 +13,9 @@ module Axn
       # declaration name => the registry keys it owns. Once one `inbound :slack` can produce N
       # endpoints, re-declaring it has to be able to REMOVE keys, not just overwrite them.
       @declared = {}
+      # registry key => the declaration that CURRENTLY owns it. Needed because two declarations can
+      # generate the same endpoint name, and a stale claim must never delete a live route.
+      @owners = {}
 
       class << self
         def register(name, endpoint) = @registry[name.to_sym] = endpoint
@@ -24,20 +27,46 @@ module Axn
         # nested becoming plain, plain becoming nested — each of which previously left a route
         # mounted with its old verifier and handler (Codex review).
         #
-        # Ownership is per declaration name, so two declarations whose names collide (`inbound
-        # :slack` with `endpoint(:events)` vs. a plain `inbound :slack_events`) still race for the
-        # shared key, last writer winning. That predates nesting and needs a real naming decision,
-        # not bookkeeping.
+        # Reclaims only the keys this declaration STILL owns. Two declarations can generate the same
+        # endpoint name (`inbound :slack` with `endpoint(:events)` vs. a plain `inbound
+        # :slack_events`); last writer wins, which predates nesting — but without the ownership
+        # check, re-declaring the FIRST one would then delete the second one's live route and not
+        # restore it. That deletion is not pre-existing: before this bookkeeping, registration only
+        # ever overwrote (Codex review). A takeover warns rather than raising: the collision is
+        # recoverable, and the endpoint that loses is named so it can be found.
         def replace_declaration(name, endpoints)
           key = name.to_sym
-          (@declared[key] || []).each { |registered_name| @registry.delete(registered_name) }
-          endpoints.each { |endpoint_name, endpoint| @registry[endpoint_name] = endpoint }
+
+          (@declared[key] || []).each do |registered_name|
+            next unless @owners[registered_name] == key
+
+            @registry.delete(registered_name)
+            @owners.delete(registered_name)
+          end
+
+          endpoints.each do |endpoint_name, endpoint|
+            warn_takeover(endpoint_name, key) if @owners.key?(endpoint_name) && @owners[endpoint_name] != key
+            @registry[endpoint_name] = endpoint
+            @owners[endpoint_name] = key
+          end
+
           @declared[key] = endpoints.keys
         end
 
         def reset!
           @registry.clear
           @declared.clear
+          @owners.clear
+        end
+
+        private
+
+        def warn_takeover(endpoint_name, new_owner)
+          Axn.config.logger.warn(
+            "[axn-webhooks] inbound endpoint #{endpoint_name.inspect} is now registered by " \
+            "`inbound #{new_owner.inspect}`, replacing the one from `inbound #{@owners[endpoint_name].inspect}` — " \
+            "two declarations generate the same endpoint name",
+          )
         end
       end
     end

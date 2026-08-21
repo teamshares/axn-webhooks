@@ -222,6 +222,49 @@ RSpec.describe "nested inbound endpoints" do
       expect(Axn::Webhooks::Inbound.registered).to eq([:slack])
     end
 
+    it "never deletes a key another declaration has since taken over" do
+      # Replacement reclaims only what this declaration STILL owns. Otherwise reloading :slack
+      # deleted a live :slack_events route belonging to an unrelated plain declaration — a failure
+      # created by the ownership bookkeeping itself, since before it nothing was ever deleted
+      # (Codex review).
+      Axn::Webhooks.inbound(:slack) do
+        verify :hmac, secret: "nested", signature: header("X-Sig")
+        endpoint(:events) { dispatch to: "HandlerA" }
+      end
+
+      allow(Axn.config.logger).to receive(:warn) # takeover warning, asserted separately below
+      Axn::Webhooks.inbound(:slack_events) do
+        verify :hmac, secret: "plain", signature: header("X-Sig")
+        dispatch to: "HandlerB"
+      end
+
+      Axn::Webhooks.inbound(:slack) do
+        verify :hmac, secret: "nested", signature: header("X-Sig")
+        endpoint(:other) { dispatch to: "HandlerC" }
+      end
+
+      expect(Axn::Webhooks::Inbound.registered).to contain_exactly(:slack_events, :slack_other)
+
+      body = "{}"
+      sig = Axn::Webhooks::Signature.compute(secret: "plain", payload: body)
+      request = Axn::Webhooks::Request.new(raw_body: body, headers: { "X-Sig" => sig })
+      expect(Axn::Webhooks::Inbound[:slack_events].verify(request)).to be_ok # still the PLAIN one
+    end
+
+    it "warns when one declaration takes over a name another already registered" do
+      Axn::Webhooks.inbound(:slack) do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        endpoint(:events) { dispatch to: "HandlerA" }
+      end
+
+      expect(Axn.config.logger).to receive(:warn).with(/slack_events.*two declarations/m)
+
+      Axn::Webhooks.inbound(:slack_events) do
+        verify :hmac, secret: "s", signature: header("X-Sig")
+        dispatch to: "HandlerB"
+      end
+    end
+
     it "drops the plain endpoint when the vendor gains children" do
       declare_plain
       declare_two

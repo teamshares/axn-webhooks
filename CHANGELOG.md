@@ -43,7 +43,10 @@
 - **Re-declaring a vendor now replaces its whole registered set.** With nesting, one `inbound :slack`
   owns N registry keys, so overwriting-only left routes mounted that the new declaration no longer
   defined — a child dropped from the block, or a vendor switching between nested and plain, kept
-  serving its previous verifier and handler. All four transitions now replace exactly.
+  serving its previous verifier and handler. All four transitions now replace exactly. Replacement
+  reclaims only the keys a declaration still owns, so when two declarations generate the same
+  endpoint name (`inbound :slack` with `endpoint(:events)` vs. a plain `inbound :slack_events`)
+  re-declaring the first can't delete the second's live route; the takeover is warned, naming both.
 - **Nested-endpoint fixes:** a child re-declaring `respond` and then `static_respond` (with the
   parent supplying one of them) was accepted, silently dropping the child's first declaration —
   a re-declared renderer is now child-owned, so the same-block conflict raises as documented. And a
