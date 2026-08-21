@@ -108,6 +108,26 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
     end
 
+    # Codex P1 finding, round 5: the Hash-row redaction above doesn't help when a resolver
+    # accidentally returns a non-Hash object entirely -- e.g. an ActiveRecord model instance,
+    # whose #inspect commonly renders EVERY attribute, including a secret/token column. Fresh
+    # after the Hash-row leak fix, the non-Hash fallback still rendered arbitrary target#inspect
+    # output verbatim.
+    it "never leaks an arbitrary non-Hash rejected target's #inspect (e.g. a model instance with a secret attribute)" do
+      fake_model = Struct.new(:url, :api_token) do
+        def inspect = "#<FakeSubscription url=#{url.inspect}, api_token=#{api_token.inspect}>"
+      end.new("https://a.example/hook", "live-key-do-not-leak")
+
+      config = outbound! do
+        subscribers ->(_event) { [fake_model] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
+      expect(resolution.rejections.first[:target]).not_to include("FakeSubscription")
+    end
+
     # Codex P1 finding: `Kernel#Array` on a bare Hash converts it to `[[k, v], ...]` pairs (Hash
     # responds to #to_a), NOT `[hash]` -- a `subscribers`/`to:` resolver that returns ONE row
     # directly, rather than wrapping it in an Array (an easy mistake: "return the row" is the

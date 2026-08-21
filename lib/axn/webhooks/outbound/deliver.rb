@@ -112,6 +112,16 @@ module Axn
           raw = resolve_custom_headers(subscriber)
           return {} if raw.nil?
 
+          # A permanent misconfiguration (the resolver forgot to return a Hash, or a conditional
+          # fell through to `false`) would otherwise raise NoMethodError from unconditional
+          # iteration below -- an UNEXPECTED exception the async adapter reads as a transient
+          # crash and retries forever, even though the malformed result will never become valid
+          # (Codex P2 finding).
+          unless raw.is_a?(Hash)
+            Axn.config.logger.warn("[axn-webhooks] dropping the headers resolver result -- expected a Hash, got #{raw.class}")
+            return {}
+          end
+
           reserved = MANAGED_HEADERS + signer_headers.keys
           raw.each_with_object({}) { |(key, value), out| add_custom_header(out, key, value, reserved) }
         end

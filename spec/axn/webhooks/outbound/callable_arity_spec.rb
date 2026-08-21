@@ -93,6 +93,20 @@ RSpec.describe Axn::Webhooks::Outbound::CallableArity do
       expect(described_class.prefers_zero_args?(proc { |x| x })).to be(false)
     end
 
+    # Codex P1 finding, round 5: `->(subscriber, cache = nil) { }` has ONE required leading param
+    # followed by an optional one -- its raw arity is -2 (Ruby's `-(required + 1)` encoding), which
+    # is negative but does NOT mean "callable with zero args": `required` is 1, not 0. A bare
+    # `arity <= 0` check wrongly treated any negative arity as zero-arg-capable; only arity == 0
+    # (a truly empty/all-defaulted signature) or == -1 (zero REQUIRED params, any number of
+    # optional/rest) actually means that.
+    it "is false for a lambda with a required leading param followed by an optional one (arity -2, not -1)" do
+      expect(described_class.prefers_zero_args?(->(subscriber, cache = nil) { [subscriber, cache] })).to be(false)
+    end
+
+    it "is true for a lambda with only optional params (arity -1, regardless of how many)" do
+      expect(described_class.prefers_zero_args?(->(a = 1, b = 2) { [a, b] })).to be(true)
+    end
+
     it "is true for a Proc (non-lambda) with a genuine default (arity 0)" do
       expect(described_class.prefers_zero_args?(proc { |x = 1| x })).to be(true)
     end

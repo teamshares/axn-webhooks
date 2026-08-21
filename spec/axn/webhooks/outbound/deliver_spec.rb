@@ -443,6 +443,21 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers].keys).to match_array(%w[webhook-id webhook-timestamp webhook-signature content-type user-agent])
     end
 
+    # Codex P2 finding, round 5: a `headers` resolver returning something that ISN'T a Hash at
+    # all (a permanent misconfiguration, e.g. it forgot to wrap the result, or a conditional
+    # returned `false`) would otherwise raise NoMethodError from unconditional iteration -- an
+    # UNEXPECTED exception the async adapter reads as a transient crash and retries forever, even
+    # though the malformed return value will never become valid on retry.
+    it "drops (with a warning) the whole headers result when it isn't a Hash, instead of raising mid-delivery" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { false })
+      expect(Axn.config.logger).to receive(:warn)
+
+      result = nil
+      expect { result = described_class.call(**kwargs) }.not_to raise_error
+      expect(result).to be_ok
+    end
+
     # The generalized MANAGED_HEADERS hazard (Codex, on HmacSigner's own header:/timestamp_header:):
     # Ruby Hash keys are case-SENSITIVE so a differently-cased duplicate survives a plain `.merge`,
     # but Net::HTTP is case-INSENSITIVE and the LATER assignment wins -- so a same-position .merge

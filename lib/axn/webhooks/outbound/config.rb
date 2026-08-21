@@ -185,6 +185,11 @@ module Axn
           resolve_subscribers(event).subscribers.map(&:url).freeze
         end
 
+        # Scalars a rejected target's `#inspect` is safe to show verbatim in `redact_target`
+        # below: a bare-value target (the common malformed cases -- nil, a wrong-type url, a
+        # stray Integer) carries no OTHER fields that could hide a credential.
+        SAFE_TO_INSPECT = [String, Numeric, Symbol, NilClass, TrueClass, FalseClass].freeze
+
         private
 
         # `Kernel#Array` on a bare Hash converts it to `[[k, v], ...]` PAIRS (Hash responds to
@@ -208,9 +213,19 @@ module Axn
         # reason -- "unknown key(s): [...]" -- and this stay legible together) but its value never
         # does. A non-Hash target (nil, a URI, ...) has nothing to redact.
         def redact_target(target)
-          return target.inspect unless target.is_a?(Hash)
-
-          target.to_h { |k, v| [k, %w[url id].include?(k.to_s) ? v : "<redacted>"] }.inspect
+          case target
+          when Hash
+            target.to_h { |k, v| [k, %w[url id].include?(k.to_s) ? v : "<redacted>"] }.inspect
+          when *SAFE_TO_INSPECT
+            target.inspect
+          else
+            # Anything else -- an ActiveRecord model instance is the plausible real-world case --
+            # is a COMPOUND object whose own #inspect commonly renders every attribute, including
+            # a secret/token column. Only the Hash-row shape has a known-safe subset (:url/:id) to
+            # show; for everything else, only the class is safe to name (Codex P1 finding: the
+            # earlier Hash-only redaction still leaked a model's attributes verbatim here).
+            "#<#{target.class} (redacted)>"
+          end
         end
 
         # Freezes the CONTAINERS we own, never the caller's objects: a `to:` resolver, the signer,

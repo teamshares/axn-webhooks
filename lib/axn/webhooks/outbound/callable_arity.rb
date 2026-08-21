@@ -66,11 +66,18 @@ module Axn
         # `#parameters`-based `accepts?`: a plain `proc { |subscriber| … }` (NO default) reports its
         # param as `:opt` via `#parameters` -- indistinguishable from a genuine default by that
         # API -- but its raw arity is still the correct POSITIVE `1`, so this is the one signal that
-        # tells "has a real default/rest" (arity <= 0) apart from "merely tolerates a missing arg,
-        # Proc-style, but was never given one to default from" (Codex P1 finding: passing `nil` in
-        # place of the subscriber for exactly this shape).
+        # tells "has a real default/rest" apart from "merely tolerates a missing arg, Proc-style,
+        # but was never given one to default from" (Codex P1 finding: passing `nil` in place of the
+        # subscriber for exactly this shape).
+        #
+        # ONLY arity `0` (a truly empty/all-defaulted signature) or `-1` (Ruby's `-(required + 1)`
+        # encoding with `required == 0` -- zero REQUIRED params, any number of optional/rest ones)
+        # genuinely means "callable with zero args". A more negative arity still has a required
+        # LEADING param: `->(subscriber, cache = nil)` is arity `-2` (required == 1) and raises if
+        # actually called with zero args -- `arity <= 0` wrongly matched it too (Codex P1 finding,
+        # round 5: passed nothing, so a resolver shaped exactly like this raised on every attempt).
         def prefers_zero_args?(callable)
-          raw_arity(callable) <= 0
+          [0, -1].include?(raw_arity(callable))
         end
 
         # Shared by `zero_arity?`/`prefers_zero_args?`: raw `#arity`, falling back to
