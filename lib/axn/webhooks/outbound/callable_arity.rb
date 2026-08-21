@@ -24,6 +24,20 @@ module Axn
           rest = params.any? { |(type, _)| type == :rest }
           required + optional + (rest ? 1 : 0) >= count
         end
+
+        # Which keyword names `callable.call(**kwargs)` actually accepts: `:all` for a callable that
+        # double-splats (accepts anything), else the Array of Symbol names it declares (required and
+        # optional alike). Used to filter a fixed kwarg set down to what a caller-supplied signing
+        # block declares (`CustomSigner`), so a block written against today's `(id:, timestamp:,
+        # body:)` contract keeps working byte-for-byte when a widened caller starts also offering
+        # `url:`/`subscriber:` — those become a plain ArgumentError from a *filtered* call, not a
+        # silent widening the block didn't ask for.
+        def accepted_keywords(callable)
+          params = callable.respond_to?(:parameters) ? callable.parameters : callable.method(:call).parameters
+          return :all if params.any? { |(type, _)| type == :keyrest }
+
+          params.select { |(type, _)| %i[key keyreq].include?(type) }.map { |(_, name)| name }
+        end
       end
     end
   end
