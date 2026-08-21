@@ -238,6 +238,29 @@ RSpec.describe "Axn::Webhooks.outbound" do
       end.not_to raise_error
     end
 
+    it "rejects a user_agent callable that cannot be invoked with zero arguments" do
+      # Deliver resolves a callable user_agent with NO arguments (documented zero-arg contract) —
+      # one requiring an argument would otherwise boot successfully and raise ArgumentError on
+      # every real delivery attempt.
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          user_agent ->(deploy) { deploy }
+          event :x, to: ["https://x"]
+        end
+      end.to raise_error(ArgumentError, /user_agent got invalid value.*callable must accept zero arguments/)
+    end
+
+    it "accepts a plain String user_agent" do
+      expect do
+        Axn::Webhooks.outbound do
+          sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+          user_agent "my-app"
+          event :x, to: ["https://x"]
+        end
+      end.not_to raise_error
+    end
+
     it "rejects a `to:` that is neither an Array nor callable" do
       expect do
         Axn::Webhooks.outbound do

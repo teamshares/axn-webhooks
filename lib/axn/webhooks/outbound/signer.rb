@@ -30,6 +30,15 @@ module Axn
         # emit `v1,<sig>` alongside the id/timestamp headers the inbound verifier reads.
         class StandardWebhooksSigner
           def initialize(secret:)
+            # A pure declaration mistake, decided once at boot from the callable's own shape (not
+            # from what it resolves to) — ArgumentError, matching Config's misconfiguration split.
+            # `resolve_secret` below calls `@secret.call` with NO arguments; a callable requiring one
+            # would otherwise boot successfully and raise ArgumentError on every real signing attempt
+            # (Codex P2 finding).
+            if secret.respond_to?(:call) && !CallableArity.accepts?(secret, 0)
+              raise ArgumentError, "sign :standard_webhooks secret callable must accept zero arguments (resolved with no args per signing attempt)"
+            end
+
             @secret = secret
           end
 

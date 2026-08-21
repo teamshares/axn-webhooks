@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative "outbound/callable_arity"
 require_relative "outbound/signer"
 require_relative "outbound/envelope"
 require_relative "outbound/transport"

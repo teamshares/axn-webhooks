@@ -44,6 +44,9 @@
   it can be raised on every delivery attempt (a callable secret re-resolves per call, and may
   transiently resolve to something malformed), which is exactly when it'd otherwise flow the live
   signing credential into whatever logger/exception reporter `Axn.config.on_exception` is wired to.
+  A callable `secret:` that cannot be invoked with zero arguments (it's documented arity-free —
+  resolved fresh with no args per signing attempt) is now rejected at boot instead of raising
+  `ArgumentError` on every real signing attempt.
 - A permanent-4xx failure message's truncated response-body snippet no longer risks
   `Encoding::CompatibilityError` (mixing the ASCII-8BIT net/http labels every response body with, and
   the UTF-8 ellipsis) or a dangling invalid byte sequence from cutting a multibyte character at the
@@ -57,9 +60,11 @@
   handed to `Deliver` as `url:` (`expects :url, type: String`), rejected at emission time despite
   passing this check.
 - The `backoff` boot-time check now verifies the callable actually accepts one positional argument
-  (via `#parameters`) instead of trusting `#arity` — `->(attempt:) { }` (a required keyword) and
-  `->(a, b, *rest) { }` (needs two positional args) both reported an arity that passed the old
-  check, then raised `ArgumentError` on the very first `config.backoff.call(attempt)`.
+  (via the new `Outbound::CallableArity`, built on `#parameters`) instead of trusting `#arity` —
+  `->(attempt:) { }` (a required keyword) and `->(a, b, *rest) { }` (needs two positional args) both
+  reported an arity that passed the old check, then raised `ArgumentError` on the very first
+  `config.backoff.call(attempt)`. `user_agent`, if configured as a callable, gets the same
+  zero-argument check — `Deliver` resolves it with no args per delivery attempt.
 - `Axn::Webhooks.emit` no longer resolves the event's `vendor` ahead of `Emit.call!` — that lookup
   raises the same "unknown outbound event" error `Emit` itself already raises internally, but doing
   it before entering the action bypassed axn's executor (and its `on_exception` reporting) for an

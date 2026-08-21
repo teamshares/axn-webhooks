@@ -29,19 +29,29 @@ module Axn
         # otherwise be read as "call this with no args to derive the default" (Configurable's dynamic-
         # default convention) and blow up on DEFAULT_BACKOFF's required `attempt` arg. A zero-arity
         # wrapper resolves to the lambda itself instead.
+        # `arity == 1 || arity.negative?` alone can't tell "one required positional" apart from "one
+        # required KEYWORD" (same arity, one raises on `.call(attempt)`) or "needs 2+ positional, has
+        # a splat" (negative arity, still too few args) — see CallableArity.
         setting :backoff, default: -> { DEFAULT_BACKOFF },
                           validate: lambda { |v|
                             next "must be a callable accepting the attempt number" unless v.respond_to?(:call)
 
-                            params = v.respond_to?(:parameters) ? v.parameters : v.method(:call).parameters
-                            accepts_one_positional_argument?(params) || "must be a callable accepting the attempt number"
+                            CallableArity.accepts?(v, 1) || "must be a callable accepting the attempt number"
                           }
         # Same reasoning as `backoff`: `Transport` is a Module, and Configurable's non-dynamic default
         # path calls `.dup` on it — silently swapping in an anonymous copy that fails every `== Transport`
         # identity check downstream (e.g. Deliver's timeout-forwarding guard).
         setting :transport, default: -> { Transport }
         setting :vendor
-        setting :user_agent
+        # Deliver's `resolve_user_agent_suffix` calls a callable value with NO arguments (a zero-arg
+        # invocation is the documented contract) — one that requires an argument would otherwise boot
+        # successfully and raise ArgumentError on every real delivery (Codex P2 finding).
+        setting :user_agent,
+                validate: lambda { |v|
+                  next true unless v.respond_to?(:call)
+
+                  CallableArity.accepts?(v, 0) || "callable must accept zero arguments (resolved with no args per delivery attempt)"
+                }
         # Forwarded straight to Net::HTTP (see Transport), which calls `.zero?`/compares on whatever
         # it's given — an unvalidated non-Numeric (e.g. a String from `ENV.fetch("OPEN_TIMEOUT")`)
         # would otherwise raise NoMethodError mid-delivery instead of failing at boot (Codex P2
@@ -49,26 +59,6 @@ module Axn
         TIMEOUT_VALIDATE = ->(v) { (v.is_a?(Numeric) && v.positive?) || "must be a positive Numeric" }
         setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT, validate: TIMEOUT_VALIDATE
         setting :read_timeout, default: DEFAULT_READ_TIMEOUT, validate: TIMEOUT_VALIDATE
-
-        # Whether `callable.call(attempt)` — exactly one positional argument — actually works, per
-        # `#parameters` (uniformly correct across a lambda, a non-lambda Proc, and a plain object's
-        # `#call` Method — unlike `#arity`, which a non-strict Proc's own positional params report as
-        # `:opt` rather than `:req`, so this doesn't need to special-case proc-vs-lambda at all).
-        # `arity == 1 || arity.negative?` (the prior check) passed `->(attempt:) { }` (a required
-        # KEYWORD, arity 1, but `.call(5)` raises "missing keyword") and `->(a, b, *rest) { }` (arity
-        # -3, but `.call(5)` raises "given 1, expected 2+") — both boot-time-valid, both blowing up on
-        # the very first retry (Codex P2 finding).
-        def self.accepts_one_positional_argument?(params)
-          return false if params.any? { |(type, _)| type == :keyreq }
-
-          required = params.count { |(type, _)| type == :req }
-          return false if required > 1
-
-          optional = params.count { |(type, _)| type == :opt }
-          rest = params.any? { |(type, _)| type == :rest }
-          required + optional + (rest ? 1 : 0) >= 1
-        end
-        private_class_method :accepts_one_positional_argument?
 
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
                        vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil)

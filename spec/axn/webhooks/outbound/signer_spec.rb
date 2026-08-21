@@ -91,6 +91,24 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
         .to raise_error(Axn::Webhooks::Error, /Integer/)
     end
+
+    # `resolve_secret` calls `@secret.call` with NO arguments (a signing secret is documented as
+    # arity-free, unlike a subscriber resolver) — a callable that actually requires one would
+    # otherwise boot successfully and raise ArgumentError on every real signing attempt, converted
+    # into an Axn::Webhooks::Error `Deliver` can't classify as retryable and left for the async
+    # adapter's unbounded exception retries instead of the bounded outbound retry engine (Codex P2
+    # finding). Reject at construction (boot) instead.
+    it "rejects a secret callable that cannot be invoked with zero arguments" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(app) { app.fetch(:secret) } }, block: nil)
+      end.to raise_error(ArgumentError, /secret callable must accept zero arguments/)
+    end
+
+    it "accepts a secret callable with an optional argument (zero-arg invocation still works)" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(_app = nil) { secret } }, block: nil)
+      end.not_to raise_error
+    end
   end
 
   describe "custom block" do
