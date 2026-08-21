@@ -725,6 +725,44 @@ fixed once at emit time (it's part of the dedup identity) — so a retried deliv
 (<value>)` — from `user_agent` in the `outbound` block (a plain value or a zero-arity callable,
 resolved per attempt).
 
+#### `sign :hmac`
+
+For a receiver that expects a plain signature header rather than the Standard Webhooks envelope:
+
+```ruby
+# minimal — one header, signature over the raw body
+sign :hmac, secret: -> { ENV.fetch("PARTNER_SECRET") }, header: "X-Signature"
+# => X-Signature: 3f9a1c…
+
+# …or a replay-protectable signature, Slack-style
+sign :hmac,
+     secret:           -> { ENV.fetch("PARTNER_SECRET") },
+     header:           "X-Signature",
+     timestamp_header: "X-Timestamp",
+     signing_string:   "v0:{timestamp}:{body}",
+     prefix:           "v0="
+# => X-Timestamp: 1755740000
+#    X-Signature: v0=3f9a1c…
+```
+
+`secret:` (plain or zero-arity callable, re-resolved per attempt) and `header:` are required — there
+is no universal signature-header name, the same reason inbound's `verify :hmac` requires
+`signature:`. `digest:` (`:sha256`), `encoding:` (`:hex`), `prefix:` (`nil`) and `signing_string:`
+(`"{body}"`) mirror the inbound verifier's options, so a `sign :hmac` sender and a `verify :hmac`
+receiver configured alike round-trip.
+
+`signing_string:` is a **template**, not a callable: `{timestamp}` and `{body}` are the only
+placeholders, and an unknown one is rejected at declaration time — which a lambda would make
+impossible. Referencing `{timestamp}` without declaring `timestamp_header:` is also rejected: the
+receiver would have no way to reconstruct the signed string. If you need logic a template can't
+express, use the custom `sign { |id:, timestamp:, body:| … }` block, which has always been there.
+
+A secret that resolves to a blank or non-String value raises `Axn::Webhooks::Error` rather than
+signing with an empty key — the error names the value's class or shape, never its bytes.
+
+Note there is no id header: a signature bound to a per-message id is what `:standard_webhooks` is
+for.
+
 ### Transport
 
 The HTTP call is an injectable seam (`.post(url:, body:, headers:) -> Transport::Response`, a

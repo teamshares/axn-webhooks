@@ -13,6 +13,7 @@ module Axn
           return CustomSigner.new(block) if block
 
           case strategy&.to_sym
+          when :hmac then HmacSigner.new(**opts)
           when :standard_webhooks then StandardWebhooksSigner.new(**opts)
           # A pure declaration mistake (decided once at boot, never at runtime) — ArgumentError, not
           # Axn::Webhooks::Error, matching Config's own misconfiguration-vs-runtime split.
@@ -24,6 +25,91 @@ module Axn
         class CustomSigner
           def initialize(block) = @block = block
           def call(id:, timestamp:, body:) = @block.call(id:, timestamp:, body:)
+        end
+
+        # Parametric HMAC, the outbound face of `verify :hmac`. Emits ONE signature header plus an
+        # optional timestamp header. `header:` is required: unlike Standard Webhooks there is no
+        # universal header name, which is exactly why the inbound verifier requires `signature:`.
+        class HmacSigner
+          PLACEHOLDERS = %w[timestamp body].freeze
+          DEFAULT_SIGNING_STRING = "{body}"
+
+          def initialize(secret:, header:, digest: :sha256, encoding: :hex, prefix: nil,
+                         signing_string: DEFAULT_SIGNING_STRING, timestamp_header: nil)
+            raise ArgumentError, "sign :hmac requires a `header:` naming the signature header to emit" if header.to_s.empty?
+
+            # Same reasoning as :standard_webhooks — `resolved_secret` calls with NO arguments, so a
+            # callable needing one boots fine and raises on every real signing attempt.
+            if secret.respond_to?(:call) && !CallableArity.accepts?(secret, 0)
+              raise ArgumentError, "sign :hmac secret callable must accept zero arguments (resolved with no args per signing attempt)"
+            end
+
+            validate_template!(signing_string, timestamp_header)
+
+            @secret = secret
+            @header = header
+            @digest = digest
+            @encoding = encoding
+            @prefix = prefix
+            @signing_string = signing_string
+            @timestamp_header = timestamp_header
+          end
+
+          # `id:` is part of the signer contract but unused here — an id-bearing signature is what
+          # :standard_webhooks is for, and this preset emits no id header for a receiver to read one
+          # back from. Absorbed by `**` rather than named, so it isn't an unused argument.
+          def call(timestamp:, body:, **)
+            sig = Signature.compute(
+              secret: resolved_secret,
+              payload: render(timestamp:, body:),
+              digest: @digest,
+              encoding: @encoding,
+            )
+
+            headers = { @header => "#{@prefix}#{sig}" }
+            headers[@timestamp_header] = timestamp.to_s if @timestamp_header
+            headers
+          end
+
+          private
+
+          def render(timestamp:, body:)
+            @signing_string.gsub(/\{(\w+)\}/) { Regexp.last_match(1) == "timestamp" ? timestamp.to_s : body }
+          end
+
+          # A template (not a callable) so an unknown placeholder is caught HERE, at declaration
+          # time — impossible with a lambda. Anyone needing real logic has the custom `sign { … }`
+          # block already; a callable option would be a worse-ergonomics duplicate of it.
+          def validate_template!(template, timestamp_header)
+            raise ArgumentError, "sign :hmac `signing_string:` must be a String template (got #{template.class})" unless template.is_a?(String)
+
+            found = template.scan(/\{(\w+)\}/).flatten.uniq
+            unknown = found - PLACEHOLDERS
+            unless unknown.empty?
+              raise ArgumentError,
+                    "sign :hmac `signing_string:` has unknown placeholder(s) " \
+                    "#{unknown.map { |p| "{#{p}}" }.join(', ')} (known: {timestamp}, {body})"
+            end
+
+            return unless found.include?("timestamp") && timestamp_header.nil?
+
+            raise ArgumentError,
+                  "sign :hmac `signing_string:` references {timestamp} but no `timestamp_header:` is " \
+                  "declared — the receiver would have no way to reconstruct the signed string"
+          end
+
+          # A blank or non-String secret would otherwise sign every delivery with an empty/garbage
+          # key, and the receiver's 401 is indistinguishable from any other misconfiguration. The
+          # message NEVER carries the secret's bytes: a callable secret is re-resolved per attempt,
+          # so this can raise on every delivery and would flow the live credential into whatever
+          # Axn.config.on_exception is wired to.
+          def resolved_secret
+            secret = @secret.respond_to?(:call) ? @secret.call : @secret
+            return secret if secret.is_a?(String) && !secret.empty?
+
+            raise Axn::Webhooks::Error,
+                  "sign :hmac secret must be a non-empty String (got #{secret.is_a?(String) ? 'an empty String' : secret.class})"
+          end
         end
 
         # Standard Webhooks: secret is `whsec_<base64>`; sign `id.timestamp.body` (sha256/base64);

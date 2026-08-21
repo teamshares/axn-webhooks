@@ -40,6 +40,14 @@
   `webhook-timestamp` header deliberately diverge across retries.
 
 ### Changed (Outbound)
+- **Added `sign :hmac`**, a parametric outbound HMAC preset mirroring inbound's `verify :hmac`
+  (`digest:`/`encoding:`/`prefix:`/`signing_string:`), so a receiver expecting a plain
+  `X-Signature: <hex>` no longer needs a hand-written signer block. `header:` is required; an
+  optional `timestamp_header:` plus a `{timestamp}`/`{body}` template covers Slack-style
+  `v0:ts:body` schemes. The template is validated at declaration time — unknown placeholders, and
+  `{timestamp}` with no header to carry it, are both rejected at boot — as is a `secret:` callable
+  that can't be invoked with zero arguments. A secret resolving to a blank or non-String value
+  raises rather than signing with an empty key, and the error never carries the secret's bytes.
 - **`emit` now exposes `failed_count`.** The synchronous fallback path called `Deliver.call` and
   discarded the result, so a failed delivery still left `emit` `ok` with the target counted as
   delivered. `failed_count` is always `0` on the async path (nothing has failed at emit time), and
