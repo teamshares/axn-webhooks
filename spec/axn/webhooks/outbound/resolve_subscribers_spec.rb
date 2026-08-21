@@ -128,6 +128,36 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections.first[:target]).not_to include("FakeSubscription")
     end
 
+    # Codex P1 finding, round 6: a bare String target was assumed "safe to inspect verbatim" --
+    # true for most malformed cases (a typo, an empty string) but NOT for a webhook URL, which
+    # commonly embeds credentials via HTTP Basic userinfo or a signed/token query param. A
+    # rejected URL (e.g. its host isn't on the allowlist) had that embedded credential copied
+    # straight into `result.rejected` and the `on_exception` report.
+    it "redacts userinfo/query/fragment from a rejected URL String, keeping only scheme/host/path" do
+      config = outbound! do
+        allowed_hosts %w[good.example]
+        subscribers ->(_event) { ["https://user:live-key-do-not-leak@evil.example/hook?token=also-do-not-leak#frag"] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      target = resolution.rejections.first[:target]
+      expect(target).not_to include("live-key-do-not-leak")
+      expect(target).not_to include("also-do-not-leak")
+      expect(target).to include("evil.example/hook")
+    end
+
+    it "falls back to a safe class/length description for an unparseable rejected URL String" do
+      config = outbound! do
+        subscribers ->(_event) { ["http://[::not-a-host"] }
+        event :lead_closed
+      end
+
+      resolution = nil
+      expect { resolution = config.resolve_subscribers(:lead_closed) }.not_to raise_error
+      expect(resolution.rejections.first[:target]).to match(/String/)
+    end
+
     # Codex P1 finding: `Kernel#Array` on a bare Hash converts it to `[[k, v], ...]` pairs (Hash
     # responds to #to_a), NOT `[hash]` -- a `subscribers`/`to:` resolver that returns ONE row
     # directly, rather than wrapping it in an Array (an easy mistake: "return the row" is the
@@ -190,6 +220,45 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       resolution = config.resolve_subscribers(:lead_closed)
 
       expect(resolution.subscribers.map(&:url)).to eq(["https://good.example/hook"])
+    end
+
+    # Codex P2 finding, round 6: a static `to:` entry is validated ONCE, at boot
+    # (`validate_event!`) -- documented as such in the README's "Boot-time validation" section.
+    # Re-running `allow_url` again on every `resolve_subscribers`/`emit` call is wasted work for a
+    # target that can never change, and genuinely BREAKS a stateful/rate-limited predicate: it
+    # could reject an already-boot-validated static target later, contrary to the documented
+    # once-at-boot contract.
+    it "does NOT re-invoke allow_url for a STATIC to: entry on every resolution (validated once, at boot)" do
+      calls = 0
+      config = outbound! do
+        allow_url lambda { |_uri|
+          calls += 1
+          true
+        }
+        event :lead_signed, to: ["https://a.example/hook"]
+      end
+      calls_after_boot = calls
+
+      3.times { config.resolve_subscribers(:lead_signed) }
+
+      expect(calls_after_boot).to eq(1)
+      expect(calls).to eq(calls_after_boot) # unchanged across 3 more resolutions
+    end
+
+    it "STILL re-invokes allow_url for a runtime subscribers/to: resolver's row on every resolution" do
+      calls = 0
+      config = outbound! do
+        allow_url lambda { |_uri|
+          calls += 1
+          true
+        }
+        subscribers ->(_event) { ["https://a.example/hook"] }
+        event :lead_closed
+      end
+
+      3.times { config.resolve_subscribers(:lead_closed) }
+
+      expect(calls).to eq(3)
     end
 
     it "rejects a non-callable allow_url at boot" do

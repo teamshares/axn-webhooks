@@ -155,23 +155,21 @@ module Axn
         # `subscribers` resolver is ONLY consulted when the event declared no `to:` at all
         # (spec[:to].nil?) — never as a fallback for a declared resolver returning nil.
         #
-        # Every raw entry -- a bare URL String (today's shape) or a `{ url:, id: }` Hash (a
-        # DB-backed row) -- goes through the SAME `TargetPolicy` a statically-declared `to:` Array
-        # was already checked against at boot (`validate_event!` below), so a runtime resolver can
-        # never see a looser bar than a hand-written Array does.
+        # A static `to:` Array is validated ONCE, at boot (`validate_event!`) -- so its entries are
+        # only ever re-COERCED into Subscribers here, never re-checked against `TargetPolicy`.
+        # Re-running it on every resolution would be wasted work for a target that can never
+        # change, and would actually BREAK a stateful/rate-limited `allow_url` predicate: it could
+        # reject an already-boot-validated static target later, contradicting the documented
+        # once-at-boot contract (Codex P2 finding). Every OTHER raw entry -- from a callable `to:`
+        # or the `subscribers` fallback, neither checkable at boot since they depend on runtime
+        # state -- goes through the SAME `TargetPolicy` a static Array was checked against, so a
+        # runtime resolver can never see a looser bar than a hand-written Array does.
         def resolve_subscribers(event)
           spec = fetch(event)
+          return static_resolution(spec) if spec[:to].is_a?(Array)
+
           raw = spec[:to].nil? ? call_resolver(@default_subscribers, event) : resolve_to(spec[:to], event)
-
-          subscribers = []
-          rejections = []
-          wrap_targets(raw).each do |target|
-            subscribers << TargetPolicy.check!(target, allowed_hosts:, allow_url:)
-          rescue Axn::Webhooks::InvalidTarget => e
-            rejections << { target: redact_target(target), reason: e.message }
-          end
-
-          Resolution.new(subscribers:, rejections:)
+          check_targets(raw)
         end
 
         # Back-compat convenience for callers that only want the resolved URLs and don't care about
@@ -187,10 +185,34 @@ module Axn
 
         # Scalars a rejected target's `#inspect` is safe to show verbatim in `redact_target`
         # below: a bare-value target (the common malformed cases -- nil, a wrong-type url, a
-        # stray Integer) carries no OTHER fields that could hide a credential.
-        SAFE_TO_INSPECT = [String, Numeric, Symbol, NilClass, TrueClass, FalseClass].freeze
+        # stray Integer) carries no OTHER fields that could hide a credential. NOT String: a
+        # webhook URL commonly embeds a credential itself (HTTP Basic userinfo, a signed/token
+        # query param) -- see `redact_target`'s dedicated String handling.
+        SAFE_TO_INSPECT = [Numeric, Symbol, NilClass, TrueClass, FalseClass].freeze
 
         private
+
+        # Every element already passed `TargetPolicy.check!` (shape + host policy) at boot, via
+        # `validate_event!` -- constructing the `Config` at all is proof of that, so re-running it
+        # here could only ever re-confirm a fact already established, at the cost of the once-at-
+        # boot contract `resolve_subscribers`'s doc comment above describes. `Subscriber.coerce`
+        # alone (no TargetPolicy) does the Hash/String/Subscriber normalization without re-touching
+        # the host policy.
+        def static_resolution(spec)
+          Resolution.new(subscribers: spec[:to].map { |target| Subscriber.coerce(target) }, rejections: [])
+        end
+
+        def check_targets(raw)
+          subscribers = []
+          rejections = []
+          wrap_targets(raw).each do |target|
+            subscribers << TargetPolicy.check!(target, allowed_hosts:, allow_url:)
+          rescue Axn::Webhooks::InvalidTarget => e
+            rejections << { target: redact_target(target), reason: e.message }
+          end
+
+          Resolution.new(subscribers:, rejections:)
+        end
 
         # `Kernel#Array` on a bare Hash converts it to `[[k, v], ...]` PAIRS (Hash responds to
         # `#to_a`), not `[hash]` -- so a `subscribers`/`to:` resolver returning ONE row directly
@@ -216,6 +238,8 @@ module Axn
           case target
           when Hash
             target.to_h { |k, v| [k, %w[url id].include?(k.to_s) ? v : "<redacted>"] }.inspect
+          when String
+            redact_url_string(target)
           when *SAFE_TO_INSPECT
             target.inspect
           else
@@ -226,6 +250,24 @@ module Axn
             # earlier Hash-only redaction still leaked a model's attributes verbatim here).
             "#<#{target.class} (redacted)>"
           end
+        end
+
+        # A webhook URL commonly carries a credential ITSELF -- HTTP Basic userinfo
+        # (`https://user:pass@host/...`) or a signed/token query param -- so a rejected URL
+        # String isn't safe to `#inspect` verbatim (Codex P1 finding). Strips userinfo/query/
+        # fragment, keeping scheme/host/path -- enough to debug which target failed and why,
+        # without ever having shown a credential. Falls back to a class/size description for a
+        # String that doesn't even parse as a URI (its content is nothing this rejection reason
+        # is about anyway).
+        def redact_url_string(str)
+          uri = URI.parse(str)
+          uri.user = nil
+          uri.password = nil
+          uri.query = nil
+          uri.fragment = nil
+          uri.to_s.inspect
+        rescue URI::InvalidURIError, ArgumentError
+          "#<String (unparseable, #{str.bytesize} bytes)>"
         end
 
         # Freezes the CONTAINERS we own, never the caller's objects: a `to:` resolver, the signer,
