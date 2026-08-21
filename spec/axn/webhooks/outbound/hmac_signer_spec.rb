@@ -82,7 +82,19 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
     it "rejects an unknown template placeholder" do
       expect { build(secret: "s", header: "X-Sig", signing_string: "{nope}:{body}") }
-        .to raise_error(ArgumentError, /unknown placeholder.*\{nope\}/)
+        .to raise_error(ArgumentError, /unknown or malformed placeholder.*\{nope\}/)
+    end
+
+    it "rejects a MALFORMED placeholder, which a \\w+ scan silently treats as literal text" do
+      # `{time-stamp}` and `{timestamp` both matched nothing, so declaration succeeded and `render`
+      # signed the brace text literally — a signature the receiver cannot reconstruct, from an
+      # option whose whole selling point is declaration-time validation (Codex review).
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "X-Ts", signing_string: "{time-stamp}:{body}") }
+        .to raise_error(ArgumentError, /unknown or malformed placeholder/)
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "X-Ts", signing_string: "{timestamp:{body}") }
+        .to raise_error(ArgumentError, /unknown or malformed placeholder/)
+      expect { build(secret: "s", header: "X-Sig", signing_string: "body}") }
+        .to raise_error(ArgumentError, /unknown or malformed placeholder/)
     end
 
     it "rejects {timestamp} with no timestamp_header to carry it" do
@@ -113,6 +125,16 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
     it "accepts the punctuation RFC 7230 allows in a field name" do
       expect { build(secret: "s", header: "X-Custom_Sig.v1") }.not_to raise_error
+    end
+
+    it "rejects a header name that collides with one Deliver manages, case-insensitively" do
+      # Deliver merges its own lowercase content-type/user-agent AFTER the signer's headers. Ruby
+      # Hash keys are case-SENSITIVE so both survive the merge, but Net::HTTP is case-INSENSITIVE
+      # and the later assignment wins — silently replacing the signature (Codex review).
+      expect { build(secret: "s", header: "Content-Type") }
+        .to raise_error(ArgumentError, /Deliver sets itself/)
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "User-Agent") }
+        .to raise_error(ArgumentError, /Deliver sets itself/)
     end
 
     it "rejects an unsupported digest at declaration time, not on every delivery" do

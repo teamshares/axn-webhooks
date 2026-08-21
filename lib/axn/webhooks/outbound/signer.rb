@@ -106,11 +106,17 @@ module Axn
               raise ArgumentError,
                     "sign :hmac `#{option}:` must be a non-empty String header name (got #{value.inspect})"
             end
-            return if value.match?(HEADER_NAME)
+            unless value.match?(HEADER_NAME)
+              raise ArgumentError,
+                    "sign :hmac `#{option}:` must be a valid HTTP header name (got #{value.inspect}) — " \
+                    "letters, digits and !#$%&'*+-.^_`|~ only, with no spaces, colons or newlines"
+            end
+
+            return unless Deliver::MANAGED_HEADERS.any? { |managed| managed.casecmp?(value) }
 
             raise ArgumentError,
-                  "sign :hmac `#{option}:` must be a valid HTTP header name (got #{value.inspect}) — " \
-                  "letters, digits and !#$%&'*+-.^_`|~ only, with no spaces, colons or newlines"
+                  "sign :hmac `#{option}:` is #{value.inspect}, a header Deliver sets itself " \
+                  "(#{Deliver::MANAGED_HEADERS.join(', ')}) — it is merged in afterwards and would replace this one"
           end
 
           def render(timestamp:, body:)
@@ -123,13 +129,21 @@ module Axn
           def validate_template!(template, timestamp_header)
             raise ArgumentError, "sign :hmac `signing_string:` must be a String template (got #{template.class})" unless template.is_a?(String)
 
-            found = template.scan(/\{(\w+)\}/).flatten.uniq
-            unknown = found - PLACEHOLDERS
-            unless unknown.empty?
+            # Strip the KNOWN placeholders, then treat any brace left behind as an error. Scanning
+            # for `\{(\w+)\}` alone only ever saw well-formed braces, so `{time-stamp}` (hyphen) and
+            # `{timestamp` (unmatched) matched nothing, passed validation, and got signed as literal
+            # text — a signature the receiver cannot reconstruct, from the very option whose selling
+            # point is declaration-time validation (Codex review). A literal brace in a signing
+            # string is therefore not supported; it is far likelier to be a typo.
+            leftover = template.gsub(/\{(?:#{PLACEHOLDERS.join('|')})\}/, "")
+            if leftover.match?(/[{}]/)
+              bad = leftover.scan(/\{[^{}]*\}|[{}]/).uniq
               raise ArgumentError,
-                    "sign :hmac `signing_string:` has unknown placeholder(s) " \
-                    "#{unknown.map { |p| "{#{p}}" }.join(', ')} (known: {timestamp}, {body})"
+                    "sign :hmac `signing_string:` has unknown or malformed placeholder(s) " \
+                    "#{bad.map(&:inspect).join(', ')} (known: {timestamp}, {body})"
             end
+
+            found = template.scan(/\{(\w+)\}/).flatten.uniq
 
             return unless found.include?("timestamp") && timestamp_header.nil?
 

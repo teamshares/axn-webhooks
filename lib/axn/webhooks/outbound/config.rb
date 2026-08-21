@@ -131,7 +131,11 @@ module Axn
         def deep_freeze!
           materialize_settings!
           @events.each_value do |spec|
-            spec[:to].freeze if spec[:to].is_a?(Array)
+            # COPY rather than freeze in place: `event to: SOME_CONSTANT` would otherwise leave the
+            # application holding a frozen object it never froze, while the Strings inside stayed
+            # mutable — so `url.replace("ftp://…")` rewrote the published config, past the
+            # boot-time validation that already ran on it (Codex review).
+            spec[:to] = spec[:to].map { |url| url.is_a?(String) ? url.dup.freeze : url }.freeze if spec[:to].is_a?(Array)
             spec.freeze
           end
           @events.freeze

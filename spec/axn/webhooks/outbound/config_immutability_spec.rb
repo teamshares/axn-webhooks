@@ -59,6 +59,31 @@ RSpec.describe "Axn::Webhooks::Outbound::Config immutability" do
     expect(events[:lead_signed][:to]).to be_frozen
   end
 
+  it "copies a static to: array instead of freezing the caller's own object" do
+    # Freezing in place mutates the APPLICATION's object — an `event to: SOME_CONSTANT` left the app
+    # with a frozen constant it never froze, while the Strings inside stayed mutable, so
+    # `url.replace("ftp://…")` rewrote the published config past its boot-time validation
+    # (Codex review).
+    # `+"..."` because this file is frozen_string_literal — a bare literal would already be frozen,
+    # making the mutation check below vacuous.
+    app_targets = [+"https://a.example/hook"]
+
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      event :lead_signed, to: app_targets
+    end
+
+    expect(app_targets).not_to be_frozen
+    expect(app_targets.first).not_to be_frozen
+
+    config = Axn::Webhooks::Outbound.config
+    expect(config.targets_for(:lead_signed)).to be_frozen
+    expect(config.targets_for(:lead_signed).first).to be_frozen
+
+    app_targets.first.replace("ftp://bad.example/hook")
+    expect(config.targets_for(:lead_signed)).to eq(["https://a.example/hook"])
+  end
+
   it "does NOT freeze caller-supplied callables" do
     resolver = ->(_event) { ["https://x.example/hook"] }
     signer = ->(id:, timestamp:, body:) { { "x-sig" => "#{id}#{timestamp}#{body}" } }

@@ -818,8 +818,12 @@ receiver configured alike round-trip.
 `digest:`, `encoding:` and both header names are validated at declaration time: an unsupported
 digest/encoding, or a header name that isn't a valid HTTP field token (no spaces, colons or
 newlines), fails at boot rather than inside every delivery attempt. `header:` and
-`timestamp_header:` may not be the same name, case-insensitively — the timestamp would otherwise
-overwrite the signature and every delivery would ship unverifiable.
+`timestamp_header:` may not be the same name as each other, nor either of `content-type`/
+`user-agent` (which `Deliver` sets itself and merges in afterwards) — in every one of those cases
+the later value would replace the signature and each delivery would ship unverifiable. Braces in
+`signing_string:` must be exactly `{timestamp}` or `{body}`; a malformed one (`{time-stamp}`, or an
+unclosed `{timestamp`) is rejected rather than silently signed as literal text, so a literal brace
+is not supported there.
 
 `signing_string:` is a **template**, not a callable: `{timestamp}` and `{body}` are the only
 placeholders, and an unknown one is rejected at declaration time — which a lambda would make

@@ -13,6 +13,12 @@ module Axn
         include Axn
         include Axn::Webhooks::VendorFacet
 
+        # The headers Deliver adds AFTER the signer's, and therefore the ones a signer must not
+        # emit: Ruby Hash keys are case-sensitive so a differently-cased duplicate survives the
+        # merge below, but Net::HTTP is case-INSENSITIVE and the later assignment wins — silently
+        # replacing the signature. Signer::HmacSigner rejects these at declaration time.
+        MANAGED_HEADERS = %w[content-type user-agent].freeze
+
         expects :url, type: String
         expects :webhook_id, type: String
         expects :body, type: String
@@ -75,7 +81,7 @@ module Axn
         # reusing the stable webhook_id for idempotent dedup.
         def signed_headers
           config.signer.call(id: webhook_id, timestamp: Time.now.to_i, body:)
-                .merge("content-type" => "application/json", "user-agent" => user_agent)
+                .merge("content-type" => "application/json", "user-agent" => user_agent) # MANAGED_HEADERS
         end
 
         def user_agent
