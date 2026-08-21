@@ -32,13 +32,16 @@ module Axn
       children = dsl.__children__
       return register_endpoint(name, dsl) if children.empty?
 
-      # A parent with children is a container, not an endpoint. Registering it too would leave a
-      # third endpoint nobody mounted, silently — so a top-level dispatch/respond alongside
-      # `endpoint` blocks is a declaration mistake, caught at boot.
-      if dsl.__dispatch_declared? || dsl.__respond__ || dsl.__static_respond__
+      # A parent with children is a container, not an endpoint. A top-level `dispatch` is what
+      # would make it look like one, and registering both it and the children would leave an extra
+      # endpoint nobody mounted, silently — so that combination is a declaration mistake, caught at
+      # boot. A parent `respond`/`static_respond` is NOT: it renders nothing on its own, and
+      # sharing one renderer across a vendor's endpoints is precisely what nesting is for, so it
+      # inherits like every other declaration (Codex review).
+      if dsl.__dispatch_declared?
         raise ArgumentError,
-              "inbound #{name.inspect} declares `endpoint` blocks AND its own dispatch/respond — a parent " \
-              "with endpoints registers nothing itself; move those declarations into an endpoint"
+              "inbound #{name.inspect} declares `endpoint` blocks AND its own `dispatch` — a parent " \
+              "with endpoints registers nothing itself; move the dispatch into an endpoint"
       end
 
       children.each { |child, child_block| register_endpoint(:"#{name}_#{child}", dsl.__child_dsl__(child_block)) }

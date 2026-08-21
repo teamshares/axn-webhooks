@@ -547,12 +547,15 @@ end
 ```
 
 * **Each child registers as `:"#{parent}_#{child}"`.** The parent (`Inbound[:slack]`) is **not**
-  registered — a parent with `endpoint` blocks is a container, and declaring a top-level
-  `dispatch`/`respond` alongside them raises at boot rather than leaving a third endpoint nobody
-  mounted.
+  registered — a parent with `endpoint` blocks is a container, and declaring a top-level `dispatch`
+  alongside them raises at boot rather than leaving an extra endpoint nobody mounted. A parent
+  `respond`/`static_respond` is fine, and is often the point: it renders nothing on its own, and
+  one shared renderer across a vendor's endpoints is exactly what nesting is for.
 * **Children inherit everything the parent declared** — `verify`, `challenge`, `challenge_required`,
   `unauthorized_headers`, `dispatch`, `respond`, `static_respond` — and override any of it by
   re-declaring it. Siblings are independent; a declaration in one child never leaks into another.
+  Note there is no way to *un*-declare an inherited block: a child that must not render the parent's
+  `respond` needs that `respond` moved down into the siblings that do want it.
 * **One level only.** An `endpoint` inside an `endpoint` raises.
 
 Each child is validated exactly as a standalone endpoint would be, so a child that declares

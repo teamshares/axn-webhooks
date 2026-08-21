@@ -43,9 +43,11 @@
 - **Nested `inbound` endpoints.** An `inbound` block may now contain `endpoint(name) { … }` blocks,
   each registering as `:"#{parent}_#{child}"` and inheriting every parent declaration (overridable
   by re-declaring). Lets one vendor's `verify`/`challenge` be written once across several endpoints.
-  The parent itself registers nothing; declaring a top-level `dispatch`/`respond` alongside
-  `endpoint` blocks raises at boot, as does nesting an `endpoint` inside an `endpoint` or reusing a
-  child name. Each child is validated exactly as a standalone endpoint would be.
+  The parent itself registers nothing; declaring a top-level `dispatch` alongside `endpoint` blocks
+  raises at boot, as does nesting an `endpoint` inside an `endpoint` or reusing a child name. A
+  parent `respond`/`static_respond` is allowed and inherited — sharing one renderer across a
+  vendor's endpoints is a primary use. Each child is validated exactly as a standalone endpoint
+  would be.
 
 ### Changed (Outbound)
 - **`emit` accepts per-call `to:` and `async:` overrides.** `to:` (a String or Array) replaces the

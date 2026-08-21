@@ -44,6 +44,14 @@ module Axn
               raise ArgumentError, "sign :hmac secret callable must accept zero arguments (resolved with no args per signing attempt)"
             end
 
+            # A blank `timestamp_header:` (e.g. an unset env var) is truthy, so without this every
+            # delivery would emit a header with an EMPTY NAME rather than failing at declaration
+            # time the way a blank `header:` does — and it would satisfy the {timestamp}-needs-a-
+            # header check below while leaving the receiver nothing to read (Codex review).
+            if !timestamp_header.nil? && timestamp_header.to_s.empty?
+              raise ArgumentError, "sign :hmac `timestamp_header:` must be a non-empty header name when given"
+            end
+
             validate_template!(signing_string, timestamp_header)
 
             @secret = secret

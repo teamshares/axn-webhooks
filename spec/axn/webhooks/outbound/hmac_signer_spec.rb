@@ -66,6 +66,16 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         .to raise_error(ArgumentError, /timestamp_header/)
     end
 
+    it "rejects a blank timestamp_header, which would emit a header with an empty name" do
+      expect { build(secret: "s", header: "X-Sig", timestamp_header: "") }
+        .to raise_error(ArgumentError, /`timestamp_header:`/)
+    end
+
+    it "treats a blank timestamp_header as absent when {timestamp} is referenced" do
+      expect { build(secret: "s", header: "X-Sig", signing_string: "{timestamp}:{body}", timestamp_header: "") }
+        .to raise_error(ArgumentError, /`timestamp_header:`/)
+    end
+
     it "rejects a secret callable that requires an argument" do
       expect { build(secret: ->(x) { x }, header: "X-Sig") }
         .to raise_error(ArgumentError, /must accept zero arguments/)

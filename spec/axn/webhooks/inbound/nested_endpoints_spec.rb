@@ -73,6 +73,30 @@ RSpec.describe "nested inbound endpoints" do
     expect(Axn::Webhooks::Inbound[:slack_events].instance_variable_get(:@respond)).to be_nil
   end
 
+  it "inherits a parent `respond` into every child — the shared-renderer case nesting exists for" do
+    Axn::Webhooks.inbound :slack do
+      verify :hmac, secret: "s", signature: header("X-Sig")
+      respond { |result| text(result.to_s) }
+
+      endpoint(:interactivity) { dispatch to: "HandlerA" }
+      endpoint(:events) { dispatch to: "HandlerB" }
+    end
+
+    expect(Axn::Webhooks::Inbound[:slack_interactivity].instance_variable_get(:@respond)).not_to be_nil
+    expect(Axn::Webhooks::Inbound[:slack_events].instance_variable_get(:@respond)).not_to be_nil
+  end
+
+  it "inherits a parent `static_respond` too" do
+    Axn::Webhooks.inbound :slack do
+      verify :hmac, secret: "s", signature: header("X-Sig")
+      static_respond { text("ok") }
+
+      endpoint(:events) { dispatch to: "HandlerB" }
+    end
+
+    expect(Axn::Webhooks::Inbound[:slack_events].instance_variable_get(:@static_respond)).not_to be_nil
+  end
+
   it "rejects a parent that both declares endpoints and dispatches itself" do
     expect do
       Axn::Webhooks.inbound :slack do
