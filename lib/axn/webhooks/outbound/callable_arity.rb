@@ -38,6 +38,35 @@ module Axn
 
           params.select { |(type, _)| %i[key keyreq].include?(type) }.map { |(_, name)| name }
         end
+
+        # The ORIGINAL `subscribers`/`to:` resolver dispatch rule, preserved byte-for-byte (Codex P2
+        # finding): "pass the event unless the callable's raw arity is EXACTLY zero." Deliberately
+        # raw #arity, not #parameters-based: a Proc (non-lambda) with a single OPTIONAL/default
+        # param reports arity `0` (a Ruby quirk -- lambda-with-default reports NEGATIVE instead),
+        # and that quirk is exactly what a pre-existing `proc { |event = :all| … }` resolver already
+        # relied on to keep using its own default. Only made callable-object-safe here (falls back
+        # to `Method#arity` via `#call`) -- the dispatch RULE itself is unchanged.
+        def zero_arity?(callable)
+          raw_arity(callable).zero?
+        end
+
+        # For a newly-introduced 0-OR-1-arity callable (PRO-3214's per-subscriber `secret`/
+        # `headers`): prefer a zero-arg call whenever genuinely possible. Raw arity, not
+        # `#parameters`-based `accepts?`: a plain `proc { |subscriber| … }` (NO default) reports its
+        # param as `:opt` via `#parameters` -- indistinguishable from a genuine default by that
+        # API -- but its raw arity is still the correct POSITIVE `1`, so this is the one signal that
+        # tells "has a real default/rest" (arity <= 0) apart from "merely tolerates a missing arg,
+        # Proc-style, but was never given one to default from" (Codex P1 finding: passing `nil` in
+        # place of the subscriber for exactly this shape).
+        def prefers_zero_args?(callable)
+          raw_arity(callable) <= 0
+        end
+
+        # Shared by `zero_arity?`/`prefers_zero_args?`: raw `#arity`, falling back to
+        # `Method#arity` via `#call` for a plain callable object with none of its own.
+        def raw_arity(callable)
+          callable.respond_to?(:arity) ? callable.arity : callable.method(:call).arity
+        end
       end
     end
   end

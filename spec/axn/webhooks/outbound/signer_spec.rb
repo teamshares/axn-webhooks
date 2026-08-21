@@ -171,6 +171,26 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
         expect(seen).to eq([:the_default])
       end
+
+      # Codex P1 finding, round 2: a plain `proc { |subscriber| ... }` (no default -- NOT a
+      # lambda) reports its single param as `:opt` via #parameters, the SAME label a genuine
+      # default gets -- so a #parameters-based "prefer zero-arg" check can't tell them apart, and
+      # would silently call this with ZERO args, passing `nil` in place of the subscriber (Ruby
+      # procs fill a missing arg with nil rather than raising). Raw arity does NOT have this
+      # ambiguity: a no-default proc's arity is still the correct positive 1.
+      it "still passes the subscriber to a plain Proc (not a lambda) with one param and no default" do
+        seen = nil
+        resolver = proc { |sub|
+          seen = sub
+          secret
+        }
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}", subscriber:)
+
+        expect(seen).to equal(subscriber)
+      end
     end
   end
 

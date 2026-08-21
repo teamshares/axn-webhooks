@@ -226,4 +226,47 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(config.resolve_subscribers(:lead_closed).subscribers.map(&:url)).to eq(["https://store.example/fixed"])
     end
   end
+
+  describe "pre-existing Proc/lambda resolver dispatch (Codex P2 finding, pre-dates PRO-3214)" do
+    # A Proc (non-lambda) with a single OPTIONAL/default param reports arity 0 -- a Ruby quirk
+    # (a lambda with the identical signature reports -1 instead) -- and the ORIGINAL dispatch rule
+    # (`callable.arity.zero? ? call : call(event)`) already relied on exactly that quirk to let a
+    # `proc { |event = :all| ... }` resolver fall back to its own default. Switching to a
+    # #parameters-based `accepts?` check would have silently started passing the event instead,
+    # changing which subscribers get selected for any resolver already written this way.
+    it "still uses ITS OWN default for a Proc (not lambda) subscribers resolver with an optional param" do
+      seen = []
+      resolver = proc { |event = :fallback_event|
+        seen << event
+        ["https://resolved/#{event}"]
+      }
+      config = outbound! do
+        subscribers resolver
+        event :lead_closed
+      end
+
+      config.resolve_subscribers(:lead_closed)
+
+      expect(seen).to eq([:fallback_event])
+    end
+
+    # The flip side, also preserved: a LAMBDA with an optional/default param reports NEGATIVE
+    # arity (not zero), so the original rule already passed it the event -- unaffected by this
+    # fix, asserted here so the two shapes' different treatment stays intentional, not accidental.
+    it "still passes the event to a LAMBDA subscribers resolver with an optional param (arity is negative, not zero)" do
+      seen = []
+      resolver = lambda { |event = :fallback_event|
+        seen << event
+        ["https://resolved/#{event}"]
+      }
+      config = outbound! do
+        subscribers resolver
+        event :lead_closed
+      end
+
+      config.resolve_subscribers(:lead_closed)
+
+      expect(seen).to eq([:lead_closed])
+    end
+  end
 end

@@ -417,6 +417,23 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers]["authorization"]).to eq("Bearer token-for-17")
     end
 
+    # Codex P1 finding, round 2: a plain `proc { |sub| ... }` (no default -- NOT a lambda) reports
+    # its param as `:opt` via #parameters, same as a genuine default -- a #parameters-based
+    # "prefer zero-arg" check can't tell them apart and would call this with nil in place of the
+    # subscriber.
+    it "still passes the subscriber to a plain Proc (not a lambda) with one param and no default" do
+      seen = nil
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: proc { |sub|
+        seen = sub
+        { "authorization" => "Bearer token-for-#{sub&.id}" }
+      })
+
+      described_class.call(**kwargs, subscriber_id: "17")
+
+      expect(seen).to eq(Axn::Webhooks::Outbound::Subscriber.new(url: "https://os.example/hook", id: "17"))
+    end
+
     it "adds nothing when headers is not declared (default nil)" do
       transport = fake_transport(ok(202))
       declare!(transport:)
@@ -463,6 +480,23 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect { result = described_class.call(**kwargs) }.not_to raise_error
       expect(result).to be_ok
       expect(transport.calls.first[:headers]).not_to include("sym_key", "str_key")
+    end
+
+    # Codex P1 finding, round 2: `{ Authorization: "Bearer live-token" }` is the single most
+    # natural way to write a headers resolver in Ruby (symbol-keyed Hash literal) -- the OLD
+    # non-String-key warning logged `value.inspect` unconditionally, copying the live bearer token
+    # straight into application logs the very first time anyone wrote it that way.
+    it "never logs a header's VALUE when dropping it for a non-String key" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { Authorization: "Bearer live-token-do-not-leak" } })
+
+      warned = []
+      allow(Axn.config.logger).to receive(:warn) { |msg| warned << msg }
+
+      described_class.call(**kwargs)
+
+      expect(warned).not_to be_empty
+      expect(warned.join).not_to include("live-token-do-not-leak")
     end
 
     # Codex P1 finding: the built-in Transport (net/http) rejects CR/LF in a header VALUE, but a

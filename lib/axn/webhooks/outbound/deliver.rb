@@ -120,10 +120,9 @@ module Axn
           callable = config.headers
           return nil if callable.nil?
 
-          # Same precedence as the signing secret (Codex P1 finding there): prefer a zero-arg call
-          # whenever the callable can accept one, so an optional-arg `headers` resolver keeps its
-          # own default rather than silently receiving the Subscriber just because it COULD.
-          CallableArity.accepts?(callable, 0) ? callable.call : callable.call(subscriber)
+          # Same precedence (and the Proc/#parameters quirk it works around) as the signing secret
+          # -- see Signer::StandardWebhooksSigner#resolve_secret (Codex P1 finding).
+          CallableArity.prefers_zero_args?(callable) ? callable.call : callable.call(subscriber)
         end
 
         # Net::HTTP requires String keys/values; a non-String pair would otherwise raise mid-flight,
@@ -133,8 +132,13 @@ module Axn
         # Net::HTTP's header line does, silently, and it is always the LATER assignment that survives
         # -- which a subscriber-controlled row must never be allowed to be for webhook-signature.
         def add_custom_header(out, key, value, reserved)
+          # NEVER logs `value` -- `{ Authorization: "Bearer live-token" }` (a plain Symbol-keyed
+          # Hash literal, the single most natural way to write this in Ruby) fails the String-key
+          # check, and logging the value unconditionally here would copy a live credential
+          # straight into application logs the moment anyone wrote a `headers` resolver this way
+          # (Codex P1 finding). The key name alone is enough to debug "which header was malformed".
           unless key.is_a?(String) && value.is_a?(String)
-            Axn.config.logger.warn("[axn-webhooks] dropping custom header with a non-String key or value: #{key.inspect} => #{value.inspect}")
+            Axn.config.logger.warn("[axn-webhooks] dropping a custom header with a non-String key or value (key: #{key.inspect})")
             return
           end
 

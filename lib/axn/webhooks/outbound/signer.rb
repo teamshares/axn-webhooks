@@ -222,11 +222,13 @@ module Axn
                        # secret resolver with an unrelated optional arg (e.g. `->(app =
                        # Rails.application) { ... }`) must keep using ITS OWN default, not silently
                        # start receiving the Subscriber just because it COULD accept one arg. Only a
-                       # callable that genuinely cannot be invoked with zero args (a REQUIRED single
-                       # positional) gets the subscriber -- and that shape was rejected at boot
-                       # entirely before subscriber-awareness existed, so there is no prior behavior
-                       # to preserve for it (Codex P1 finding).
-                       CallableArity.accepts?(@secret, 0) ? @secret.call : @secret.call(subscriber)
+                       # callable that genuinely cannot be invoked with zero args gets the
+                       # subscriber. Raw arity (`prefers_zero_args?`), not `#parameters`-based --
+                       # a plain `proc { |subscriber| }` (no default) reports its param as `:opt`
+                       # via `#parameters`, indistinguishable from a genuine default by that API,
+                       # but its raw arity is still the correct positive `1` (Codex P1 finding: a
+                       # `#parameters`-based check silently passed `nil` for exactly this shape).
+                       CallableArity.prefers_zero_args?(@secret) ? @secret.call : @secret.call(subscriber)
                      else
                        @secret
                      end
@@ -280,9 +282,9 @@ module Axn
           def resolve_secret(subscriber)
             return @secret unless @secret.respond_to?(:call)
 
-            # See the identical precedence rationale on HmacSigner#resolved_secret above (Codex P1
-            # finding): prefer zero-arg, so an optional-arg secret keeps its own default.
-            CallableArity.accepts?(@secret, 0) ? @secret.call : @secret.call(subscriber)
+            # See the identical precedence rationale (and the Proc/#parameters quirk it works
+            # around) on HmacSigner#resolved_secret above (Codex P1 finding).
+            CallableArity.prefers_zero_args?(@secret) ? @secret.call : @secret.call(subscriber)
           end
 
           def decoded_secret(subscriber)

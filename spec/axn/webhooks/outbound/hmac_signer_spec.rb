@@ -191,6 +191,20 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
       expect(seen).to eq([:the_default])
     end
+
+    # Codex P1 finding, round 2 (see signer_spec.rb's identical case for StandardWebhooksSigner).
+    it "still passes the subscriber to a plain Proc (not a lambda) with one param and no default" do
+      seen = nil
+      signer = build(secret: proc { |sub|
+        seen = sub
+        "s3kr1t"
+      }, header: "X-Signature")
+      subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+      signer.call(id: "m", timestamp: 1, body: "b", subscriber:)
+
+      expect(seen).to equal(subscriber)
+    end
   end
 
   describe "defensive copies of validated options" do

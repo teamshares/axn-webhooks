@@ -278,14 +278,21 @@ module Axn
           end
         end
 
-        # Arity-aware via `CallableArity` (not bare `#arity`): a plain callable OBJECT -- a very
-        # plausible DB-store shape, e.g. `Subscription::Store.new` -- has no `#arity` of its own and
-        # would NoMethodError here before this fix. `CallableArity.accepts?` falls back to
-        # `callable.method(:call).parameters` for exactly that case.
+        # The ORIGINAL dispatch rule, preserved byte-for-byte: pass the event unless the callable's
+        # raw arity is EXACTLY zero. Deliberately raw arity (`CallableArity.zero_arity?`), not
+        # `#parameters`-based `accepts?`: a pre-existing `subscribers ->(event = :all) { … }` or
+        # `proc { |event = :all| … }` resolver relies on Ruby's own arity quirks (a Proc with a
+        # single optional/default param reports arity 0; a lambda with one reports -1) to decide
+        # whether it gets called with the event or falls back to its own default -- an
+        # `accepts?`-based check (which reads `#parameters`' `:opt` LABEL rather than raw arity)
+        # would flip that for the Proc case specifically, silently changing which subscribers get
+        # selected (Codex P2 finding). Only made callable-object-safe here (falls back to
+        # `Method#arity` via `#call`, fixing the original NoMethodError for a plain callable OBJECT
+        # such as `Subscription::Store.new`) -- the dispatch RULE itself is unchanged.
         def call_resolver(callable, event)
           return nil if callable.nil?
 
-          CallableArity.accepts?(callable, 1) ? callable.call(event) : callable.call
+          CallableArity.zero_arity?(callable) ? callable.call : callable.call(event)
         end
 
         # `to:` is "declared" whenever spec[:to] is non-nil — a static value (Array, including
