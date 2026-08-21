@@ -103,6 +103,28 @@ RSpec.describe "Axn::Webhooks::Outbound::Config immutability" do
     expect(config.vendor_for(:lead_signed)).to eq("internal")
   end
 
+  it "copies mutable BLOCK-LEVEL settings too, not just per-event values" do
+    # Same aliasing shape one level up: materialize_settings! read `vendor`/`user_agent` into their
+    # memo ivars but left them pointing at the caller's Strings, so a later replace() changed the
+    # observability facet and the delivery User-Agent header (Codex review).
+    vendor_name = +"internal"
+    ua_value = +"myapp/v1"
+
+    Axn::Webhooks.outbound do
+      sign :standard_webhooks, secret: "whsec_#{Base64.strict_encode64('s')}"
+      vendor vendor_name
+      user_agent ua_value
+      event :lead_signed, to: ["https://a.example/hook"]
+    end
+
+    config = Axn::Webhooks::Outbound.config
+    vendor_name.replace("hijacked")
+    ua_value.replace("evil/9")
+
+    expect(config.vendor_for(:lead_signed)).to eq("internal")
+    expect(config.user_agent).to eq("myapp/v1")
+  end
+
   it "does NOT freeze caller-supplied callables" do
     resolver = ->(_event) { ["https://x.example/hook"] }
     signer = ->(id:, timestamp:, body:) { { "x-sig" => "#{id}#{timestamp}#{body}" } }

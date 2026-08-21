@@ -730,9 +730,11 @@ result.target_count   # => 1
   across every retry attempt of that delivery, so receivers can dedup. `emit`'s result exposes the
   full list of `webhook_ids` and a `target_count`, so a caller can record what actually went out.
 * **`failed_count`** counts deliveries that came back failed — but **only on the synchronous
-  fallback path**, and it is **always `0` when an async adapter is configured**, because at `emit`
-  time nothing has failed yet: the deliveries are enqueued, and a later failure is reported by
-  `Deliver` itself (exhaustion via `on_exception`, a permanent 4xx via its own result). `emit`'s
+  fallback path**, and it is **always `0` on the async path**, because at `emit` time nothing has
+  failed yet: the deliveries are enqueued, and a later failure is reported by `Deliver` itself
+  (exhaustion via `on_exception`, a permanent 4xx via its own result). Note that is the *path*, not
+  adapter presence — an `emit(..., async: false)` runs inline and counts failures even when an
+  adapter is configured. `emit`'s
   result stays `ok` even when every delivery failed — fan-out succeeded, and a subscriber being
   down is not an emit failure. `target_count - failed_count` is the sync-path success count.
 * **Per-call overrides.** `emit` accepts `to:` and `async:`:

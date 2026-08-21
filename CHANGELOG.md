@@ -5,8 +5,8 @@
 ### Documentation
 - README: explain why a missing async adapter degrades to sync under `:auto` (inbound and outbound
   alike) but raises under an explicitly-declared `async`. The three behaviors read as inconsistent
-  side by side; they line up once `emit` is understood as always-`:auto` (it has no way to *ask* for
-  async). Records the reasons the explicit case must not silently downgrade — `async` is typically
+  side by side; they line up once `emit`'s *default* is understood as `:auto` (a per-call
+  `async: true`, added in this same release, is the explicit form and raises like inbound does). Records the reasons the explicit case must not silently downgrade — `async` is typically
   declared because the handler outlives the vendor's ack window, and the async path acks with no
   handler result where the sync path renders one — and the corollary now honored by the shipped
   per-`emit` `async:` override, which raises rather than degrading.
@@ -57,9 +57,11 @@
   would be.
 
 ### Changed (Outbound)
-- **Config now owns an immutable copy of every mutable event value**, not just the `to:` URLs. A
-  `String` `type:`/`vendor:` stayed aliased to the caller's, so `type.replace("other_event")` after
-  boot rewrote `wire_type` and every envelope emitted afterwards, despite the frozen-config contract.
+- **Config now owns an immutable copy of every mutable value it holds** — per-event `to:` URLs,
+  `type:` and `vendor:`, and the block-level `vendor`/`user_agent` settings. Each stayed aliased to
+  the caller's String, so a later `replace()` rewrote `wire_type`, the observability facet, the
+  delivery `User-Agent`, or an already-validated target URL, despite the frozen-config contract.
+  Callables, Modules and Numerics are left untouched — they belong to the app.
 - **`sign :hmac` copies the Strings it validates.** Validation runs once at declaration, so
   retaining the caller's object let an app mutate `header:` afterwards — `replace("Content-Type")`
   walks past both the field-name grammar and the reserved-header rule, and `Deliver` then overwrites

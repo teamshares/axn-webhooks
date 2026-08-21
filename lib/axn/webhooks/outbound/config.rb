@@ -143,8 +143,12 @@ module Axn
           freeze
         end
 
-        # Read every declared setting once, so Configurable's lazy memoization happens BEFORE the
-        # freeze. Without this, a frozen Config raises FrozenError from the READER of any setting
+        # Read every declared setting once (so Configurable's lazy memoization happens BEFORE the
+        # freeze) and replace any mutable value with a config-owned copy — `vendor`/`user_agent` are
+        # plain Strings the caller may still hold, and a later `replace()` would otherwise change the
+        # observability facet and the delivery User-Agent header despite the frozen-config contract
+        # (Codex review). Callables, Modules and Numerics come back from config_owned untouched, so
+        # only the copyable shapes are reassigned. Without this, a frozen Config raises FrozenError from the READER of any setting
         # the `outbound` block never explicitly assigned — `backoff`/`transport` escape only
         # because their defaults are dynamic (`-> { … }`) and recomputed rather than memoized.
         #
@@ -153,7 +157,11 @@ module Axn
         # forgetting turns that setting's own reader into a FrozenError at runtime. Nothing to keep
         # in sync now — adding a `setting` is enough.
         def materialize_settings!
-          Axn::Configurable.declared_settings_for(self.class).each_key { |name| public_send(name) }
+          Axn::Configurable.declared_settings_for(self.class).each_key do |name|
+            value = public_send(name)
+            owned = config_owned(value)
+            public_send(:"#{name}=", owned) unless owned.equal?(value)
+          end
         end
 
         # An immutable copy the config owns, for the shapes an event spec can hold. A callable `to:`
