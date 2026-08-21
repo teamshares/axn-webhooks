@@ -67,13 +67,18 @@ module Axn
 
             validate_template!(signing_string, timestamp_header)
 
-            @secret = secret
-            @header = header
+            # Copy every String we validated or emit. Validation runs ONCE, here; retaining the
+            # caller's mutable object lets an app change what ships afterwards —
+            # `header.replace("Content-Type")` walks straight past both the field-name grammar and
+            # the MANAGED_HEADERS collision rule, and Deliver then overwrites the signature (Codex
+            # review). Same validate-then-alias shape as Config's static `to:` array.
+            @secret = secret # NOT copied: may be a callable, and a String secret is re-read per call anyway
+            @header = dup_frozen(header)
             @digest = digest
             @encoding = encoding
-            @prefix = prefix
-            @signing_string = signing_string
-            @timestamp_header = timestamp_header
+            @prefix = dup_frozen(prefix)
+            @signing_string = dup_frozen(signing_string)
+            @timestamp_header = dup_frozen(timestamp_header)
           end
 
           # `id:` is part of the signer contract but unused here — an id-bearing signature is what
@@ -93,6 +98,8 @@ module Axn
           end
 
           private
+
+          def dup_frozen(value) = value.is_a?(String) ? value.dup.freeze : value
 
           # A `to_s`-based blank check is not enough: `false.to_s` is "false" and `123.to_s` is
           # "123", so both pass it and publish a signer that emits `{ false => "<sig>" }` for the

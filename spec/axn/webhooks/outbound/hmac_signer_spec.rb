@@ -153,6 +153,49 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
     end
   end
 
+  describe "defensive copies of validated options" do
+    # Validation runs once at declaration; retaining the caller's mutable String lets an app change
+    # what is emitted AFTER the checks passed — `header.replace("Content-Type")` defeats both the
+    # field-name grammar and the MANAGED_HEADERS collision rule, and Deliver then overwrites the
+    # signature (Codex review). Same validate-then-alias shape as the static `to:` array fix.
+    it "copies the header name, so a later caller mutation cannot change what is emitted" do
+      name = +"X-Signature"
+      signer = build(secret: "s", header: name)
+
+      name.replace("Content-Type")
+
+      expect(signer.call(timestamp: 1, body: "b").keys).to eq(["X-Signature"])
+    end
+
+    it "copies the timestamp header name" do
+      name = +"X-Timestamp"
+      signer = build(secret: "s", header: "X-Sig", timestamp_header: name)
+
+      name.replace("User-Agent")
+
+      expect(signer.call(timestamp: 1, body: "b").keys).to contain_exactly("X-Sig", "X-Timestamp")
+    end
+
+    it "copies the signing-string template" do
+      template = +"{body}"
+      signer = build(secret: "s", header: "X-Sig", signing_string: template)
+      expected = Axn::Webhooks::Signature.compute(secret: "s", payload: "b", digest: :sha256, encoding: :hex)
+
+      template.replace("{timestamp}")
+
+      expect(signer.call(timestamp: 1, body: "b")["X-Sig"]).to eq(expected)
+    end
+
+    it "copies the prefix" do
+      prefix = +"v0="
+      signer = build(secret: "s", header: "X-Sig", prefix:)
+
+      prefix.replace("v9=")
+
+      expect(signer.call(timestamp: 1, body: "b")["X-Sig"]).to start_with("v0=")
+    end
+  end
+
   describe "runtime secret validation" do
     it "refuses to sign with a blank secret, without leaking it" do
       signer = build(secret: -> { "" }, header: "X-Sig")

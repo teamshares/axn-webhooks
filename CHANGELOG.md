@@ -52,6 +52,11 @@
   would be.
 
 ### Changed (Outbound)
+- **`sign :hmac` copies the Strings it validates.** Validation runs once at declaration, so
+  retaining the caller's object let an app mutate `header:` afterwards — `replace("Content-Type")`
+  walks past both the field-name grammar and the reserved-header rule, and `Deliver` then overwrites
+  the signature. `header:`, `timestamp_header:`, `signing_string:` and `prefix:` are now duped and
+  frozen. (`secret:` deliberately isn't: it may be a callable, and a String one is re-read per call.)
 - **`sign :hmac` and per-emit `async:` are validated harder at the boundary.** `digest:`/`encoding:`
   are checked against `Signature`'s supported sets at declaration time (a typo previously booted
   fine and raised inside every delivery attempt — on the async path, after the job was enqueued);

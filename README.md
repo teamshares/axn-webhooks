@@ -512,8 +512,8 @@ block acks it (nil result → bare 2xx), while a sync route's result is rendered
 **A missing adapter is only ever a fallback under `:auto`, never under an explicit request.** The
 two look inconsistent side by side — `:auto` silently runs sync, an explicit `async` 500s, and
 [outbound's `emit`](#async-posture) warns and runs sync — but they line up once you compare
-like for like: `emit` has no way to *ask* for async, so its fallback is `:auto` behavior, identical
-to inbound's. The raise fires only when an app declared `async` and the configuration can't honor
+like for like: `emit` defaults to `:auto`, so its fallback is `:auto` behavior, identical to
+inbound's — and `emit(..., async: true)`, the explicit form, raises here too. The raise fires only when an app declared `async` and the configuration can't honor
 it. Downgrading that silently would be wrong twice over: `async` is usually declared *because* the
 handler outlives the vendor's ack window (Slack's 3s), so running it inline trades a clean 500 for a
 vendor timeout, a redelivery, and duplicate processing — and it changes the response the vendor
@@ -853,10 +853,11 @@ Mirrors inbound's `:auto`: **async when an axn async adapter is configured** for
 `async :sidekiq`/`async :active_job` global default, per axn's own presence-check semantics — never
 a branch on adapter type), else a **synchronous inline fallback** so the gem works standalone without
 Sidekiq. The sync path is best-effort: no cross-process retries/backoff, and it logs a warning (once
-per `emit` call, not once per subscriber) so the degraded mode is never silent. There is no way to
-*demand* async here — `emit` is always `:auto`, which is why a missing adapter degrades rather than
-raising the way an explicitly-`async` inbound route does (see
-[per-route sync/async](#per-route-syncasync-on-one-endpoint)).
+per `emit` call, not once per subscriber) so the degraded mode is never silent. That degrade-rather-
+than-raise behavior is what `:auto` means, and it is the **default**; a caller who explicitly demands
+async with `emit(..., async: true)` gets a raise instead when no adapter is configured, exactly as an
+explicitly-`async` inbound route does (see [per-route sync/async](#per-route-syncasync-on-one-endpoint)
+and the per-call overrides above).
 
 ### Delivery contract
 
