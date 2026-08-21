@@ -23,6 +23,14 @@ module Axn
         DEFAULT_OPEN_TIMEOUT = 5
         DEFAULT_READ_TIMEOUT = 10
 
+        # Every Configurable setting declared below. Read once in `initialize` before freezing:
+        # Configurable memoizes a STATIC default into an ivar on first read, so a frozen Config
+        # would otherwise raise FrozenError from the reader of any setting the `outbound` block
+        # never explicitly assigned. `backoff`/`transport` escape only because their defaults are
+        # dynamic (`-> { … }`) and recomputed per read — an inconsistency to design around, not
+        # rely on.
+        SETTING_NAMES = %i[max_attempts backoff transport vendor user_agent open_timeout read_timeout].freeze
+
         setting :max_attempts, default: DEFAULT_MAX_ATTEMPTS,
                                validate: ->(v) { (v.is_a?(Integer) && v.positive?) || "must be a positive Integer" }
         # The default itself IS a callable (not a value computed BY one) — a bare Proc default would
@@ -60,6 +68,24 @@ module Axn
         setting :open_timeout, default: DEFAULT_OPEN_TIMEOUT, validate: TIMEOUT_VALIDATE
         setting :read_timeout, default: DEFAULT_READ_TIMEOUT, validate: TIMEOUT_VALIDATE
 
+        # The problem with `url` as an outbound target, or nil when there is none. A predicate
+        # rather than a raiser, because its two callers disagree on the error class: a declaration
+        # mistake at boot is an ArgumentError (see validate_url!), while a bad one-off `emit(to:)`
+        # URL is an Axn::Webhooks::Error a caller may rescue at runtime (see Outbound::Emit).
+        def self.url_problem(url)
+          # A non-String (e.g. a `URI`) would parse fine via `#to_s`, but the ORIGINAL object is
+          # what reaches `Deliver`, which `expects :url, type: String` and rejects. Require a
+          # String outright rather than normalizing.
+          return "must be a String (got #{url.class})" unless url.is_a?(String)
+
+          uri = URI.parse(url)
+          return nil if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
+
+          "#{url.inspect} must be http(s)"
+        rescue URI::InvalidURIError
+          "#{url.inspect} is not a valid URL"
+        end
+
         def initialize(signer:, events:, default_subscribers:, max_attempts:, backoff:, transport:,
                        vendor: nil, user_agent: nil, open_timeout: nil, read_timeout: nil)
           @signer = signer
@@ -75,6 +101,8 @@ module Axn
           self.read_timeout = read_timeout unless read_timeout.nil?
 
           @events.each { |name, spec| validate_event!(name, spec) }
+
+          deep_freeze!
         end
 
         attr_reader :signer
@@ -103,6 +131,20 @@ module Axn
         end
 
         private
+
+        # Freezes the CONTAINERS we own, never the caller's objects: a `to:` resolver, the signer,
+        # an injected transport and a `user_agent` callable all stay mutable — they belong to the
+        # app, and freezing them could break a memoizing resolver. A statically-declared `to:`
+        # Array is ours once validated, so it freezes.
+        def deep_freeze!
+          SETTING_NAMES.each { |name| public_send(name) }
+          @events.each_value do |spec|
+            spec[:to].freeze if spec[:to].is_a?(Array)
+            spec.freeze
+          end
+          @events.freeze
+          freeze
+        end
 
         def fetch(event)
           @events.fetch(event.to_sym) do
@@ -143,19 +185,10 @@ module Axn
         end
 
         def validate_url!(name, url)
-          # A non-String (e.g. a `URI` object) would parse fine here via `#to_s`, but the ORIGINAL
-          # object is what stays in `@events` and is later handed to `Deliver` as `url:` — which
-          # `expects :url, type: String` and rejects at emission/delivery time despite passing this
-          # boot-time check (Codex P2 finding). Require a String outright rather than normalizing,
-          # matching the no-silent-coercion stance the `to:` Array/callable check above already takes.
-          raise ArgumentError, "outbound event #{name.inspect} `to:` URL must be a String (got #{url.class})" unless url.is_a?(String)
+          problem = self.class.url_problem(url)
+          return if problem.nil?
 
-          uri = URI.parse(url)
-          return if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
-
-          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{url.inspect} must be http(s)"
-        rescue URI::InvalidURIError
-          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{url.inspect} is not a valid URL"
+          raise ArgumentError, "outbound event #{name.inspect} `to:` URL #{problem}"
         end
       end
     end

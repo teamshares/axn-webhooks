@@ -14,19 +14,26 @@ module Axn
     # Process-global registration for outbound webhook emission (a single `outbound` block).
     module Outbound
       @config = nil
+      # Guards install/reset! only. `config` READS stay unsynchronized: what's published is a
+      # frozen Config, so a reader either sees the old one or the new one and never a half-built
+      # object — and `config` is read on every delivery attempt, where a lock would be real
+      # overhead protecting nothing.
+      @mutex = Mutex.new
 
       class << self
         def install(config)
-          unless @config.nil?
-            Axn.config.logger.warn(
-              "[axn-webhooks] a second `Axn::Webhooks.outbound` block replaces the first — only one outbound declaration is active at a time",
-            )
-          end
+          @mutex.synchronize do
+            unless @config.nil?
+              Axn.config.logger.warn(
+                "[axn-webhooks] a second `Axn::Webhooks.outbound` block replaces the first — only one outbound declaration is active at a time",
+              )
+            end
 
-          @config = config
+            @config = config
+          end
         end
 
-        def reset! = @config = nil
+        def reset! = @mutex.synchronize { @config = nil }
 
         def config
           @config || raise(Axn::Webhooks::Error, "no `outbound` block declared — call Axn::Webhooks.outbound { … } at boot")

@@ -39,6 +39,16 @@
   test-teardown API, and that a delivery's envelope-body `timestamp` and its signed
   `webhook-timestamp` header deliberately diverge across retries.
 
+### Changed (Outbound)
+- **`Outbound::Config` is now genuinely frozen**, making good on the "immutable" claim in its own doc
+  comment. Freezing naively would have broken reads: `Axn::Configurable` memoizes a static default
+  into an ivar on first read, so any setting an `outbound` block never assigned (`max_attempts`,
+  `vendor`, `user_agent`, `open_timeout`, `read_timeout`) raised `FrozenError` **from the reader**.
+  `Config#initialize` now materializes all seven settings before freezing itself, the events map and
+  each event spec. Caller-supplied objects — the signer, a `to:` resolver, an injected transport —
+  are deliberately left mutable. `Outbound.install`/`reset!` are serialized behind a mutex; `config`
+  reads stay lock-free, which is safe precisely because what they publish is frozen.
+
 ### Fixed (Outbound)
 - **`sign :standard_webhooks, secret:` now accepts a callable**, resolved fresh per signing attempt —
   matching every inbound `verify` secret's convention (`Resolvers.resolve`), which outbound quietly
