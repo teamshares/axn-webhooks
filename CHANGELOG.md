@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Documentation
+- README: explain why a missing async adapter degrades to sync under `:auto` (inbound and outbound
+  alike) but raises under an explicitly-declared `async`. The three behaviors read as inconsistent
+  side by side; they line up once `emit` is understood as always-`:auto` (it has no way to *ask* for
+  async). Records the reasons the explicit case must not silently downgrade — `async` is typically
+  declared because the handler outlives the vendor's ack window, and the async path acks with no
+  handler result where the sync path renders one — and the corollary for a future per-`emit`
+  `async:` override.
+- README: correct "swap the lambda body for a DB lookup and nothing else in this gem needs to move"
+  in the outbound routing section. Runtime resolution genuinely works (now covered end-to-end by
+  spec), but a DB-backed subscriber store additionally wants a secret per subscriber (the signer is
+  process-global and never sees the URL), validation of resolver-returned URLs (only static `to:`
+  arrays are boot-checked; a malformed row is reported but still counted in `emit`'s `target_count`),
+  and a `webhook_id`→URL correlation for persisting delivery records. Also notes that resolution runs
+  inline in the emitting process, so a store outage raises out of `emit`.
 - README: document URL-signing verifiers, and correct the Twilio example. Vendors that sign the
   request URL (Twilio) must strip the trailing slash a mount adds — Rack leaves `PATH_INFO` as `"/"`
   when the mount point is the whole route, so `Request#url` carries a slash the vendor's registered

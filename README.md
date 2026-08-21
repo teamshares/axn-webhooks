@@ -509,6 +509,20 @@ sync unless you mark it `async` — a route that acks-async simply produces no r
 block acks it (nil result → bare 2xx), while a sync route's result is rendered. A route marked
 `async` whose handler has no adapter is reported as an exception (the same guard as `mode: :async`).
 
+**A missing adapter is only ever a fallback under `:auto`, never under an explicit request.** The
+two look inconsistent side by side — `:auto` silently runs sync, an explicit `async` 500s, and
+[outbound's `emit`](#async-posture) warns and runs sync — but they line up once you compare
+like for like: `emit` has no way to *ask* for async, so its fallback is `:auto` behavior, identical
+to inbound's. The raise fires only when an app declared `async` and the configuration can't honor
+it. Downgrading that silently would be wrong twice over: `async` is usually declared *because* the
+handler outlives the vendor's ack window (Slack's 3s), so running it inline trades a clean 500 for a
+vendor timeout, a redelivery, and duplicate processing — and it changes the response the vendor
+sees, since the async path acks with no handler result while the sync path renders one (a handler
+`fail!` included). It's also the same no-silent-downgrade stance outbound's `to:` takes: a *declared*
+resolver that returns nil delivers nowhere rather than falling back to `subscribers`. Should
+outbound ever gain a per-`emit` `async:` override, it should raise here too rather than inherit the
+`:auto` fallback.
+
 **Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
 
 **Note on Rails autoloading**: `inbound` blocks are evaluated where they're declared — at boot, if
@@ -721,7 +735,10 @@ Mirrors inbound's `:auto`: **async when an axn async adapter is configured** for
 `async :sidekiq`/`async :active_job` global default, per axn's own presence-check semantics — never
 a branch on adapter type), else a **synchronous inline fallback** so the gem works standalone without
 Sidekiq. The sync path is best-effort: no cross-process retries/backoff, and it logs a warning (once
-per `emit` call, not once per subscriber) so the degraded mode is never silent.
+per `emit` call, not once per subscriber) so the degraded mode is never silent. There is no way to
+*demand* async here — `emit` is always `:auto`, which is why a missing adapter degrades rather than
+raising the way an explicitly-`async` inbound route does (see
+[per-route sync/async](#per-route-syncasync-on-one-endpoint)).
 
 ### Delivery contract
 
@@ -791,7 +808,24 @@ app's own `outbound` block (`to:` / `subscribers`), not in this gem. A general-p
 self-registration store — where receivers register their own endpoint URLs at runtime, no deploy
 required to add a listener — is a real future shape, but it's **intentionally deferred until a real
 use-case justifies it**. The `subscribers`/`to:` lambda is the seam it will slot into with no API
-change: swap the lambda body for a DB lookup and nothing else in this gem needs to move.
+change: both are resolved fresh on **every** `emit`, never memoized at boot, so swapping the lambda
+body for a DB lookup already picks up rows added or removed at runtime.
+
+That much works today. What a DB-backed store also wants, and this gem does **not** have yet:
+
+* **A secret per subscriber.** `sign` installs one process-global signer, and it is handed only
+  `id:`, `timestamp:` and `body:` — no URL, no subscriber handle. A shared secret across every row
+  is the only shape currently expressible.
+* **Validation of what the resolver returns.** A statically declared `to:` array is checked for
+  http(s) URLs at boot; a lambda's return value is not (it can't be). A malformed row is reported to
+  `Axn.config.on_exception` when `Deliver` rejects it, but `emit`'s own result still counts it in
+  `target_count` and still reports `ok`. Validate rows yourself, and treat URLs that came from
+  outside your own deploy as untrusted (there is no SSRF allowlist here).
+* **A way to record what went where.** `webhook_ids` is a bare Array with no URL attached, so
+  persisting a delivery row per subscription means re-resolving and relying on ordering.
+
+Resolution also runs inline in whatever process called `emit`, so a store that raises (a database
+outage) raises out of `emit` — inside your `after_commit`, if that's where you emit from.
 
 ### Boot-time validation
 
