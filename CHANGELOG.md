@@ -17,6 +17,13 @@
   arrays are boot-checked; a malformed row is reported but still counted in `emit`'s `target_count`),
   and a `webhook_id`→URL correlation for persisting delivery records. Also notes that resolution runs
   inline in the emitting process, so a store outage raises out of `emit`.
+- README: rewrite the outbound routing section again (supersedes the bullet above) now that
+  PRO-3214 closes every gap it named — per-subscriber `secret:`/`headers`, `allowed_hosts`/
+  `allow_url` validation shared between a static `to:` and a runtime resolver, and `emit`'s
+  `deliveries`/`rejected_count`/`rejected` correlation. Documents the `Deliver` credentials-never-
+  enter-the-job-payload guarantee, the host-policy's no-DNS-resolution limit, `subscriber_id`'s
+  tag-not-dimension choice, and the `target_count` behavior change (enqueued rows, not resolved
+  ones).
 - README: document URL-signing verifiers, and correct the Twilio example. Vendors that sign the
   request URL (Twilio) must strip the trailing slash a mount adds — Rack leaves `PATH_INFO` as `"/"`
   when the mount point is the whole route, so `Request#url` carries a slash the vendor's registered
@@ -129,6 +136,60 @@
   turn that setting's own reader into a `FrozenError`. Caller-supplied objects — the signer, a `to:`
   resolver, an injected transport — are deliberately left mutable. `Outbound.install`/`reset!` are serialized behind a mutex; `config`
   reads stay lock-free, which is safe precisely because what they publish is frozen.
+
+### Added (Outbound) — DB-backed subscription store (PRO-3214)
+- **A `to:`/`subscribers` row may now be a `{ url:, id: }` Hash**, not just a bare URL String — the
+  identity a DB-backed subscriber row carries. An unknown Hash key (e.g. a stray `secret:`) raises
+  rather than being silently dropped, since it's almost certainly a credential the caller thought
+  they were setting. `Config#resolve_subscribers(event)` is the new seam (`targets_for` is now a
+  thin back-compat wrapper around it, silently dropping rejections); it normalizes every raw row via
+  the new `Outbound::Subscriber` value object.
+- **Runtime validation and a host policy for resolved targets, not just a static `to:` Array.** The
+  new `Outbound::TargetPolicy` is the single place a target is checked — shape (String or Hash, an
+  http(s) URL with a real host) plus two new `outbound`-block settings, `allowed_hosts` (an Array,
+  exact match or a leading `*.` wildcard, case-insensitive) and `allow_url` (a general callable
+  predicate given the parsed URI) — shared identically by a static `to:` Array at boot and a
+  `subscribers`/`to:` resolver's return value at every `emit`. Previously only the static path was
+  checked at all, and a bad row from a resolver was reported to `on_exception` but still counted in
+  `emit`'s `target_count`. Both settings are nil by default (any http(s) URL passes), so an existing
+  `outbound` block is unaffected. Neither resolves DNS — this is a host policy, not proof against DNS
+  rebinding or a hostname that later resolves to a private IP.
+- **A secret and extra headers per subscriber.** `sign`'s `secret:` (both `:standard_webhooks` and
+  `:hmac`) now accepts a 1-arity callable that receives the resolved `Subscriber`, alongside the
+  existing 0-arity form — resolved fresh per delivery **attempt**, never stored, so a per-subscriber
+  credential never sits in a Sidekiq/ActiveJob payload the way a per-emit `headers:` override would
+  have. A custom `sign { |id:, timestamp:, body:| … }` block may now also declare `subscriber:`, or
+  `**`, to receive it; a block written against the original 3-kwarg contract keeps working
+  byte-for-byte (the kwarg set is filtered down to what the block actually declares). A new
+  block-level `headers` resolver (0- or 1-arity, same never-stored convention) adds per-destination
+  extra headers — merged custom → signer → Deliver-managed, and any subscriber-supplied name
+  colliding, case-insensitively, with a header Deliver manages or one the active signer just emitted
+  is dropped with a warning rather than silently winning or raising mid-delivery (the generalized
+  form of the hazard `sign :hmac`'s own `MANAGED_HEADERS` check closes for its `header:`/
+  `timestamp_header:` options).
+- **`Deliver` now carries `subscriber_id`** (a String, nil for a plain `to:` Array with no row to
+  identify), threaded through its self-reschedule and its exhaustion report context. Stamped as a
+  **tag**, not a dimension: a subscriber id off a live table is unbounded cardinality, unlike the
+  bounded `event`/`vendor` dimensions, and axn's dimension is the metrics facet that must stay
+  bounded.
+- **`emit` now exposes `deliveries`, `rejected_count`, and `rejected`.** `deliveries` is one
+  `{ webhook_id:, url:, subscriber_id: }` Hash per **enqueued** target, so a DB-backed sender can
+  persist a delivery record per subscription without re-resolving and trusting ordering (`webhook_ids`
+  is unchanged but now derived from it). A row `TargetPolicy` rejects at runtime is collected into
+  `rejected` (`{ target:, reason: }`) rather than silently disappearing, and `rejected_count` counts
+  them; the rejection is reported **once** per `emit` (not once per bad row), and `emit` still reports
+  `ok` — the good rows really were enqueued. **Behavior change**: `target_count` now counts rows
+  actually enqueued rather than rows resolved — a malformed row previously got a `webhook_id` and was
+  counted despite its `Deliver` call immediately failing `expects :url, type: String`; it's now caught
+  earlier and reflected in `rejected_count` instead.
+- The per-call `to:` override (`emit(event, to:)`) now goes through the same `TargetPolicy` — including
+  the declared `allowed_hosts`/`allow_url` — as a declared resolver, closing a gap where a one-off
+  override could bypass the host policy entirely. A rejection there still raises immediately (the
+  caller supplied exactly this URL, on purpose, this one call) rather than being collected.
+- Fixed `Config#call_resolver`'s bare `callable.arity` call, which raised `NoMethodError` for a plain
+  callable **object** with no `#arity` of its own — a plausible DB-store shape
+  (e.g. `Subscription::Store.new`) — now arity-aware via `CallableArity`, consistent with
+  `backoff`/`user_agent`/`secret`.
 
 ### Fixed (Outbound)
 - **`sign :standard_webhooks, secret:` now accepts a callable**, resolved fresh per signing attempt —

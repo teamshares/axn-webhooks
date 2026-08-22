@@ -20,7 +20,14 @@ module Axn
         # truthy and demands async — the exact opposite of what the caller asked for (Codex review).
         expects :async, type: :boolean, allow_nil: true, default: nil
 
+        # Kept for back-compat -- now derived from `deliveries` rather than being its own tally,
+        # so ordering is documented rather than incidental (`webhook_ids == deliveries.map { |d|
+        # d[:webhook_id] }`).
         exposes :webhook_ids, type: Array, allow_blank: true, default: []
+        # Rows actually ENQUEUED, not rows resolved -- a malformed row is now caught by
+        # `resolve_targets`/`TargetPolicy` before it ever reaches here (see `rejected_count` below),
+        # where before it got a webhook_id and was counted despite `Deliver` immediately failing its
+        # own `expects :url, type: String` validation.
         exposes :target_count, type: Integer, default: 0
 
         # Sync fallback only: how many of `target_count` deliveries came back failed. ALWAYS 0 on
@@ -30,6 +37,17 @@ module Axn
         # `result.failed_count > 0` into a NoMethodError, so the footgun costs more than the
         # precision buys.
         exposes :failed_count, type: Integer, default: 0
+
+        # `{ webhook_id:, url:, subscriber_id: }` per enqueued target -- the correlation a DB-backed
+        # sender wants to persist one delivery record per subscription, without re-resolving
+        # `subscribers`/`to:` and trusting undocumented ordering.
+        exposes :deliveries, type: Array, allow_blank: true, default: []
+        # Rows `TargetPolicy` refused (a malformed row, or one the declared `allowed_hosts`/
+        # `allow_url` policy rejects) -- collected rather than discarded, so a bad row never
+        # silently disappears from what `target_count` used to (over)count. `emit` still reports
+        # `ok?` (the good rows really were enqueued); a caller that cares checks `rejected_count`.
+        exposes :rejected_count, type: Integer, default: 0
+        exposes :rejected, type: Array, allow_blank: true, default: []
 
         # Bounded to the events a sending app declares — same shape as inbound's unconditional
         # `reason` dimension, not a per-request identity.
@@ -43,16 +61,22 @@ module Axn
           # is the caller getting exactly what they asked for.
           warn_sync_fallback(type) if async.nil? && !use_async
 
-          ids = []
+          resolution = resolve_targets(config)
+          report_rejections(resolution.rejections) if resolution.rejections.any?
+
+          deliveries = []
           failed = 0
-          resolve_targets(config).each do |url|
+          resolution.subscribers.each do |subscriber|
             id = Envelope.new_id
             body = Envelope.build(id:, type:, data:)
-            delivered = enqueue(use_async, url:, webhook_id: id, body:, event: type, vendor:)
+            delivered = enqueue(use_async, url: subscriber.url, webhook_id: id, body:, event: type, vendor:,
+                                           subscriber_id: subscriber.id)
             failed += 1 if delivered && !delivered.ok?
-            ids << id
+            deliveries << { webhook_id: id, url: subscriber.url, subscriber_id: subscriber.id }
           end
-          expose(webhook_ids: ids, target_count: ids.size, failed_count: failed)
+
+          expose(webhook_ids: deliveries.map { |d| d[:webhook_id] }, target_count: deliveries.size, failed_count: failed,
+                 deliveries:, rejected_count: resolution.rejections.size, rejected: resolution.rejections)
         end
 
         private
@@ -83,16 +107,37 @@ module Axn
         end
 
         # A per-call `to:` REPLACES resolution entirely — the declared `to:`/`subscribers` is not
-        # consulted and not appended to, the same no-silent-merge stance Config#targets_for takes for
-        # a declared resolver that returns nil. Validated here rather than at boot (it can't be known
-        # earlier) and as an Axn::Webhooks::Error, not the ArgumentError a declaration mistake gets:
-        # this one is raised per call, on caller-supplied runtime data.
+        # consulted and not appended to, the same no-silent-merge stance Config#resolve_subscribers
+        # takes for a declared resolver that returns nil. Validated here rather than at boot (it
+        # can't be known earlier) and as an Axn::Webhooks::Error, not the ArgumentError a declaration
+        # mistake gets: this one is raised per call, on caller-supplied runtime data. Goes through
+        # the SAME TargetPolicy (including the declared `allowed_hosts`/`allow_url`) as a declared
+        # `to:`/`subscribers` resolver -- a one-off override is not a way around the host policy.
+        # Any rejection here raises immediately rather than being collected: the caller supplied
+        # exactly this URL, on purpose, this one call; a typo deserves an immediate raise; unlike a
+        # DB-backed resolver returning many rows where one bad one shouldn't sink the rest.
         def resolve_targets(config)
-          return config.targets_for(event) if to.nil?
+          return config.resolve_subscribers(event) if to.nil?
 
-          Array(to).each do |url|
-            problem = Config.url_problem(url)
-            raise Axn::Webhooks::Error, "emit(#{event.inspect}, to:) URL #{problem}" if problem
+          subscribers = Array(to).map do |target|
+            TargetPolicy.check!(target, allowed_hosts: config.allowed_hosts, allow_url: config.allow_url)
+          rescue Axn::Webhooks::InvalidTarget => e
+            raise Axn::Webhooks::Error, "emit(#{event.inspect}, to:) #{e.message}"
+          end
+          Config::Resolution.new(subscribers:, rejections: [])
+        end
+
+        # Reported ONCE per emit (a single fact: "N rows were rejected"), not once per rejected row
+        # -- the same once-per-emit discipline `warn_sync_fallback` already follows. Best-effort: a
+        # broken reporter must not turn "some rows were bad" into a crash of an otherwise-successful
+        # emit (the same reasoning Deliver's own `report_exhaustion` documents).
+        def report_rejections(rejections)
+          Axn::Extensions.best_effort("reporting rejected outbound targets", action: self) do
+            Axn.config.on_exception(
+              Axn::Webhooks::Error.new("#{rejections.size} outbound target(s) rejected for #{event}"),
+              action: self,
+              context: { event: event.to_s, rejections: },
+            )
           end
         end
 

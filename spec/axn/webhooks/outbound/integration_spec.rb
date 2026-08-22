@@ -77,4 +77,37 @@ RSpec.describe "outbound signing <-> inbound verification round-trip" do
     )
     expect(verifier.call(request)).to be_ok
   end
+
+  describe "per-subscriber secrets (PRO-3214)" do
+    let(:sub_a) { Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "a") }
+    let(:sub_b) { Axn::Webhooks::Outbound::Subscriber.new(url: "https://b.example/hook", id: "b") }
+    let(:secret_a) { "whsec_#{Base64.strict_encode64('secret-for-a')}" }
+    let(:secret_b) { "whsec_#{Base64.strict_encode64('secret-for-b')}" }
+
+    it "signs each subscriber with its OWN secret, and each verifies only against its own" do
+      secrets = { "a" => secret_a, "b" => secret_b }
+      signer = Axn::Webhooks::Outbound::Signer.build(
+        strategy: :standard_webhooks, opts: { secret: ->(sub) { secrets.fetch(sub.id) } }, block: nil,
+      )
+      body = Axn::Webhooks::Outbound::Envelope.build(id: "msg_1", type: "lead_signed", data: {})
+      ts = Time.now.to_i
+
+      headers_a = signer.call(id: "msg_1", timestamp: ts, body:, subscriber: sub_a)
+      headers_b = signer.call(id: "msg_1", timestamp: ts, body:, subscriber: sub_b)
+
+      request_a = Axn::Webhooks::Request.new(raw_body: body, headers: headers_a)
+      request_b = Axn::Webhooks::Request.new(raw_body: body, headers: headers_b)
+
+      verifier_a = Axn::Webhooks::Verifiers.build(strategy: :standard_webhooks, opts: { secret: secret_a }, block: nil)
+      verifier_b = Axn::Webhooks::Verifiers.build(strategy: :standard_webhooks, opts: { secret: secret_b }, block: nil)
+
+      # Each subscriber's own request verifies against ITS OWN secret...
+      expect(verifier_a.call(request_a)).to be_ok
+      expect(verifier_b.call(request_b)).to be_ok
+      # ...and NOT against the other's -- proving these are genuinely independent secrets, not one
+      # shared value that happens to pass both checks.
+      expect(verifier_a.call(request_b)).not_to be_ok
+      expect(verifier_b.call(request_a)).not_to be_ok
+    end
+  end
 end

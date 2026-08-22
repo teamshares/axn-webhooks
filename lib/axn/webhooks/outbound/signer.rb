@@ -9,6 +9,15 @@ module Axn
       module Signer
         module_function
 
+        # RFC 7230 field-name token. Net::HTTP stores whatever key it is handed and serializes it
+        # straight into the header line, so a space yields a malformed request and a newline
+        # appends attacker-shaped wire headers — neither caught until delivery (Codex review).
+        # Module-level (not nested under HmacSigner) so `Deliver`'s per-destination `headers`
+        # merge (PRO-3214) can hold a subscriber-supplied header name to the SAME grammar, rather
+        # than duplicating it — the identical injection risk, just from runtime data instead of a
+        # `sign :hmac` declaration (Codex P1 finding).
+        HEADER_NAME = /\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\z/
+
         def build(strategy:, opts:, block:)
           return CustomSigner.new(block) if block
 
@@ -21,10 +30,74 @@ module Axn
           end
         end
 
-        # Wraps a user block; called with the same kwargs as the built-in signers.
+        # Wraps a user block; called with the same kwargs as the built-in signers, PLUS `subscriber:`
+        # (PRO-3214, a `Subscriber` or nil) -- filtered down to whatever the block actually declares
+        # (via CallableArity.accepted_keywords), so a block written against the original
+        # `(id:, timestamp:, body:)` contract keeps working byte-for-byte rather than raising an
+        # unexpected-keyword ArgumentError the moment a widened caller starts also offering
+        # `subscriber:`. A block declaring `**` receives everything unfiltered.
         class CustomSigner
-          def initialize(block) = @block = block
-          def call(id:, timestamp:, body:) = @block.call(id:, timestamp:, body:)
+          # The only kwargs a signer is ever called with. A block may ignore any/all of them --
+          # `sign { { "X-API-Key" => key } }` (zero params) is a legitimate, pre-existing pattern:
+          # Ruby blocks are always non-lambda Procs, which silently tolerate being called with
+          # kwargs they never declared (Codex P1 finding: an earlier version of this check
+          # REQUIRED every block to declare id:/timestamp:/body:, rejecting that working
+          # configuration at boot even though it was never actually broken).
+          SUPPLIED_KEYWORDS = %i[id timestamp body subscriber].freeze
+
+          def initialize(block)
+            @block = block
+            @accepted = CallableArity.accepted_keywords(block)
+            # A block declaring NO keywords at all but at least one POSITIONAL param (`sign { |options|
+            # … }`) is the historical "options Hash" shape: Ruby auto-converts trailing keyword
+            # arguments into a Hash for a lone positional parameter (true for both a Proc/block and a
+            # lambda alike), which is exactly what the ORIGINAL unconditional `.call(id:, timestamp:,
+            # body:)` relied on. Filtering down to `**{}` (zero keywords accepted) calls with ZERO
+            # arguments instead -- fine for a Proc (leaves `options` nil, tolerated) but a REQUIRED-arity
+            # lambda raises outright; either way `options` never gets the data (Codex P1 finding).
+            @wants_positional_hash = @accepted != :all && @accepted.empty? && CallableArity.accepts_positional?(block)
+            validate_required_keywords!
+          end
+
+          def call(id:, timestamp:, body:, subscriber: nil)
+            # The positional-Hash shape's CONTRACT is exactly these three keys -- it has no way to
+            # OPT IN to `subscriber:` the way a keyword-declaring block does, so it must never see
+            # it: a pre-existing signer deriving its signature from the WHOLE hash (e.g. hashing
+            # every key-value pair together) would compute a DIFFERENT signature the instant a 4th
+            # key appeared, silently breaking verification on the receiving end (Codex P1 finding).
+            return @block.call({ id:, timestamp:, body: }) if @wants_positional_hash
+
+            @block.call(**filtered({ id:, timestamp:, body:, subscriber: }))
+          end
+
+          private
+
+          def filtered(kwargs)
+            return kwargs if @accepted == :all
+
+            kwargs.slice(*@accepted)
+          end
+
+          # The one shape that genuinely fails on every call: a block REQUIRING a keyword outside
+          # `SUPPLIED_KEYWORDS` (e.g. `sign { |id:, vendor:| … }`) -- `vendor:` is never one of the
+          # kwargs a signer is called with, so every real signing attempt would raise "missing
+          # keyword: vendor". A block that merely ignores some/all of id:/timestamp:/body:/
+          # subscriber: -- including declaring NONE of them -- is fine; Ruby's own Proc/block
+          # semantics already tolerate that.
+          def validate_required_keywords!
+            # No `@accepted == :all` early-return: `**` only absorbs EXTRA/unknown keywords, it
+            # does nothing for a REQUIRED one this gem still never supplies -- `->(id:, vendor:,
+            # **) { }` reported :all (skipping this check entirely) but still raised "missing
+            # keyword: vendor" on the very first real call (Codex P2 finding, round 11).
+            # `required_keywords` inspects the block's OWN declared params directly and is
+            # unaffected by whether it ALSO double-splats.
+            unsupplied = CallableArity.required_keywords(@block) - SUPPLIED_KEYWORDS
+            return if unsupplied.empty?
+
+            raise ArgumentError,
+                  "sign block requires #{unsupplied.map { |k| "#{k}:" }.join(', ')}, which this gem " \
+                  "never supplies (only #{SUPPLIED_KEYWORDS.map { |k| "#{k}:" }.join(', ')} are ever passed)"
+          end
         end
 
         # Parametric HMAC, the outbound face of `verify :hmac`. Emits ONE signature header plus an
@@ -33,10 +106,6 @@ module Axn
         class HmacSigner
           PLACEHOLDERS = %w[timestamp body].freeze
           DEFAULT_SIGNING_STRING = "{body}"
-          # RFC 7230 field-name token. Net::HTTP stores whatever key it is handed and serializes it
-          # straight into the header line, so a space yields a malformed request and a newline
-          # appends attacker-shaped wire headers — neither caught until delivery (Codex review).
-          HEADER_NAME = /\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\z/
 
           def initialize(secret:, header:, digest: :sha256, encoding: :hex, prefix: nil,
                          signing_string: DEFAULT_SIGNING_STRING, timestamp_header: nil)
@@ -53,10 +122,13 @@ module Axn
               end
             end
 
-            # Same reasoning as :standard_webhooks — `resolved_secret` calls with NO arguments, so a
-            # callable needing one boots fine and raises on every real signing attempt.
-            if secret.respond_to?(:call) && !CallableArity.accepts?(secret, 0)
-              raise ArgumentError, "sign :hmac secret callable must accept zero arguments (resolved with no args per signing attempt)"
+            # Same reasoning as :standard_webhooks — `resolved_secret` calls with NO arguments, or
+            # with the PRO-3214 `Subscriber` for a 1-arity per-subscriber secret. A callable needing
+            # MORE than that boots fine and raises on every real signing attempt.
+            if secret.respond_to?(:call) && !(CallableArity.accepts?(secret, 0) || CallableArity.accepts?(secret, 1))
+              raise ArgumentError,
+                    "sign :hmac secret callable must accept zero or one arguments (resolved with no " \
+                    "args, or the Subscriber, per signing attempt)"
             end
 
             # Both are finite sets in Signature; an unvalidated typo boots fine and then raises
@@ -84,9 +156,9 @@ module Axn
           # `id:` is part of the signer contract but unused here — an id-bearing signature is what
           # :standard_webhooks is for, and this preset emits no id header for a receiver to read one
           # back from. Absorbed by `**` rather than named, so it isn't an unused argument.
-          def call(timestamp:, body:, **)
+          def call(timestamp:, body:, subscriber: nil, **)
             sig = Signature.compute(
-              secret: resolved_secret,
+              secret: resolved_secret(subscriber),
               payload: render(timestamp:, body:),
               digest: @digest,
               encoding: @encoding,
@@ -169,8 +241,25 @@ module Axn
           # message NEVER carries the secret's bytes: a callable secret is re-resolved per attempt,
           # so this can raise on every delivery and would flow the live credential into whatever
           # Axn.config.on_exception is wired to.
-          def resolved_secret
-            secret = @secret.respond_to?(:call) ? @secret.call : @secret
+          # Arity-aware, mirroring StandardWebhooksSigner's `resolve_secret`: a 1-arity secret
+          # callable gets the Subscriber (PRO-3214, a per-subscriber secret); a 0-arity one (or a
+          # plain value) resolves exactly as it did before subscriber-awareness existed.
+          def resolved_secret(subscriber)
+            secret = if @secret.respond_to?(:call)
+                       # Prefer a ZERO-arg call whenever the callable can accept one: a PRE-EXISTING
+                       # secret resolver with an unrelated optional arg (e.g. `->(app =
+                       # Rails.application) { ... }`) must keep using ITS OWN default, not silently
+                       # start receiving the Subscriber just because it COULD accept one arg. Only a
+                       # callable that genuinely cannot be invoked with zero args gets the
+                       # subscriber. Raw arity (`prefers_zero_args?`), not `#parameters`-based --
+                       # a plain `proc { |subscriber| }` (no default) reports its param as `:opt`
+                       # via `#parameters`, indistinguishable from a genuine default by that API,
+                       # but its raw arity is still the correct positive `1` (Codex P1 finding: a
+                       # `#parameters`-based check silently passed `nil` for exactly this shape).
+                       CallableArity.prefers_zero_args?(@secret) ? @secret.call : @secret.call(subscriber)
+                     else
+                       @secret
+                     end
             return secret if secret.is_a?(String) && !secret.empty?
 
             raise Axn::Webhooks::Error,
@@ -184,19 +273,22 @@ module Axn
           def initialize(secret:)
             # A pure declaration mistake, decided once at boot from the callable's own shape (not
             # from what it resolves to) — ArgumentError, matching Config's misconfiguration split.
-            # `resolve_secret` below calls `@secret.call` with NO arguments; a callable requiring one
+            # `resolve_secret` below calls `@secret.call` with NO arguments, or with the PRO-3214
+            # `Subscriber` for a 1-arity per-subscriber secret; a callable needing MORE than that
             # would otherwise boot successfully and raise ArgumentError on every real signing attempt
-            # (Codex P2 finding).
-            if secret.respond_to?(:call) && !CallableArity.accepts?(secret, 0)
-              raise ArgumentError, "sign :standard_webhooks secret callable must accept zero arguments (resolved with no args per signing attempt)"
+            # (Codex P2 finding, widened for the subscriber-aware case).
+            if secret.respond_to?(:call) && !(CallableArity.accepts?(secret, 0) || CallableArity.accepts?(secret, 1))
+              raise ArgumentError,
+                    "sign :standard_webhooks secret callable must accept zero or one arguments " \
+                    "(resolved with no args, or the Subscriber, per signing attempt)"
             end
 
             @secret = secret
           end
 
-          def call(id:, timestamp:, body:)
+          def call(id:, timestamp:, body:, subscriber: nil)
             sig = Signature.compute(
-              secret: decoded_secret,
+              secret: decoded_secret(subscriber),
               payload: "#{id}.#{timestamp}.#{body}",
               digest: :sha256,
               encoding: :base64,
@@ -212,14 +304,19 @@ module Axn
 
           # A callable secret (the norm for every other webhook secret in this gem — see
           # Resolvers.resolve) resolves per call rather than being frozen at `sign` time; a plain
-          # value is used as-is. Arity-free: unlike a subscriber resolver, a signing secret has no
-          # natural argument to pass.
-          def resolve_secret
-            @secret.respond_to?(:call) ? @secret.call : @secret
+          # value is used as-is. Arity-aware (PRO-3214): a 1-arity callable gets the Subscriber (a
+          # per-subscriber secret); a 0-arity one resolves exactly as it did before subscriber-
+          # awareness existed.
+          def resolve_secret(subscriber)
+            return @secret unless @secret.respond_to?(:call)
+
+            # See the identical precedence rationale (and the Proc/#parameters quirk it works
+            # around) on HmacSigner#resolved_secret above (Codex P1 finding).
+            CallableArity.prefers_zero_args?(@secret) ? @secret.call : @secret.call(subscriber)
           end
 
-          def decoded_secret
-            secret = resolve_secret
+          def decoded_secret(subscriber)
+            secret = resolve_secret(subscriber)
             raise invalid_secret_error(secret) unless secret.is_a?(String) && secret.start_with?("whsec_")
 
             decoded = decode_or_reject(secret)

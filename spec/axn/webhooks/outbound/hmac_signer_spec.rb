@@ -156,9 +156,54 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         .to raise_error(ArgumentError, /unsupported encoding/)
     end
 
-    it "rejects a secret callable that requires an argument" do
-      expect { build(secret: ->(x) { x }, header: "X-Sig") }
-        .to raise_error(ArgumentError, /must accept zero arguments/)
+    it "rejects a secret callable that needs more than the subscriber (PRO-3214 widens 0-arity to 0-or-1)" do
+      expect { build(secret: ->(a, b) { "#{a}#{b}" }, header: "X-Sig") }
+        .to raise_error(ArgumentError, /must accept zero or one arguments/)
+    end
+  end
+
+  describe "per-subscriber secret (PRO-3214)" do
+    it "resolves a 1-arity secret callable with the Subscriber given to #call" do
+      seen = nil
+      signer = build(secret: lambda { |sub|
+        seen = sub
+        "s3kr1t"
+      }, header: "X-Signature")
+      subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+      signer.call(id: "m", timestamp: 1, body: "b", subscriber:)
+
+      expect(seen).to equal(subscriber)
+    end
+
+    # Codex P1 finding — see signer_spec.rb's identical case for StandardWebhooksSigner: an
+    # optional-arg secret (used for some unrelated reason, pre-dating subscriber-awareness) must
+    # keep resolving with ITS OWN default, not silently start receiving the Subscriber.
+    it "prefers a zero-arg call for an optional-arg secret, using ITS OWN default rather than the subscriber" do
+      seen = []
+      signer = build(secret: lambda { |app = :the_default|
+        seen << app
+        "s3kr1t"
+      }, header: "X-Signature")
+      subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+      signer.call(id: "m", timestamp: 1, body: "b", subscriber:)
+
+      expect(seen).to eq([:the_default])
+    end
+
+    # Codex P1 finding, round 2 (see signer_spec.rb's identical case for StandardWebhooksSigner).
+    it "still passes the subscriber to a plain Proc (not a lambda) with one param and no default" do
+      seen = nil
+      signer = build(secret: proc { |sub|
+        seen = sub
+        "s3kr1t"
+      }, header: "X-Signature")
+      subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+      signer.call(id: "m", timestamp: 1, body: "b", subscriber:)
+
+      expect(seen).to equal(subscriber)
     end
   end
 
