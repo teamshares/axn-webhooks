@@ -75,16 +75,21 @@ module Axn
         end
 
         # A webhook URL commonly carries a credential ITSELF -- HTTP Basic userinfo
-        # (`https://user:pass@host/...`) or a signed/token query param -- so no InvalidTarget
-        # message may echo one verbatim (Codex P1 finding): every message above that would
-        # otherwise interpolate a URL routes through here first. Strips userinfo/query/fragment,
-        # keeping scheme/host/path -- enough to debug which target failed and why, without ever
-        # having shown a credential. Also used by `Config#redact_target`'s Hash-row `:url`
-        # handling, so a rejected `{ url:, id: }` row's OWN url gets the identical treatment.
+        # (`https://user:pass@host/...`), a signed/token query param, or -- the most common real
+        # shape (Slack/Discord/Teams incoming webhooks are exactly this) -- a secret token AS THE
+        # PATH, e.g. `https://hooks.example/services/T00/B00/<secret>`. There's no general way to
+        # tell a "meaningful, harmless" path apart from a "the path IS the secret" one, so no
+        # InvalidTarget message may echo more than the ORIGIN verbatim (Codex P1 finding, rounds 6
+        # and 8): every message above that would otherwise interpolate a URL routes through here
+        # first. Strips userinfo/PATH/query/fragment, keeping only scheme/host/port -- enough to
+        # debug which HOST was rejected and why, without ever risking a credential. Also used by
+        # `Config#redact_target`'s Hash-row `:url` handling, so a rejected `{ url:, id: }` row's
+        # own url gets the identical treatment.
         def redact_url(url)
           uri = URI.parse(url)
           uri.user = nil
           uri.password = nil
+          uri.path = ""
           uri.query = nil
           uri.fragment = nil
           uri.to_s

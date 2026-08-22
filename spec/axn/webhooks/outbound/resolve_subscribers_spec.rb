@@ -143,7 +143,7 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       target = resolution.rejections.first[:target]
       expect(target).not_to include("live-key-do-not-leak")
       expect(target).not_to include("also-do-not-leak")
-      expect(target).to include("evil.example/hook")
+      expect(target).to include("evil.example")
     end
 
     # Codex P1 finding, round 5: the Hash-row redaction above doesn't help when a resolver
@@ -171,7 +171,7 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
     # commonly embeds credentials via HTTP Basic userinfo or a signed/token query param. A
     # rejected URL (e.g. its host isn't on the allowlist) had that embedded credential copied
     # straight into `result.rejected` and the `on_exception` report.
-    it "redacts userinfo/query/fragment from a rejected URL String, keeping only scheme/host/path" do
+    it "redacts a rejected URL String down to its origin (userinfo/path/query/fragment all stripped)" do
       config = outbound! do
         allowed_hosts %w[good.example]
         subscribers ->(_event) { ["https://user:live-key-do-not-leak@evil.example/hook?token=also-do-not-leak#frag"] }
@@ -182,7 +182,7 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       target = resolution.rejections.first[:target]
       expect(target).not_to include("live-key-do-not-leak")
       expect(target).not_to include("also-do-not-leak")
-      expect(target).to include("evil.example/hook")
+      expect(target).to include("evil.example")
     end
 
     it "falls back to a safe class/length description for an unparseable rejected URL String" do

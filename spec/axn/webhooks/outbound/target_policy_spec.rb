@@ -93,14 +93,29 @@ RSpec.describe Axn::Webhooks::Outbound::TargetPolicy do
   end
 
   describe ".redact_url" do
-    it "strips userinfo, query, and fragment, keeping scheme/host/path" do
+    it "strips userinfo, path, query, and fragment, keeping only the origin (scheme/host/port)" do
       redacted = described_class.redact_url("https://user:secret@evil.example/hook?token=live-key#frag")
 
-      expect(redacted).to eq("https://evil.example/hook")
+      expect(redacted).to eq("https://evil.example")
     end
 
-    it "leaves a URL with none of those components unchanged" do
-      expect(described_class.redact_url("https://a.example/hook")).to eq("https://a.example/hook")
+    # Codex P1 finding, round 8: a webhook URL commonly encodes its credential IN THE PATH itself
+    # -- Slack/Discord/Teams incoming-webhook URLs are exactly `https://host/services/T00/B00/
+    # <secret-token>`, no userinfo or query string involved at all. There's no general way to tell
+    # a "meaningful, harmless" path apart from a "the path IS the secret" one, so the only safe
+    # default is to drop the path unconditionally, same as userinfo/query/fragment.
+    it "strips a credential embedded in the PATH (the common Slack/Discord/Teams webhook-URL shape)" do
+      redacted = described_class.redact_url("https://hooks.example/services/T00/B00/live-secret-do-not-leak")
+
+      expect(redacted).to eq("https://hooks.example")
+    end
+
+    it "preserves a non-default port" do
+      expect(described_class.redact_url("https://a.example:8443/hook")).to eq("https://a.example:8443")
+    end
+
+    it "leaves a bare origin (no path/query/etc. to strip) unchanged" do
+      expect(described_class.redact_url("https://a.example")).to eq("https://a.example")
     end
 
     it "falls back to a safe class/size description for an unparseable String" do
