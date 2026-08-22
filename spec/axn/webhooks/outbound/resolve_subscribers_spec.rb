@@ -66,6 +66,26 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.subscribers.first.url).to eq("https://a.example/hook")
       expect(resolution.subscribers.first.id).to eq("17")
     end
+
+    # Codex P2 finding, round 7: a prebuilt `Subscriber` (constructed directly, e.g.
+    # `Subscriber.new(url: app_string, id: "1")`, rather than via the Hash-row path) slipped past
+    # the String/Hash-row copy-on-freeze fix above -- `config_owned` returned it UNCHANGED (it
+    # matched neither `String` nor `Hash`), so the SAME mutable String the app passed in stayed
+    # reachable as `.url`. Worse than the String/Hash cases: `static_resolution` deliberately
+    # SKIPS TargetPolicy for an already-boot-validated static entry, so a post-boot mutation here
+    # would switch a boot-approved destination to an arbitrary host with NO re-validation at all.
+    it "copies a static PREBUILT Subscriber's url/id too, not just a Hash/String row" do
+      mutable_url = +"https://a.example/hook"
+      app_subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: mutable_url, id: "17")
+      config = outbound! { event :lead_signed, to: [app_subscriber] }
+
+      expect(mutable_url).not_to be_frozen
+
+      mutable_url.replace("https://evil.example/hook")
+
+      resolution = config.resolve_subscribers(:lead_signed)
+      expect(resolution.subscribers.first.url).to eq("https://a.example/hook")
+    end
   end
 
   describe "per-row rejection" do
@@ -106,6 +126,24 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       resolution = config.resolve_subscribers(:lead_closed)
 
       expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
+    end
+
+    # Codex P1 finding, round 7: the Hash-row redaction above shows `:url` AS-IS (it's the one
+    # field always safe to inspect for a WELL-FORMED row) -- but the URL VALUE itself commonly
+    # embeds a credential (HTTP Basic userinfo, a signed/token query param), so a row rejected for
+    # some OTHER reason (e.g. an unrelated unknown key) had that embedded credential shown
+    # unredacted anyway.
+    it "redacts a Hash row's OWN :url value too, not just its other keys" do
+      config = outbound! do
+        subscribers ->(_event) { [{ url: "https://user:live-key-do-not-leak@evil.example/hook?token=also-do-not-leak", unknown: "x" }] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      target = resolution.rejections.first[:target]
+      expect(target).not_to include("live-key-do-not-leak")
+      expect(target).not_to include("also-do-not-leak")
+      expect(target).to include("evil.example/hook")
     end
 
     # Codex P1 finding, round 5: the Hash-row redaction above doesn't help when a resolver
@@ -155,7 +193,7 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
 
       resolution = nil
       expect { resolution = config.resolve_subscribers(:lead_closed) }.not_to raise_error
-      expect(resolution.rejections.first[:target]).to match(/String/)
+      expect(resolution.rejections.first[:target]).to match(/unparseable/)
     end
 
     # Codex P1 finding: `Kernel#Array` on a bare Hash converts it to `[[k, v], ...]` pairs (Hash

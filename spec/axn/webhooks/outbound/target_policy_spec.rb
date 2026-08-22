@@ -91,4 +91,37 @@ RSpec.describe Axn::Webhooks::Outbound::TargetPolicy do
       end.to raise_error(Axn::Webhooks::InvalidTarget, /rejected by allow_url/)
     end
   end
+
+  describe ".redact_url" do
+    it "strips userinfo, query, and fragment, keeping scheme/host/path" do
+      redacted = described_class.redact_url("https://user:secret@evil.example/hook?token=live-key#frag")
+
+      expect(redacted).to eq("https://evil.example/hook")
+    end
+
+    it "leaves a URL with none of those components unchanged" do
+      expect(described_class.redact_url("https://a.example/hook")).to eq("https://a.example/hook")
+    end
+
+    it "falls back to a safe class/size description for an unparseable String" do
+      expect(described_class.redact_url("http://[::not-a-host")).to match(/unparseable/)
+    end
+  end
+
+  # Codex P1 finding, round 7: sanitizing ONLY `Config#redact_target`'s representation of a
+  # rejected row wasn't enough -- every InvalidTarget MESSAGE that echoes a URL back (the http(s)
+  # check, and allow_url's rejection message) embedded the raw, unredacted URL, and that message
+  # is exactly what `Config#resolve_subscribers` stores as `reason:` in `result.rejected` and
+  # reports via `on_exception`.
+  describe "error messages never echo a raw credential-bearing URL" do
+    it "redacts the URL in the http(s)-scheme rejection message" do
+      expect { check!("ftp://user:live-key-do-not-leak@evil.example/hook?token=also-do-not-leak") }
+        .to raise_error(Axn::Webhooks::InvalidTarget) { |e| expect(e.message).not_to include("live-key-do-not-leak", "also-do-not-leak") }
+    end
+
+    it "redacts the URL in the allow_url rejection message" do
+      expect { check!("https://user:live-key-do-not-leak@evil.example/hook?token=also-do-not-leak", allow_url: ->(_uri) { false }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget) { |e| expect(e.message).not_to include("live-key-do-not-leak", "also-do-not-leak") }
+    end
+  end
 end

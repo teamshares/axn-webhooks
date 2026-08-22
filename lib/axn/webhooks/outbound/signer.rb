@@ -60,10 +60,14 @@ module Axn
           end
 
           def call(id:, timestamp:, body:, subscriber: nil)
-            full = { id:, timestamp:, body:, subscriber: }
-            return @block.call(full) if @wants_positional_hash
+            # The positional-Hash shape's CONTRACT is exactly these three keys -- it has no way to
+            # OPT IN to `subscriber:` the way a keyword-declaring block does, so it must never see
+            # it: a pre-existing signer deriving its signature from the WHOLE hash (e.g. hashing
+            # every key-value pair together) would compute a DIFFERENT signature the instant a 4th
+            # key appeared, silently breaking verification on the receiving end (Codex P1 finding).
+            return @block.call({ id:, timestamp:, body: }) if @wants_positional_hash
 
-            @block.call(**filtered(full))
+            @block.call(**filtered({ id:, timestamp:, body:, subscriber: }))
           end
 
           private

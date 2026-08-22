@@ -237,9 +237,14 @@ module Axn
         def redact_target(target)
           case target
           when Hash
-            target.to_h { |k, v| [k, %w[url id].include?(k.to_s) ? v : "<redacted>"] }.inspect
+            target.to_h { |k, v| [k, hash_target_value(k, v)] }.inspect
           when String
-            redact_url_string(target)
+            # A webhook URL commonly carries a credential ITSELF -- HTTP Basic userinfo or a
+            # signed/token query param -- so a rejected URL String isn't safe to `#inspect`
+            # verbatim (Codex P1 finding). `TargetPolicy.redact_url` is the SAME sanitizer every
+            # InvalidTarget message routes through, so a rejection's :target and its own :reason
+            # can never disagree about what's safe to show.
+            TargetPolicy.redact_url(target).inspect
           when *SAFE_TO_INSPECT
             target.inspect
           else
@@ -252,22 +257,17 @@ module Axn
           end
         end
 
-        # A webhook URL commonly carries a credential ITSELF -- HTTP Basic userinfo
-        # (`https://user:pass@host/...`) or a signed/token query param -- so a rejected URL
-        # String isn't safe to `#inspect` verbatim (Codex P1 finding). Strips userinfo/query/
-        # fragment, keeping scheme/host/path -- enough to debug which target failed and why,
-        # without ever having shown a credential. Falls back to a class/size description for a
-        # String that doesn't even parse as a URI (its content is nothing this rejection reason
-        # is about anyway).
-        def redact_url_string(str)
-          uri = URI.parse(str)
-          uri.user = nil
-          uri.password = nil
-          uri.query = nil
-          uri.fragment = nil
-          uri.to_s.inspect
-        rescue URI::InvalidURIError, ArgumentError
-          "#<String (unparseable, #{str.bytesize} bytes)>"
+        # `:url`'s value gets the SAME URL sanitization as a bare String target -- a Hash row
+        # rejected for some unrelated reason (an unknown key, say) must not leak a credential
+        # embedded in its OWN `:url` value either (Codex P1 finding, round 7). `:id` is never
+        # sensitive (identity, not a credential -- the whole design's premise). Every other key's
+        # NAME survives (so the rejection reason -- "unknown key(s): [...]" -- and this stay
+        # legible together) but its value never does.
+        def hash_target_value(key, value)
+          return TargetPolicy.redact_url(value) if key.to_s == "url" && value.is_a?(String)
+          return value if key.to_s == "id"
+
+          "<redacted>"
         end
 
         # Freezes the CONTAINERS we own, never the caller's objects: a `to:` resolver, the signer,
@@ -324,6 +324,14 @@ module Axn
           when String then value.dup.freeze
           when Array then value.map { |element| config_owned(element) }.freeze
           when Hash then value.to_h { |k, v| [k, config_owned(v)] }.freeze
+          when Subscriber
+            # `Data` instances are always frozen, but that freezes only the WRAPPER -- a prebuilt
+            # `Subscriber.new(url: app_string, id: ...)` still holds the app's own mutable url/id
+            # Strings underneath. Worse than the String/Hash cases above: `static_resolution`
+            # deliberately skips re-validating an already-boot-checked static entry, so a post-
+            # boot mutation here would switch a boot-approved destination to an arbitrary host
+            # with NO re-validation at all (Codex P2 finding).
+            Subscriber.new(url: config_owned(value.url), id: config_owned(value.id))
           else value
           end
         end

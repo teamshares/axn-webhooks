@@ -34,11 +34,11 @@ module Axn
           raise Axn::Webhooks::InvalidTarget, "URL must be a String (got #{url.class})" unless url.is_a?(String)
 
           uri = URI.parse(url)
-          raise Axn::Webhooks::InvalidTarget, "URL #{url.inspect} must be http(s)" unless http_uri?(uri)
+          raise Axn::Webhooks::InvalidTarget, "URL #{redact_url(url)} must be http(s)" unless http_uri?(uri)
 
           uri
         rescue URI::InvalidURIError
-          raise Axn::Webhooks::InvalidTarget, "URL #{url.inspect} is not a valid URL"
+          raise Axn::Webhooks::InvalidTarget, "URL #{redact_url(url)} is not a valid URL"
         end
 
         def http_uri?(uri) = %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
@@ -71,7 +71,25 @@ module Axn
         def check_allow_url!(uri, allow_url)
           return if allow_url.nil?
 
-          raise Axn::Webhooks::InvalidTarget, "URL #{uri} was rejected by allow_url" unless allow_url.call(uri)
+          raise Axn::Webhooks::InvalidTarget, "URL #{redact_url(uri.to_s)} was rejected by allow_url" unless allow_url.call(uri)
+        end
+
+        # A webhook URL commonly carries a credential ITSELF -- HTTP Basic userinfo
+        # (`https://user:pass@host/...`) or a signed/token query param -- so no InvalidTarget
+        # message may echo one verbatim (Codex P1 finding): every message above that would
+        # otherwise interpolate a URL routes through here first. Strips userinfo/query/fragment,
+        # keeping scheme/host/path -- enough to debug which target failed and why, without ever
+        # having shown a credential. Also used by `Config#redact_target`'s Hash-row `:url`
+        # handling, so a rejected `{ url:, id: }` row's OWN url gets the identical treatment.
+        def redact_url(url)
+          uri = URI.parse(url)
+          uri.user = nil
+          uri.password = nil
+          uri.query = nil
+          uri.fragment = nil
+          uri.to_s
+        rescue URI::InvalidURIError, ArgumentError
+          "<unparseable URL, #{url.to_s.bytesize} bytes>"
         end
       end
     end

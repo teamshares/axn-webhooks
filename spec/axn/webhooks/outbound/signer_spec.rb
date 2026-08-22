@@ -306,7 +306,13 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
         result = signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
 
-        expect(seen).to eq(id: "m", timestamp: 5, body: "abc", subscriber:)
+        # Codex P1 finding, round 7: this legacy shape's CONTRACT is exactly three keys -- a
+        # pre-existing signer that derives its signature from the WHOLE hash (e.g. hashing all its
+        # key-value pairs together) computes a DIFFERENT signature the instant a 4th `subscriber:`
+        # key appears, silently breaking verification on the receiving end for every such signer.
+        # This legacy shape has no way to OPT IN to the new key (unlike the keyword-based path,
+        # which only receives what it explicitly declares), so it must never see it.
+        expect(seen).to eq(id: "m", timestamp: 5, body: "abc")
         expect(result).to eq("x-sig" => "m:5:abc")
       end
     end
