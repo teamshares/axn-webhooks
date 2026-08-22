@@ -473,6 +473,24 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers]["content-type"]).to eq("application/json")
     end
 
+    # Codex P2 finding, round 9: Net::HTTP silently REWRITES both of these on the built-in
+    # transport, AFTER a caller's headers are applied -- Content-Length is regenerated from the
+    # body, Transfer-Encoding is deleted outright (see Transport::RESERVED_HEADERS). A signer/
+    # subscriber-controlled header under either name would otherwise pass every check here, only
+    # to never actually leave the process -- the delivery reports success, but the receiver never
+    # sees the configured header. `sign :hmac`'s own header-name validation already treats these
+    # as reserved (unconditionally, not only for the built-in transport); Deliver's own collision
+    # check should be no less strict.
+    it "drops (with a warning) a custom header colliding with a Transport-reserved name, case-insensitively" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "Content-Length" => "999", "TRANSFER-ENCODING" => "chunked" } })
+      expect(Axn.config.logger).to receive(:warn).with(/dropping custom header/i).twice
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]).not_to include("Content-Length", "TRANSFER-ENCODING")
+    end
+
     it "drops (with a warning) a custom header colliding with a header the active SIGNER just emitted, case-insensitively" do
       # Standard Webhooks emits "webhook-signature" -- a subscriber row supplying a differently-cased
       # duplicate must not be the thing that ships, or the receiver silently gets an unverifiable

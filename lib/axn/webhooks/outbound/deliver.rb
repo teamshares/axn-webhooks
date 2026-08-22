@@ -122,7 +122,14 @@ module Axn
             return {}
           end
 
-          reserved = MANAGED_HEADERS + signer_headers.keys
+          # Transport::RESERVED_HEADERS (content-length/transfer-encoding) are reserved
+          # unconditionally, not only for the built-in transport -- matching `sign :hmac`'s own
+          # header-name validation, which treats them the same way regardless of what `transport`
+          # ends up configured. Net::HTTP silently REWRITES both, AFTER headers are applied, so a
+          # subscriber-controlled value under either name would otherwise pass every check here
+          # and just never reach the receiver -- the delivery reports success regardless (Codex
+          # P2 finding).
+          reserved = MANAGED_HEADERS + Transport::RESERVED_HEADERS + signer_headers.keys
           raw.each_with_object({}) { |(key, value), out| add_custom_header(out, key, value, reserved) }
         end
 
