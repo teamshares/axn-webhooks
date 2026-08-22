@@ -237,7 +237,12 @@ module Axn
         def redact_target(target)
           case target
           when Hash
-            target.to_h { |k, v| [k, hash_target_value(k, v)] }.inspect
+            # `k` is redacted too, not just `v` -- a resolver mistake using a COMPOUND object AS A
+            # KEY (e.g. a malformed `.to_h` transform keying by the record itself rather than its
+            # id) would otherwise survive into the reconstructed Hash unchanged, and the outer
+            # `Hash#inspect` renders that key's own #inspect regardless of what its value became
+            # (Codex P1 finding, round 14).
+            target.to_h { |k, v| [redact_hash_key(k), hash_target_value(k, v)] }.inspect
           when String
             # A webhook URL commonly carries a credential ITSELF -- HTTP Basic userinfo or a
             # signed/token query param -- so a rejected URL String isn't safe to `#inspect`
@@ -255,6 +260,17 @@ module Axn
             # earlier Hash-only redaction still leaked a model's attributes verbatim here).
             "#<#{target.class} (redacted)>"
           end
+        end
+
+        # Only a Symbol/String key is ever legitimate here (the only shapes `Subscriber.coerce`
+        # accepts) -- anything else is already a rejected row on its OWN terms (an "unsupported
+        # key" InvalidTarget), so only its class need survive, matching the class-only convention
+        # `Subscriber.coerce`'s own message already uses for the identical shape (Codex P1 finding,
+        # round 14).
+        def redact_hash_key(key)
+          return key if key.is_a?(Symbol) || key.is_a?(String)
+
+          "#<#{key.class} (redacted)>"
         end
 
         # `:url`'s value gets the SAME URL sanitization as a bare String target -- a Hash row

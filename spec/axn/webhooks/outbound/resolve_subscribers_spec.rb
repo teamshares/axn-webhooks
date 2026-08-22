@@ -206,6 +206,26 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
     end
 
+    # Codex P1 finding, round 14: the fix above redacts a compound :id VALUE, but `redact_target`'s
+    # Hash branch reconstructs the rejection's `:target` with the ORIGINAL keys unchanged --
+    # `target.to_h { |k, v| [k, hash_target_value(k, v)] }` only ever transforms `v`. A resolver
+    # mistake using a compound object AS A KEY (e.g. a malformed `.to_h` transform keying by the
+    # record itself) survives into the reconstructed Hash, and the outer `Hash#inspect` renders that
+    # key's own #inspect regardless of what its value became.
+    it "never leaks a compound (non-scalar) Hash KEY's #inspect into a Hash row's rejection" do
+      fake_record = Struct.new(:id, :api_token) do
+        def inspect = "#<FakeRecord id=1 api_token=\"live-key-do-not-leak\">"
+      end.new(1, "live-key-do-not-leak")
+
+      config = outbound! do
+        subscribers ->(_event) { [{ fake_record => "https://a.example/hook", url: "not-a-url" }] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
+    end
+
     it "falls back to a safe class/length description for an unparseable rejected URL String" do
       config = outbound! do
         subscribers ->(_event) { ["http://[::not-a-host"] }
