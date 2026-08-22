@@ -45,6 +45,22 @@ RSpec.describe Axn::Webhooks::Outbound::Subscriber do
         .to raise_error(Axn::Webhooks::InvalidTarget, /must include :url/)
     end
 
+    # Codex P1 finding, round 10: this branch only reaches `raw.inspect` when every key IS
+    # `:url`/`:id` (any OTHER key is already caught, safely, by the "unknown key(s)" check above)
+    # -- but `:id`'s VALUE isn't constrained to a simple scalar. A plausible mistake (passing the
+    # whole record instead of `record.id`) puts a verbose object under `:id`, and the OLD message
+    # interpolated the whole raw Hash, which would render that object's full #inspect. The message
+    # now names only key NAMES, matching the "unknown key(s)" message's existing convention, so it
+    # can never echo an arbitrary value regardless of what ends up under :id.
+    it "never echoes the Hash's VALUES in the missing-:url message, only its key names" do
+      fake_record = Struct.new(:id, :api_token) do
+        def inspect = "#<FakeRecord id=1, api_token=\"live-key-do-not-leak\">"
+      end.new(1, "live-key-do-not-leak")
+
+      expect { described_class.coerce({ id: fake_record }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget) { |e| expect(e.message).not_to include("live-key-do-not-leak") }
+    end
+
     # A row shaped like `{ url:, secret: }` (the shape the ticket originally proposed, and the shape
     # this design deliberately rejects — see Phase 1 design notes) must fail LOUDLY rather than
     # silently dropping the credential and delivering unsigned/under-signed.

@@ -57,7 +57,12 @@ module Axn
             symbolized = raw.to_h { |k, v| [k.to_sym, v] }
             unknown = symbolized.keys - %i[url id]
             raise Axn::Webhooks::InvalidTarget, "Hash has unknown key(s): #{unknown.inspect}" if unknown.any?
-            raise Axn::Webhooks::InvalidTarget, "Hash must include :url (got #{raw.inspect})" unless symbolized.key?(:url)
+            # Names only key NAMES (matching the "unknown key(s)" message above), never `raw` itself
+            # -- this only reaches here when every key IS :url/:id (any other key is already
+            # caught, safely, above), but an :id VALUE isn't constrained to a simple scalar. A
+            # plausible mistake (passing the whole record instead of `record.id`) would otherwise
+            # have `raw.inspect` render that object's full #inspect verbatim (Codex P1 finding).
+            raise Axn::Webhooks::InvalidTarget, "Hash must include :url (keys present: #{symbolized.keys.inspect})" unless symbolized.key?(:url)
 
             new(url: symbolized[:url], id: symbolized[:id]&.to_s)
           end
