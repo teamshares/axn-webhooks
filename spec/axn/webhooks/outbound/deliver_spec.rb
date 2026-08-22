@@ -599,6 +599,29 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
 
       expect(result.outcome).to be_exception
     end
+
+    # Codex P2 finding, round 15: `signed_headers` builds `subscriber = Subscriber.new(url:,
+    # id: subscriber_id)` from Deliver's OWN `url` -- reconstructed from the job payload on every
+    # attempt, an ordinary mutable String, never the frozen snapshot `TargetPolicy.check!` produced
+    # at resolution time (that snapshot lives only in `Emit`'s Resolution; `Deliver` never sees it
+    # again). Ruby's hash-literal evaluates `url:` (in `post_args`) and `Subscriber.new(url:, ...)`
+    # (inside `signed_headers`) against the SAME object -- so a subscriber-aware secret/headers
+    # resolver that mutates `subscriber.url` IN PLACE would silently swap the destination `post_args`
+    # already captured, sending the request to a host that was never checked against
+    # `allowed_hosts`/`allow_url` at all (that check runs once, at resolution time). This must fail
+    # LOUDLY (a frozen string raising) rather than silently deliver somewhere unvalidated.
+    it "never lets a subscriber-aware sign/headers resolver mutate the delivery's own URL in place" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, sign_block: lambda { |subscriber:, **|
+        subscriber.url << "-mutated-by-signer"
+        { "X-Signature" => "sig" }
+      })
+
+      result = described_class.call(**kwargs)
+
+      expect(result.outcome).to be_exception
+      expect(transport.calls).to be_empty
+    end
   end
 
   describe "user-agent" do

@@ -96,7 +96,16 @@ module Axn
         # and Net::HTTP still picks the later one) -- `custom_headers` below additionally drops any
         # subscriber-supplied name that collides, case-insensitively, with either bucket.
         def signed_headers
-          subscriber = Subscriber.new(url:, id: subscriber_id)
+          # `TargetPolicy.snapshot` (not a bare `Subscriber.new`) -- `url`/`subscriber_id` here are
+          # reconstructed fresh from THIS attempt's job payload, ordinary mutable Strings, never the
+          # frozen copy `TargetPolicy.check!` validated at resolution time (that copy lives only in
+          # `Emit`'s Resolution; `Deliver` never sees it again). A same-position `url:` hash-literal
+          # key below and the `url:` used here reference the SAME object -- so a subscriber-aware
+          # `sign`/`headers` resolver that mutated `subscriber.url` in place would silently swap the
+          # destination `post_args` already captured, sending the request to a host that was never
+          # checked against `allowed_hosts`/`allow_url` at all (Codex P2 finding, round 15). Freezing
+          # a fresh copy here means that mutation attempt raises loudly instead.
+          subscriber = TargetPolicy.snapshot(Subscriber.new(url:, id: subscriber_id))
           signer_headers = config.signer.call(id: webhook_id, timestamp: Time.now.to_i, body:, subscriber:)
 
           custom_headers(subscriber, signer_headers)
