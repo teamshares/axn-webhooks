@@ -51,8 +51,15 @@ module Axn
             # #to_sym -- letting `to_sym` raise a bare NoMethodError here would propagate past
             # `resolve_subscribers`'s per-row `rescue Axn::Webhooks::InvalidTarget`, aborting the
             # WHOLE fan-out instead of rejecting just this one malformed row (Codex P2 finding).
+            #
+            # Named by CLASS only, never `.inspect` -- a plain Integer key is safe to show verbatim,
+            # but a resolver mistake could just as easily use a COMPOUND object as a key (e.g. a
+            # malformed `.to_h` transform keying by the record itself). That object's own #inspect
+            # would otherwise render into this message, which `resolve_subscribers` stores verbatim
+            # as a rejection's `:reason` -- an ActiveRecord-like model's #inspect commonly includes
+            # every attribute, secrets included (Codex P1 finding, round 13).
             non_symbolizable = raw.keys.reject { |k| k.is_a?(Symbol) || k.is_a?(String) }
-            raise Axn::Webhooks::InvalidTarget, "Hash has non-Symbol/String key(s): #{non_symbolizable.inspect}" if non_symbolizable.any?
+            raise Axn::Webhooks::InvalidTarget, "Hash has non-Symbol/String key(s): #{non_symbolizable.map(&:class).inspect}" if non_symbolizable.any?
 
             symbolized = raw.to_h { |k, v| [k.to_sym, v] }
             unknown = symbolized.keys - %i[url id]

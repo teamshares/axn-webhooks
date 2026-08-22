@@ -78,6 +78,21 @@ RSpec.describe Axn::Webhooks::Outbound::Subscriber do
         .to raise_error(Axn::Webhooks::InvalidTarget, /key/)
     end
 
+    # Codex P1 finding, round 13: the message above named the offending key(s) via
+    # `non_symbolizable.inspect` -- safe for a plain Integer key, but a resolver mistake could just
+    # as easily use a COMPOUND object as a key (e.g. `{ subscription_record => url }`, from a
+    # malformed `.to_h` transform). That object's own #inspect renders into the exception message,
+    # which `resolve_subscribers` stores verbatim as a rejection's `:reason` -- an ActiveRecord-like
+    # model's #inspect commonly includes every attribute, secrets included.
+    it "never echoes a non-Symbol/String key's #inspect in the message, only its class" do
+      fake_record = Struct.new(:id, :api_token) do
+        def inspect = "#<FakeRecord id=1 api_token=\"live-key-do-not-leak\">"
+      end.new(1, "live-key-do-not-leak")
+
+      expect { described_class.coerce({ fake_record => "https://x.example/hook", url: "https://x.example/hook" }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget) { |e| expect(e.message).not_to include("live-key-do-not-leak") }
+    end
+
     it "raises on anything that isn't a String, Hash, or Subscriber" do
       expect { described_class.coerce(nil) }
         .to raise_error(Axn::Webhooks::InvalidTarget, /must be a String URL or a Hash/)
