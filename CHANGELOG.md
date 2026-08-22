@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Documentation
+- README: fix the primary outbound example (Codex review) so it actually boots and delivers as
+  written. `allowed_hosts` didn't include the example's own static `to:` hosts
+  (`example.com`/`internal.example`), so `Config#validate_event!` would have rejected it at boot;
+  the `secret:`/`headers:` resolvers called `Subscription.find(subscriber.id)` unconditionally, but
+  the example's statically-routed events (bare URL `to:` entries) resolve to `id: nil`, which would
+  raise on the very first static-event delivery — both now handled. Also narrows the "credentials
+  never enter the job payload" claim in the routing section: that guarantee covers only the
+  separately-resolved `secret:`/`headers:` values, not a credential a receiver embeds in its own
+  webhook URL (`Deliver` does carry `url:`, and does persist it in the queue for the retry chain's
+  lifetime).
 - README: explain why a missing async adapter degrades to sync under `:auto` (inbound and outbound
   alike) but raises under an explicitly-declared `async`. The three behaviors read as inconsistent
   side by side; they line up once `emit`'s *default* is understood as `:auto` (a per-call

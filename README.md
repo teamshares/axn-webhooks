@@ -690,8 +690,12 @@ Axn::Webhooks.outbound do
   # a receiver's own `verify :standard_webhooks`. A custom signer block is accepted in the same slot.
   # `secret:` may be a plain value, a zero-arity callable (resolved fresh on every signing attempt,
   # so a secret can rotate without a reboot — the same convention as every inbound `verify` secret),
-  # or a ONE-arity callable that receives the resolved Subscriber — a per-subscriber secret.
-  sign :standard_webhooks, secret: ->(subscriber) { Subscription.find(subscriber.id).signing_secret }
+  # or a ONE-arity callable that receives the resolved Subscriber — a per-subscriber secret. `id` is
+  # nil for the statically-routed events below (a bare URL String carries no identity), so this
+  # guards for that rather than raising `Subscription.find(nil)` the first time one of those fires.
+  sign :standard_webhooks, secret: ->(subscriber) {
+    subscriber.id ? Subscription.find(subscriber.id).signing_secret : ENV.fetch("WEBHOOKS_DEFAULT_SECRET")
+  }
 
   # Default subscriber resolver — any event declared with no explicit `to:` falls back to this.
   # A row may be a bare URL String (shown on `lead_signed`/`invoice_paid`/`internal_only` below) or
@@ -700,12 +704,14 @@ Axn::Webhooks.outbound do
 
   # Per-destination extra headers (e.g. a subscriber's own bearer token) — resolved fresh per
   # DELIVERY ATTEMPT from the Subscriber, same convention as `secret:` above: never stored, so
-  # nothing here ever sits in a Sidekiq/ActiveJob payload. 0- or 1-arity; optional.
-  headers ->(subscriber) { { "authorization" => "Bearer #{Subscription.find(subscriber.id).token}" } }
+  # nothing here ever sits in a Sidekiq/ActiveJob payload. 0- or 1-arity; optional. Same nil-id
+  # guard as `secret:` above, for the same reason.
+  headers ->(subscriber) { subscriber.id ? { "authorization" => "Bearer #{Subscription.find(subscriber.id).token}" } : {} }
 
   # A host policy for a resolved target — a static `to:` entry and a runtime `subscribers`/`to:`
-  # row both go through it. Both optional; nil (the default) means any http(s) URL passes.
-  allowed_hosts %w[hooks.partner.example *.customer.example]  # exact match, or a leading `*.` wildcard
+  # row both go through it, INCLUDING the static hosts below (`example.com`/`internal.example`) —
+  # both optional; nil (the default) means any http(s) URL passes.
+  allowed_hosts %w[hooks.partner.example *.customer.example example.com internal.example]  # exact match, or a leading `*.` wildcard
   allow_url ->(uri) { !PRIVATE_IP_RANGES.any? { |r| r.include?(uri.host) } }  # general escape hatch
 
   event :lead_signed, to: ["https://example.com/webhooks/lead_signed"]  # static list
@@ -990,11 +996,14 @@ Axn::Webhooks.outbound do
 end
 ```
 
-**Credentials never enter the job payload.** `Deliver` re-enqueues *itself* on a retry
-(`call_async`), so anything in its `expects` is persisted, plaintext, in the queue backend (Redis
-for Sidekiq) for the life of the retry chain (`max_attempts` × the backoff curve — hours, by
-default). That's why `Deliver` only ever carries a subscriber's **identity** (`subscriber_id`, a
-String) — never a `secret:`/`headers:` value. `sign`'s secret and the `headers` resolver are called
+**The signing secret and extra headers never enter the job payload.** `Deliver` re-enqueues
+*itself* on a retry (`call_async`), so anything in its `expects` is persisted, plaintext, in the
+queue backend (Redis for Sidekiq) for the life of the retry chain (`max_attempts` × the backoff
+curve — hours, by default). `Deliver` **does** carry `url:` — so a credential a receiver embeds in
+its own webhook URL (a Slack/Discord/Teams-style secret path segment, or a signed query token) is
+persisted there for that same lifetime; this guarantee covers only the *separately resolved*
+`secret:`/`headers:` values, which is why `Deliver` only ever carries a subscriber's **identity**
+(`subscriber_id`, a String) — never a `secret:`/`headers:` value. `sign`'s secret and the `headers` resolver are called
 fresh **per delivery attempt**, from that identity, exactly like every other callable secret in this
 gem. There is deliberately no per-emit `headers:` override for the identical reason (see the
 "Per-call overrides" bullet above) — the block-level `headers` resolver is the seam for that.
