@@ -260,12 +260,18 @@ module Axn
         # `:url`'s value gets the SAME URL sanitization as a bare String target -- a Hash row
         # rejected for some unrelated reason (an unknown key, say) must not leak a credential
         # embedded in its OWN `:url` value either (Codex P1 finding, round 7). `:id` is never
-        # sensitive (identity, not a credential -- the whole design's premise). Every other key's
-        # NAME survives (so the rejection reason -- "unknown key(s): [...]" -- and this stay
-        # legible together) but its value never does.
+        # sensitive PROVIDED it's the documented scalar shape (a String/Integer identifier) --
+        # `:id` is only ever stringified into that shape by `Subscriber.coerce`, which this
+        # ALREADY-rejected raw row never reached, so a plausible mistake (passing the whole record
+        # instead of `record.id`) leaves a COMPOUND object under `:id` here. Showing it as-is would
+        # have the outer `Hash#inspect` render that object's own #inspect verbatim -- an
+        # ActiveRecord-like model commonly defines that to include every attribute, secrets
+        # included (Codex P1 finding, round 12). Every other key's NAME survives (so the rejection
+        # reason -- "unknown key(s): [...]" -- and this stay legible together) but its value never
+        # does.
         def hash_target_value(key, value)
           return TargetPolicy.redact_url(value) if key.to_s == "url" && value.is_a?(String)
-          return value if key.to_s == "id"
+          return value if key.to_s == "id" && (value.is_a?(String) || SAFE_TO_INSPECT.any? { |klass| value.is_a?(klass) })
 
           "<redacted>"
         end

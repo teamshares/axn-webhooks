@@ -185,6 +185,27 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(target).to include("evil.example")
     end
 
+    # Codex P1 finding, round 12: `hash_target_value` treats `:id`'s value as always safe to show
+    # AS-IS ("identity, not a credential" -- true for the documented shape, a String/Integer id).
+    # But a resolver row rejected for an UNRELATED reason (here, a malformed `:url`) can still carry
+    # a COMPOUND `:id` value -- e.g. `{ url: "not-a-url", id: subscription_record }`, a plausible
+    # mistake (passing the whole record instead of `record.id`). The outer `Hash#inspect` then
+    # renders that record's own #inspect verbatim, which an ActiveRecord-like model commonly defines
+    # to include every attribute, secrets included.
+    it "never leaks a compound (non-scalar) :id value's #inspect into a Hash row's rejection" do
+      fake_record = Struct.new(:id, :api_token) do
+        def inspect = "#<FakeRecord id=1 api_token=\"live-key-do-not-leak\">"
+      end.new(1, "live-key-do-not-leak")
+
+      config = outbound! do
+        subscribers ->(_event) { [{ url: "not-a-url", id: fake_record }] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
+    end
+
     it "falls back to a safe class/length description for an unparseable rejected URL String" do
       config = outbound! do
         subscribers ->(_event) { ["http://[::not-a-host"] }
