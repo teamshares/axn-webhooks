@@ -32,6 +32,18 @@ RSpec.describe Axn::Webhooks::Outbound::TargetPolicy do
         .to raise_error(Axn::Webhooks::InvalidTarget, /is not a valid URL/)
     end
 
+    # Codex P2 finding, round 17: `URI.parse` doesn't raise ONLY `URI::InvalidURIError` for a
+    # malformed URL -- a scheme-specific parser can raise a SIBLING class instead (e.g.
+    # `URI::InvalidComponentError` for `"mailto:foo"`, which has no `@`). Both descend from the
+    # common `URI::Error`, but `InvalidComponentError` is NOT a subclass of `InvalidURIError` --
+    # rescuing only the latter let the former escape uncaught past `Config#check_targets`'s
+    # `rescue Axn::Webhooks::InvalidTarget`, aborting the WHOLE fan-out instead of rejecting just
+    # this one malformed row.
+    it "rejects a URL that raises a URI::Error SIBLING of InvalidURIError (e.g. a malformed mailto: URI)" do
+      expect { check!("mailto:foo") }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /is not a valid URL/)
+    end
+
     it "rejects an http(s) scheme with no host" do
       %w[https:foo https: https:///hook].each do |url|
         expect { check!(url) }.to raise_error(Axn::Webhooks::InvalidTarget, /must be http\(s\)/), "expected #{url.inspect} to be rejected"
@@ -147,6 +159,15 @@ RSpec.describe Axn::Webhooks::Outbound::TargetPolicy do
 
     it "falls back to a safe class/size description for an unparseable String" do
       expect(described_class.redact_url("http://[::not-a-host")).to match(/unparseable/)
+    end
+
+    # Codex P2 finding, round 17: `URI.parse` can raise a `URI::Error` SIBLING of
+    # `InvalidURIError` (e.g. `InvalidComponentError` for a malformed `mailto:` URI) that a
+    # narrower rescue wouldn't catch -- and this method runs INSIDE `parse_url!`'s own rescue
+    # handler to build ITS message, so an uncaught exception here would replace the InvalidTarget
+    # that call is trying to raise with a raw, unrescued one instead.
+    it "also falls back safely for a URI::Error SIBLING of InvalidURIError (e.g. a malformed mailto: URI)" do
+      expect(described_class.redact_url("mailto:foo")).to match(/unparseable/)
     end
   end
 

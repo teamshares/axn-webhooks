@@ -58,7 +58,14 @@ module Axn
           raise Axn::Webhooks::InvalidTarget, "URL #{redact_url(url)} must be http(s)" unless http_uri?(uri)
 
           uri
-        rescue URI::InvalidURIError
+        rescue URI::Error
+          # `URI.parse` doesn't raise ONLY `URI::InvalidURIError` for a malformed URL -- a
+          # scheme-specific parser can raise a SIBLING class instead (e.g.
+          # `URI::InvalidComponentError` for `"mailto:foo"`, which has no `@`); that class is NOT a
+          # subclass of `InvalidURIError`, so rescuing only the latter let it escape uncaught past
+          # `Config#check_targets`'s `rescue Axn::Webhooks::InvalidTarget`, aborting the WHOLE
+          # fan-out instead of rejecting just the one malformed row (Codex P2 finding, round 17).
+          # `URI::Error` is the common ancestor of every URI parse failure.
           raise Axn::Webhooks::InvalidTarget, "URL #{redact_url(url)} is not a valid URL"
         end
 
@@ -114,7 +121,12 @@ module Axn
           uri.query = nil
           uri.fragment = nil
           uri.to_s
-        rescue URI::InvalidURIError, ArgumentError
+        rescue URI::Error, ArgumentError
+          # Same reasoning as `parse_url!`'s rescue (round 17): a scheme-specific parser can raise
+          # a `URI::Error` SIBLING of `InvalidURIError` (e.g. `InvalidComponentError`) that isn't
+          # caught by name -- and this method is called from INSIDE `parse_url!`'s own rescue
+          # handler to build the redacted message, so a narrower rescue here would raise a SECOND,
+          # uncaught exception in place of the `InvalidTarget` that call is trying to construct.
           "<unparseable URL, #{url.to_s.bytesize} bytes>"
         end
       end

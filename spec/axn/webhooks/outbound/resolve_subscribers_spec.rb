@@ -122,6 +122,23 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections.first[:reason]).to match(/must be a String/)
     end
 
+    # Codex P2 finding, round 17: `URI.parse` doesn't raise ONLY `URI::InvalidURIError` for a
+    # malformed URL -- a scheme-specific parser can raise a SIBLING class instead (e.g.
+    # `URI::InvalidComponentError` for `"mailto:foo"`), which `TargetPolicy.parse_url!`'s narrower
+    # rescue didn't catch, escaping past `Config#check_targets`'s own `rescue
+    # Axn::Webhooks::InvalidTarget` and aborting the whole fan-out.
+    it "still rejects (not URI::Error-aborts the whole fan-out for) a row whose URL is a malformed non-http(s) URI" do
+      config = outbound! do
+        subscribers ->(_event) { ["https://good.example/hook", "mailto:foo"] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.subscribers.map(&:url)).to eq(["https://good.example/hook"])
+      expect(resolution.rejections.size).to eq(1)
+      expect(resolution.rejections.first[:reason]).to match(/is not a valid URL/)
+    end
+
     it "rejects a row carrying an unknown key (e.g. a caller trying to smuggle a secret through) rather than silently dropping it" do
       config = outbound! do
         subscribers ->(_event) { [{ url: "https://a.example/hook", secret: "shh" }] }
