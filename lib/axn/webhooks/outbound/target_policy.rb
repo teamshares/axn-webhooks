@@ -19,11 +19,11 @@ module Axn
         module_function
 
         def check!(raw, allowed_hosts: nil, allow_url: nil)
-          subscriber = snapshot(Subscriber.coerce(raw))
+          subscriber = Subscriber.coerce(raw)
           uri = parse_url!(subscriber.url)
           check_host_allowlist!(uri, allowed_hosts)
           check_allow_url!(uri, allow_url)
-          subscriber
+          snapshot(subscriber)
         end
 
         # A runtime `subscribers`/`to:` resolver may hand back a `Subscriber` it keeps its own
@@ -34,6 +34,15 @@ module Axn
         # this method has already validated them but before `Emit`'s fan-out reads them to actually
         # deliver -- swapping in a URL that was never checked at all (Codex P2 finding, round 11).
         # Dup+freezing fresh copies here closes that window regardless of what the caller does next.
+        #
+        # Called LAST, only once `parse_url!` has already confirmed `url` is a String -- calling
+        # this BEFORE that check (as an earlier version did) ran `.dup` on whatever a malformed row
+        # handed back verbatim; a non-duplicable object there (`Thread.current` -- anything without
+        # an allocator behaves the same) raises a bare TypeError, which `Config#check_targets`'s
+        # `rescue Axn::Webhooks::InvalidTarget` never catches -- aborting the WHOLE fan-out instead
+        # of rejecting just the one malformed row (Codex P2 finding, round 16). `id` needs no such
+        # ordering care: `Subscriber.coerce` already stringifies it (or leaves it nil) in every
+        # branch, so it's always dup-safe by the time ANY code here runs.
         def snapshot(subscriber)
           Subscriber.new(url: subscriber.url.dup.freeze, id: subscriber.id&.dup&.freeze)
         end

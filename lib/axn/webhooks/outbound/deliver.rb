@@ -170,9 +170,15 @@ module Axn
           # Hash literal, the single most natural way to write this in Ruby) fails the String-key
           # check, and logging the value unconditionally here would copy a live credential
           # straight into application logs the moment anyone wrote a `headers` resolver this way
-          # (Codex P1 finding). The key name alone is enough to debug "which header was malformed".
+          # (Codex P1 finding). The key name alone is enough to debug "which header was malformed" --
+          # true for a Symbol (the documented case above), but a resolver mistake could just as
+          # easily use a COMPOUND object as a key (e.g. an ActiveRecord record handed back instead
+          # of a header name); that object's own #inspect would otherwise render straight into
+          # application logs, commonly including every attribute (Codex P1 finding, round 16). Only
+          # a String/Symbol key is safe to name as-is; anything else is named by class only.
           unless key.is_a?(String) && value.is_a?(String)
-            Axn.config.logger.warn("[axn-webhooks] dropping a custom header with a non-String key or value (key: #{key.inspect})")
+            key_desc = key.is_a?(String) || key.is_a?(Symbol) ? key.inspect : "instance of #{key.class}"
+            Axn.config.logger.warn("[axn-webhooks] dropping a custom header with a non-String key or value (key: #{key_desc})")
             return
           end
 

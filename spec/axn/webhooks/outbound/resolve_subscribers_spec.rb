@@ -102,6 +102,26 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections[1]).to include(reason: a_string_matching(/is not a valid URL|must be http/))
     end
 
+    # Codex P2 finding, round 16: `TargetPolicy.check!`'s round-11 mutation-safety fix (`snapshot`)
+    # dup+froze `url` BEFORE `parse_url!` had confirmed it was even a String -- so a malformed row
+    # whose `:url` is some other non-duplicable object (`Thread.current` is Codex's example;
+    # anything without an allocator behaves the same, e.g. `Method`/`IO`) raised a bare TypeError
+    # from `.dup` itself, which `Config#check_targets`'s `rescue Axn::Webhooks::InvalidTarget` never
+    # catches -- aborting the WHOLE fan-out (this test's good sibling row included) instead of
+    # rejecting just the one malformed row, exactly the regression the per-row design exists to
+    # prevent.
+    it "still rejects (not TypeError-aborts the whole fan-out for) a row whose :url is a non-duplicable object" do
+      config = outbound! do
+        subscribers ->(_event) { ["https://good.example/hook", { url: Thread.current }] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.subscribers.map(&:url)).to eq(["https://good.example/hook"])
+      expect(resolution.rejections.size).to eq(1)
+      expect(resolution.rejections.first[:reason]).to match(/must be a String/)
+    end
+
     it "rejects a row carrying an unknown key (e.g. a caller trying to smuggle a secret through) rather than silently dropping it" do
       config = outbound! do
         subscribers ->(_event) { [{ url: "https://a.example/hook", secret: "shh" }] }

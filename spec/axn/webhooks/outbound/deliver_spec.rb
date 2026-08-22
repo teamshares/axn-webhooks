@@ -538,6 +538,23 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers]).not_to include("sym_key", "str_key")
     end
 
+    # Codex P1 finding, round 16: the warning above names the non-String KEY via `key.inspect` --
+    # safe for the documented case (a Symbol, from `{ sym_key: "v" }`) but a resolver mistake could
+    # just as easily use a COMPOUND object as a key (e.g. an ActiveRecord subscription record handed
+    # back instead of a header name). That object's own #inspect renders straight into application
+    # logs, which commonly includes every attribute -- secrets included.
+    it "never echoes a non-String header key's #inspect in the warning, only its class" do
+      fake_record = Struct.new(:id, :api_token) do
+        def inspect = "#<FakeRecord id=1 api_token=\"live-key-do-not-leak\">"
+      end.new(1, "live-key-do-not-leak")
+
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { fake_record => "v" } })
+      expect(Axn.config.logger).to receive(:warn) { |msg| expect(msg).not_to include("live-key-do-not-leak") }
+
+      described_class.call(**kwargs)
+    end
+
     # Codex P1 finding, round 2: `{ Authorization: "Bearer live-token" }` is the single most
     # natural way to write a headers resolver in Ruby (symbol-keyed Hash literal) -- the OLD
     # non-String-key warning logged `value.inspect` unconditionally, copying the live bearer token
