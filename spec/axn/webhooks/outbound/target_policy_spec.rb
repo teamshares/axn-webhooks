@@ -92,6 +92,33 @@ RSpec.describe Axn::Webhooks::Outbound::TargetPolicy do
     end
   end
 
+  # Codex P2 finding, round 11: a runtime `subscribers`/`to:` resolver may hand back a `Subscriber`
+  # it keeps its OWN reference to (unlike a Hash/String row, which `coerce` always turns into a
+  # brand-new object) -- `coerce_subscriber` returns that SAME object when its `id` is already
+  # normalized. Config's `deep_freeze!`/`config_owned` only ever runs at BOOT, over a static `to:`
+  # Array; nothing freezes a RUNTIME-resolved Subscriber's `url`/`id` Strings. Between `check!`
+  # validating a row and `Emit`'s fan-out actually reading `subscriber.url` to deliver, a caller
+  # holding that same reference could mutate the String IN PLACE (`subscriber.url << "..."`) --
+  # swapping in a URL that was never validated at all, after the fact.
+  describe "mutation safety" do
+    it "returns a Subscriber whose url/id are frozen, even when the caller mutates its own original strings" do
+      url = +"https://hooks.partner.example/hook"
+      id = +"17"
+      sub = subscriber_class.new(url:, id:)
+
+      checked = check!(sub, allowed_hosts: %w[hooks.partner.example])
+
+      expect(checked.url).to be_frozen
+      expect(checked.id).to be_frozen
+
+      url << "-mutated-after-validation"
+      id << "-mutated"
+
+      expect(checked.url).to eq("https://hooks.partner.example/hook")
+      expect(checked.id).to eq("17")
+    end
+  end
+
   describe ".redact_url" do
     it "strips userinfo, path, query, and fragment, keeping only the origin (scheme/host/port)" do
       redacted = described_class.redact_url("https://user:secret@evil.example/hook?token=live-key#frag")

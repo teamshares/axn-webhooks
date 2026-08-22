@@ -504,6 +504,29 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers]["webhook-signature"]).to start_with("v1,")
     end
 
+    # Codex P2 finding, round 11: `reserved = MANAGED_HEADERS + Transport::RESERVED_HEADERS +
+    # signer_headers.keys` inherits whatever key TYPE the active signer's Hash uses -- a custom
+    # `sign` block returning Symbol keys (`{ "X-Signature": "..." }`, the most natural way to write
+    # a Hash literal in Ruby) puts a Symbol into `reserved`. `reserved.any? { |r| r.casecmp?(key) }`
+    # then compares that Symbol against `key`, which is always a String here (guarded above) --
+    # `Symbol#casecmp?` returns `nil` (not a match, and not an error) for a String argument even
+    # when case-identical, so the collision silently goes undetected and BOTH headers ship: the
+    # signer's real one AND the subscriber-controlled duplicate, letting a `headers` resolver spoof
+    # a same-named header the signer already claimed.
+    it "still detects (and drops) a collision when the SIGNER's own header keys are Symbols, not Strings" do
+      transport = fake_transport(ok(202))
+      declare!(transport:,
+               sign_block: ->(**) { { "X-Signature": "sig-from-signer" } },
+               headers: -> { { "X-Signature" => "not-the-real-one" } })
+      expect(Axn.config.logger).to receive(:warn).with(/dropping custom header.*X-Signature/)
+
+      described_class.call(**kwargs)
+
+      headers = transport.calls.first[:headers]
+      expect(headers.values).not_to include("not-the-real-one")
+      expect(headers[:"X-Signature"]).to eq("sig-from-signer")
+    end
+
     it "drops (with a warning) a non-String key or value instead of raising mid-delivery" do
       transport = fake_transport(ok(202))
       declare!(transport:, headers: -> { { sym_key: "v", "str_key" => 123 } })

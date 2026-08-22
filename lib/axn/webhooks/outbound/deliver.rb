@@ -129,7 +129,15 @@ module Axn
           # subscriber-controlled value under either name would otherwise pass every check here
           # and just never reach the receiver -- the delivery reports success regardless (Codex
           # P2 finding).
-          reserved = MANAGED_HEADERS + Transport::RESERVED_HEADERS + signer_headers.keys
+          #
+          # `signer_headers.keys` is normalized to Strings here: a custom `sign` block returning a
+          # Symbol-keyed Hash (`{ "X-Signature": ... }`, the natural way to write that literal)
+          # would otherwise put a Symbol into `reserved`, and below, `r.casecmp?(key)` returns nil
+          # -- not a match, but not an error either -- whenever `r` and `key` are different types,
+          # even when case-identical. That silently let a subscriber-controlled `headers` entry
+          # ship ALONGSIDE the signer's real header under the same wire name (Codex P2 finding,
+          # round 11).
+          reserved = MANAGED_HEADERS + Transport::RESERVED_HEADERS + signer_headers.keys.map(&:to_s)
           raw.each_with_object({}) { |(key, value), out| add_custom_header(out, key, value, reserved) }
         end
 

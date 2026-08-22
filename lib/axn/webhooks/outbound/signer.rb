@@ -85,8 +85,12 @@ module Axn
           # subscriber: -- including declaring NONE of them -- is fine; Ruby's own Proc/block
           # semantics already tolerate that.
           def validate_required_keywords!
-            return if @accepted == :all
-
+            # No `@accepted == :all` early-return: `**` only absorbs EXTRA/unknown keywords, it
+            # does nothing for a REQUIRED one this gem still never supplies -- `->(id:, vendor:,
+            # **) { }` reported :all (skipping this check entirely) but still raised "missing
+            # keyword: vendor" on the very first real call (Codex P2 finding, round 11).
+            # `required_keywords` inspects the block's OWN declared params directly and is
+            # unaffected by whether it ALSO double-splats.
             unsupplied = CallableArity.required_keywords(@block) - SUPPLIED_KEYWORDS
             return if unsupplied.empty?
 

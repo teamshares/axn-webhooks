@@ -19,11 +19,23 @@ module Axn
         module_function
 
         def check!(raw, allowed_hosts: nil, allow_url: nil)
-          subscriber = Subscriber.coerce(raw)
+          subscriber = snapshot(Subscriber.coerce(raw))
           uri = parse_url!(subscriber.url)
           check_host_allowlist!(uri, allowed_hosts)
           check_allow_url!(uri, allow_url)
           subscriber
+        end
+
+        # A runtime `subscribers`/`to:` resolver may hand back a `Subscriber` it keeps its own
+        # reference to -- `Subscriber.coerce`'s Subscriber branch returns that SAME object when its
+        # `id` is already normalized, unlike a Hash/String row (which always produces a fresh one).
+        # Config's boot-time `deep_freeze!`/`config_owned` never runs over this path (it only covers
+        # a static `to:` Array), so nothing stops the caller from mutating `url`/`id` IN PLACE after
+        # this method has already validated them but before `Emit`'s fan-out reads them to actually
+        # deliver -- swapping in a URL that was never checked at all (Codex P2 finding, round 11).
+        # Dup+freezing fresh copies here closes that window regardless of what the caller does next.
+        def snapshot(subscriber)
+          Subscriber.new(url: subscriber.url.dup.freeze, id: subscriber.id&.dup&.freeze)
         end
 
         def parse_url!(url)

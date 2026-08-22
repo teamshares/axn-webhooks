@@ -288,6 +288,18 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         end.to raise_error(ArgumentError, /requires.*vendor:.*never supplies/)
       end
 
+      # Codex P2 finding, round 11: `accepted_keywords` returns :all for ANY block declaring `**`,
+      # including one that ALSO requires a keyword outside the supplied set --
+      # `->(id:, vendor:, **) { }` boots successfully (the `@accepted == :all` early-return skips
+      # the check entirely) but raises "missing keyword: vendor" on the very first real call,
+      # since `**` only absorbs EXTRA/unknown keywords -- it does nothing for a still-unsupplied
+      # REQUIRED one.
+      it "still rejects at boot a block requiring an unsupplied keyword even when it ALSO double-splats" do
+        expect do
+          described_class.build(strategy: nil, opts: {}, block: ->(id:, vendor:, **) { "#{id}#{vendor}" })
+        end.to raise_error(ArgumentError, /requires.*vendor:.*never supplies/)
+      end
+
       # Codex P1 finding, round 4: on Ruby 3.2 (this project's version), a Proc/block with a
       # SINGLE POSITIONAL param and NO keyword params auto-converts trailing keyword arguments
       # into a Hash bound to that one param -- a Ruby quirk specific to blocks/Procs (a lambda
