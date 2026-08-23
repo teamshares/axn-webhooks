@@ -69,6 +69,23 @@ RSpec.describe Axn::Webhooks::Outbound::Subscriber do
         .to raise_error(Axn::Webhooks::InvalidTarget, /unknown key.*secret/)
     end
 
+    # Codex P1 finding, round 20: `coerce_hash` symbolizes EVERY key via `k.to_sym` before
+    # computing `unknown` -- so a resolver mistake keying its row by a URL String instead of using
+    # `url:` (e.g. `{ "https://hooks.example/services/T00/B00/live-secret" => "17" }`, a plausible
+    # `.to_h { |row| [row.url, row.id] }` bug) becomes a Symbol too, and the OLD message named it
+    # via `unknown.inspect` -- the SAME class of leak round 13 fixed for a non-Symbol/String key,
+    # just for a key that's ALREADY a String/Symbol by the time it gets here (so that fix's
+    # class-only check never applied). Only a short, identifier-shaped key name (the plausible
+    # "typo'd field name" case this message exists to surface, e.g. `:secret`) is safe to show
+    # as-is; anything else -- long, or containing URL-shaped punctuation -- must not echo its
+    # content.
+    it "never echoes an unknown key's full content when it isn't a plausible field-name typo (e.g. a URL used as a key)" do
+      leaky_key = "https://hooks.example/services/T00/B00/live-secret-do-not-leak"
+
+      expect { described_class.coerce({ leaky_key => "17", url: "https://x.example/hook" }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget) { |e| expect(e.message).not_to include("live-secret-do-not-leak") }
+    end
+
     # Codex P2 finding: `symbolized = raw.to_h { |k, v| [k.to_sym, v] }` raises bare NoMethodError
     # for a key that doesn't respond to #to_sym (e.g. an Integer) -- uncaught by
     # `resolve_subscribers`'s per-row `rescue Axn::Webhooks::InvalidTarget`, so one row with a

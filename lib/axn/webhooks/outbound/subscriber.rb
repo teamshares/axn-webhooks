@@ -63,7 +63,8 @@ module Axn
 
             symbolized = raw.to_h { |k, v| [k.to_sym, v] }
             unknown = symbolized.keys - %i[url id]
-            raise Axn::Webhooks::InvalidTarget, "Hash has unknown key(s): #{unknown.inspect}" if unknown.any?
+            unknown_desc = unknown.map { |k| safe_key_name(k) }.join(", ")
+            raise Axn::Webhooks::InvalidTarget, "Hash has unknown key(s): [#{unknown_desc}]" if unknown.any?
             # Names only key NAMES (matching the "unknown key(s)" message above), never `raw` itself
             # -- this only reaches here when every key IS :url/:id (any other key is already
             # caught, safely, above), but an :id VALUE isn't constrained to a simple scalar. A
@@ -72,6 +73,27 @@ module Axn
             raise Axn::Webhooks::InvalidTarget, "Hash must include :url (keys present: #{symbolized.keys.inspect})" unless symbolized.key?(:url)
 
             new(url: symbolized[:url], id: symbolized[:id]&.to_s)
+          end
+
+          # A plausible field-name typo (`:secret`, `:api_key`, `:token` -- the "unknown key(s)"
+          # message exists to surface exactly this) is a short, simple identifier. `to_sym` already
+          # ran unconditionally over EVERY key by the time this method sees them (round 13's
+          # non-Symbol/String class-only fix doesn't apply here -- these keys already ARE Symbols),
+          # so a resolver mistake keying its row by a URL String instead of `url:` (a plausible
+          # `.to_h { |row| [row.url, row.id] }` bug) becomes a Symbol too, and echoing it verbatim
+          # would render the whole URL -- credentials commonly embedded in it included (Codex P1
+          # finding, round 20). Only a key matching this shape is safe to show as-is.
+          SAFE_KEY_NAME = /\A[A-Za-z_][A-Za-z0-9_]{0,49}\z/
+          private_constant :SAFE_KEY_NAME
+
+          def safe_key_name(key)
+            # `#match?` itself can raise (`Encoding::CompatibilityError`/`ArgumentError`) for a
+            # String/Symbol in an unexpected encoding -- treated as "not a safe name" here, same as
+            # every other malformed-input path in this file: never let a rejection-message helper
+            # become the thing that raises past `resolve_subscribers`'s rescue.
+            key.to_s.match?(SAFE_KEY_NAME) ? key.inspect : "<redacted>"
+          rescue Encoding::CompatibilityError, ArgumentError
+            "<redacted>"
           end
         end
       end
