@@ -740,7 +740,7 @@ end
 result = Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })  # => Axn::Result
 result.webhook_ids     # => ["msg_<uuid>", ...] — one per ENQUEUED target
 result.target_count    # => 1
-result.deliveries      # => [{ webhook_id: "msg_<uuid>", url: "https://...", subscriber_id: "17" }, ...]
+result.deliveries      # => [{ webhook_id: "msg_<uuid>", url: "https://...", subscriber_id: nil }, ...] — `:lead_signed`'s `to:` is a bare URL String, no identity; a `subscribers`-resolved event like `:lead_closed` would show its `id` here instead
 result.rejected_count  # => 0
 result.rejected        # => [{ target: "...", reason: "..." }, ...] — rows TargetPolicy refused
 ```

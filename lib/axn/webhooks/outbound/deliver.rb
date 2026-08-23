@@ -198,7 +198,15 @@ module Axn
           # should be treated as -- `false` here (didn't match a valid field-name -- malformed,
           # drop it).
           unless safely_matches?(key, Signer::HEADER_NAME, on_error: false)
-            Axn.config.logger.warn("[axn-webhooks] dropping custom header with an invalid HTTP field-name or encoding: #{key.inspect}")
+            # NEVER logs `key` here -- unlike the non-String/Symbol-key and unknown-Hash-key cases
+            # elsewhere in this file, THIS key already passed "is a String" and just failed the
+            # valid-header-name check, so its content is unconstrained. `headers` exists
+            # specifically to carry credentials, and a resolver mistake could hand back the
+            # credential ITSELF as the key instead of a proper header name (e.g.
+            # `{ "Bearer live-token" => "x" }`, or a URL-keyed map) -- logging it in full would copy
+            # that credential straight into application logs (Codex P1 finding, round 24). A byte
+            # count is enough to debug "the key was malformed" without risking its content.
+            Axn.config.logger.warn("[axn-webhooks] dropping custom header with an invalid HTTP field-name or encoding (key: #{key.bytesize}-byte String)")
             return
           end
 

@@ -573,6 +573,21 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       described_class.call(**kwargs)
     end
 
+    # Codex P1 finding, round 24: the invalid-HTTP-field-name warning (a String key that FAILS
+    # `Signer::HEADER_NAME`) logged `key.inspect` unconditionally -- but `headers` is specifically
+    # meant to carry credentials, and a resolver mistake could hand back the credential ITSELF as
+    # the key (e.g. `{ "Bearer live-token" => "x" }`, or a URL-keyed map) rather than a proper
+    # header name. Unlike a non-String/Symbol key (round 16) or an unknown Hash key (rounds 20/21),
+    # this key IS already confirmed to be a String -- but "is a String" doesn't mean "safe to log
+    # in full" when the whole point of failing this check is that it ISN'T a valid header name.
+    it "never echoes a malformed String header key's content in the field-name warning" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "Bearer live-token-do-not-leak" => "v" } })
+      expect(Axn.config.logger).to receive(:warn) { |msg| expect(msg).not_to include("live-token-do-not-leak") }
+
+      described_class.call(**kwargs)
+    end
+
     # Codex P1 finding, round 2: `{ Authorization: "Bearer live-token" }` is the single most
     # natural way to write a headers resolver in Ruby (symbol-keyed Hash literal) -- the OLD
     # non-String-key warning logged `value.inspect` unconditionally, copying the live bearer token
