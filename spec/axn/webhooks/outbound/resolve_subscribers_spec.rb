@@ -263,6 +263,24 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections.first[:target]).not_to include("live-key-do-not-leak")
     end
 
+    # Codex P1 finding, round 21: round 20 fixed the LEAK in `Subscriber.coerce`'s "unknown key(s)"
+    # rejection REASON, but `redact_hash_key` (used to build the separate `:target` representation)
+    # still returned any Symbol/String key as-is -- so a resolver mistake keying its row by a URL
+    # String instead of `url:` (a plausible `.to_h { |row| [row.url, row.id] }` bug) still rendered
+    # the whole URL, credentials commonly embedded in it included, into `result.rejected`'s
+    # `:target` even though its `:reason` was already safe.
+    it "never leaks an unknown String/Symbol KEY's full content into a Hash row's :target, only its :reason" do
+      leaky_key = "https://hooks.example/services/T00/B00/live-secret-do-not-leak"
+
+      config = outbound! do
+        subscribers ->(_event) { [{ leaky_key => "17" }] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.rejections.first[:target]).not_to include("live-secret-do-not-leak")
+    end
+
     it "falls back to a safe class/length description for an unparseable rejected URL String" do
       config = outbound! do
         subscribers ->(_event) { ["http://[::not-a-host"] }

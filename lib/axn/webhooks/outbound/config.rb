@@ -190,6 +190,11 @@ module Axn
         # query param) -- see `redact_target`'s dedicated String handling.
         SAFE_TO_INSPECT = [Numeric, Symbol, NilClass, TrueClass, FalseClass].freeze
 
+        # A plausible field-name typo (`:secret`, `:api_key` -- what `Subscriber.coerce`'s own
+        # "unknown key(s)" message exists to surface) is a short, simple identifier -- used by
+        # `redact_hash_key` below to decide whether a Hash row's key is safe to show as-is.
+        HASH_KEY_NAME = /\A[A-Za-z_][A-Za-z0-9_]{0,49}\z/
+
         private
 
         # Every element already passed `TargetPolicy.check!` (shape + host policy) at boot, via
@@ -267,10 +272,23 @@ module Axn
         # key" InvalidTarget), so only its class need survive, matching the class-only convention
         # `Subscriber.coerce`'s own message already uses for the identical shape (Codex P1 finding,
         # round 14).
+        # A plausible field-name typo (`:secret`, `:api_key` -- what `Subscriber.coerce`'s own
+        # "unknown key(s)" message exists to surface) is a short, simple identifier. A resolver
+        # mistake keying its row by a URL String instead of `url:` (a plausible
+        # `.to_h { |row| [row.url, row.id] }` bug) is a Symbol/String too, so returning EVERY
+        # Symbol/String key as-is (as an earlier version did) rendered the whole URL into this
+        # rejection's `:target` -- credentials commonly embedded in it included. `Subscriber.coerce`
+        # already redacts the identical shape in its own `:reason` message (round 20); this is the
+        # SEPARATE `:target` representation `redact_target` builds, which had the same gap (Codex
+        # P1 finding, round 21).
         def redact_hash_key(key)
-          return key if key.is_a?(Symbol) || key.is_a?(String)
+          return "#<#{key.class} (redacted)>" unless key.is_a?(Symbol) || key.is_a?(String)
 
-          "#<#{key.class} (redacted)>"
+          key.to_s.match?(HASH_KEY_NAME) ? key : "<redacted>"
+        rescue Encoding::CompatibilityError, ArgumentError
+          # `#match?` itself can raise for a key in an unexpected encoding (Codex P2 finding, round
+          # 19's class of bug) -- treated as "not a safe name" here too.
+          "<redacted>"
         end
 
         # `:url`'s value gets the SAME URL sanitization as a bare String target -- a Hash row
