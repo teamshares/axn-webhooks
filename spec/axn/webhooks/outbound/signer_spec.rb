@@ -105,22 +105,92 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         .to raise_error(Axn::Webhooks::Error, /Integer/)
     end
 
-    # `resolve_secret` calls `@secret.call` with NO arguments (a signing secret is documented as
-    # arity-free, unlike a subscriber resolver) — a callable that actually requires one would
+    # `resolve_secret` calls `@secret.call` with NO arguments, or with the `Subscriber` for a
+    # PRO-3214 per-subscriber secret (one required arg) — a callable needing MORE than that would
     # otherwise boot successfully and raise ArgumentError on every real signing attempt, converted
     # into an Axn::Webhooks::Error `Deliver` can't classify as retryable and left for the async
     # adapter's unbounded exception retries instead of the bounded outbound retry engine (Codex P2
-    # finding). Reject at construction (boot) instead.
-    it "rejects a secret callable that cannot be invoked with zero arguments" do
+    # finding, widened for the subscriber-aware case). Reject at construction (boot) instead.
+    it "rejects a secret callable that needs more than the subscriber" do
       expect do
-        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(app) { app.fetch(:secret) } }, block: nil)
-      end.to raise_error(ArgumentError, /secret callable must accept zero arguments/)
+        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(a, b) { "#{a}#{b}" } }, block: nil)
+      end.to raise_error(ArgumentError, /secret callable must accept zero or one arguments/)
+    end
+
+    it "rejects a secret callable requiring a keyword (same arity pitfall CallableArity exists for)" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: ->(subscriber:) { subscriber } }, block: nil)
+      end.to raise_error(ArgumentError, /secret callable must accept zero or one arguments/)
     end
 
     it "accepts a secret callable with an optional argument (zero-arg invocation still works)" do
       expect do
         described_class.build(strategy: :standard_webhooks, opts: { secret: ->(_app = nil) { secret } }, block: nil)
       end.not_to raise_error
+    end
+
+    describe "per-subscriber secret (PRO-3214)" do
+      it "resolves a 1-arity secret callable with the Subscriber given to #call" do
+        seen = nil
+        resolver = lambda do |sub|
+          seen = sub
+          secret
+        end
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}", subscriber:)
+
+        expect(seen).to equal(subscriber)
+      end
+
+      it "still resolves a 0-arity secret with no subscriber in scope (today's shape, unchanged)" do
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: -> { secret } }, block: nil)
+
+        expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }.not_to raise_error
+      end
+
+      # Codex P1 finding: a PRE-EXISTING secret resolver with an optional positional arg for some
+      # UNRELATED reason -- e.g. `->(app = Rails.application) { app.credentials.webhook_secret }` --
+      # is `CallableArity.accepts?(secret, 1)` == true (it CAN take one arg), so naively preferring
+      # the 1-arg call would start passing it a Subscriber where it previously always defaulted,
+      # breaking every delivery after upgrading. The fix must prefer a ZERO-arg call whenever the
+      # callable can accept one, and pass the subscriber ONLY when it genuinely cannot be invoked
+      # with zero args (a REQUIRED single positional) -- which is exactly the shape that was
+      # REJECTED at boot before subscriber-awareness existed, so there is no prior behavior to break.
+      it "prefers a zero-arg call for an optional-arg secret, using ITS OWN default rather than the subscriber" do
+        seen = []
+        resolver = lambda { |app = :the_default|
+          seen << app
+          secret
+        }
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}", subscriber:)
+
+        expect(seen).to eq([:the_default])
+      end
+
+      # Codex P1 finding, round 2: a plain `proc { |subscriber| ... }` (no default -- NOT a
+      # lambda) reports its single param as `:opt` via #parameters, the SAME label a genuine
+      # default gets -- so a #parameters-based "prefer zero-arg" check can't tell them apart, and
+      # would silently call this with ZERO args, passing `nil` in place of the subscriber (Ruby
+      # procs fill a missing arg with nil rather than raising). Raw arity does NOT have this
+      # ambiguity: a no-default proc's arity is still the correct positive 1.
+      it "still passes the subscriber to a plain Proc (not a lambda) with one param and no default" do
+        seen = nil
+        resolver = proc { |sub|
+          seen = sub
+          secret
+        }
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: resolver }, block: nil)
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}", subscriber:)
+
+        expect(seen).to equal(subscriber)
+      end
     end
   end
 
@@ -131,6 +201,132 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         block: ->(id:, timestamp:, body:) { { "x-sig" => "#{id}:#{timestamp}:#{body.bytesize}" } }
       )
       expect(signer.call(id: "m", timestamp: 5, body: "abc")).to eq("x-sig" => "m:5:3")
+    end
+
+    describe "subscriber-awareness (PRO-3214)" do
+      it "keeps working byte-for-byte for a block declaring only the original (id:, timestamp:, body:)" do
+        # The kwarg set widens (subscriber: is now always passed) but a block that never asked for
+        # it must not see an unexpected-keyword ArgumentError -- CustomSigner filters down to what
+        # the block actually declares.
+        signer = described_class.build(
+          strategy: nil, opts: {},
+          block: ->(id:, timestamp:, body:) { { "x-sig" => "#{id}:#{timestamp}:#{body}" } }
+        )
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        expect(signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)).to eq("x-sig" => "m:5:abc")
+      end
+
+      it "passes the Subscriber through to a block that declares subscriber:" do
+        seen = nil
+        signer = described_class.build(
+          strategy: nil, opts: {},
+          block: lambda { |id:, timestamp:, body:, subscriber:|
+            seen = subscriber
+            { "x-sig" => "#{id}:#{timestamp}:#{body}" }
+          }
+        )
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        expect(seen).to equal(subscriber)
+      end
+
+      it "passes everything through unfiltered to a block that double-splats" do
+        received = nil
+        signer = described_class.build(strategy: nil, opts: {}, block: lambda { |**kw|
+          received = kw
+          {}
+        })
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        expect(received).to eq(id: "m", timestamp: 5, body: "abc", subscriber:)
+      end
+
+      # Codex P1 finding, round 3: `sign { { "X-API-Key" => key } }` -- a ZERO-param block that
+      # ignores id:/timestamp:/body: entirely -- is a legitimate, PRE-EXISTING pattern: a Ruby
+      # block (always a non-lambda Proc, never a lambda) silently tolerates being called with
+      # kwargs it never declared. The original boot check demanded the block declare ALL of
+      # id:/timestamp:/body:, rejecting this working configuration at declaration time even though
+      # it was never actually broken.
+      it "accepts a zero-param block that ignores id:/timestamp:/body: entirely (a legitimate static-header signer)" do
+        expect do
+          described_class.build(strategy: nil, opts: {}, block: -> { { "x-api-key" => "static-key" } })
+        end.not_to raise_error
+      end
+
+      it "the accepted zero-param block still works at call time, receiving nothing" do
+        signer = described_class.build(strategy: nil, opts: {}, block: -> { { "x-api-key" => "static-key" } })
+        expect(signer.call(id: "m", timestamp: 5, body: "abc")).to eq("x-api-key" => "static-key")
+      end
+
+      # A block that only wants the subscriber (ignoring id:/timestamp:/body:) is the identical
+      # legitimate shape -- there's nothing broken about a custom signer that keys its header
+      # purely off subscriber identity.
+      it "accepts (and correctly calls) a block that declares only subscriber:, ignoring id:/timestamp:/body:" do
+        seen = nil
+        signer = described_class.build(strategy: nil, opts: {}, block: lambda { |subscriber:|
+          seen = subscriber
+          { "x-subscriber" => subscriber&.id.to_s }
+        })
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        result = signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        expect(seen).to equal(subscriber)
+        expect(result).to eq("x-subscriber" => "17")
+      end
+
+      # What SHOULD still be caught at boot: a block requiring a keyword this gem can never
+      # supply (outside id:/timestamp:/body:/subscriber:) -- that genuinely fails on every call.
+      it "still rejects at boot a block requiring a keyword this gem never supplies" do
+        expect do
+          described_class.build(strategy: nil, opts: {}, block: ->(id:, vendor:) { "#{id}#{vendor}" })
+        end.to raise_error(ArgumentError, /requires.*vendor:.*never supplies/)
+      end
+
+      # Codex P2 finding, round 11: `accepted_keywords` returns :all for ANY block declaring `**`,
+      # including one that ALSO requires a keyword outside the supplied set --
+      # `->(id:, vendor:, **) { }` boots successfully (the `@accepted == :all` early-return skips
+      # the check entirely) but raises "missing keyword: vendor" on the very first real call,
+      # since `**` only absorbs EXTRA/unknown keywords -- it does nothing for a still-unsupplied
+      # REQUIRED one.
+      it "still rejects at boot a block requiring an unsupplied keyword even when it ALSO double-splats" do
+        expect do
+          described_class.build(strategy: nil, opts: {}, block: ->(id:, vendor:, **) { "#{id}#{vendor}" })
+        end.to raise_error(ArgumentError, /requires.*vendor:.*never supplies/)
+      end
+
+      # Codex P1 finding, round 4: on Ruby 3.2 (this project's version), a Proc/block with a
+      # SINGLE POSITIONAL param and NO keyword params auto-converts trailing keyword arguments
+      # into a Hash bound to that one param -- a Ruby quirk specific to blocks/Procs (a lambda
+      # enforces arity strictly and never received this treatment). The pre-existing
+      # `CustomSigner#call(id:, timestamp:, body:) = @block.call(id:, timestamp:, body:)`
+      # (unconditionally kwargs-only) relied on exactly that conversion to support a
+      # `sign { |options| ... }` custom signer. Filtering down to `**{}` (this shape declares NO
+      # keywords) called it with ZERO arguments instead, leaving `options` nil.
+      it "preserves the historical options-Hash shape: a block with ONE positional param and no keywords" do
+        seen = nil
+        signer = described_class.build(strategy: nil, opts: {}, block: lambda { |options|
+          seen = options
+          { "x-sig" => "#{options[:id]}:#{options[:timestamp]}:#{options[:body]}" }
+        })
+        subscriber = Axn::Webhooks::Outbound::Subscriber.new(url: "https://a.example/hook", id: "17")
+
+        result = signer.call(id: "m", timestamp: 5, body: "abc", subscriber:)
+
+        # Codex P1 finding, round 7: this legacy shape's CONTRACT is exactly three keys -- a
+        # pre-existing signer that derives its signature from the WHOLE hash (e.g. hashing all its
+        # key-value pairs together) computes a DIFFERENT signature the instant a 4th `subscriber:`
+        # key appears, silently breaking verification on the receiving end for every such signer.
+        # This legacy shape has no way to OPT IN to the new key (unlike the keyword-based path,
+        # which only receives what it explicitly declares), so it must never see it.
+        expect(seen).to eq(id: "m", timestamp: 5, body: "abc")
+        expect(result).to eq("x-sig" => "m:5:abc")
+      end
     end
   end
 

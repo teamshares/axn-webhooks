@@ -31,6 +31,16 @@ module Axn
     # reports that a vendor is sending garbage. Report, then ack.
     class UnparseableBody < Error; end
 
+    # Raised by Outbound::TargetPolicy when a resolved subscriber row (a static `to:` entry OR a
+    # runtime `subscribers`/`to:` lambda's return value) fails shape/host validation — a non-String
+    # URL, a non-http(s) scheme, a missing host, an unknown Hash key, or a host the declared
+    # `allowed_hosts`/`allow_url` policy rejects. A RUNTIME condition (a DB-backed store can produce
+    # a bad row at any time, not just at boot), so it's `Axn::Webhooks::Error`-rooted rather than the
+    # plain `ArgumentError` a pure `outbound` block declaration mistake raises — see the error-class
+    # split documented above `Outbound::Config#validate_event!`. `Config#resolve_targets` rescues
+    # this per-row so one malformed subscriber can't discard the rest of a fan-out.
+    class InvalidTarget < Error; end
+
     def self.retry_later!(after: nil)
       raise RetryLater.new(retry_after: after)
     end

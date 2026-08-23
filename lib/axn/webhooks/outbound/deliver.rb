@@ -19,15 +19,38 @@ module Axn
         # replacing the signature. Signer::HmacSigner rejects these at declaration time.
         MANAGED_HEADERS = %w[content-type user-agent].freeze
 
+        # A plausible field-name (`Authorization`, `content_type` -- the documented common case of
+        # writing a `headers` resolver with a Symbol/String literal key) is a short, simple
+        # identifier -- used by `key_desc` to decide whether a malformed header's key is safe to
+        # log as-is (see `add_custom_header`).
+        PLAUSIBLE_FIELD_NAME = /\A[A-Za-z_][A-Za-z0-9_]{0,49}\z/
+
+        # RFC 7230's `field-value` grammar forbids every control byte except HTAB (0x09) -- CR/LF
+        # (0x0D/0x0A) are the ones Net::HTTP itself raises on, but any OTHER control byte (NUL,
+        # BEL, ...) is equally invalid on the wire and unvalidated here would reach the receiver
+        # (see `add_custom_header`).
+        FORBIDDEN_HEADER_VALUE_BYTES = /[\x00-\x08\x0A-\x1F\x7F]/
+
         expects :url, type: String
         expects :webhook_id, type: String
         expects :body, type: String
         expects :event, type: String
         expects :attempt, type: Integer, default: 1
+        # A DB-backed subscriber's own identity (its String id, not a secret/token) -- nil for
+        # today's declared-Array `to:` (no row to identify). Threaded through so a per-attempt
+        # secret/header resolver and the exhaustion report can name which subscription this was.
+        expects :subscriber_id, type: String, allow_blank: true, default: nil
 
         # Bounded to the events a sending app declares — same shape as inbound's unconditional
         # `reason` dimension, not a per-request identity.
         dimension :event, -> { event }
+        # UNBOUNDED (a subscriber id off a DB table, unlike `event`) -- axn's `dimension` is the
+        # metrics facet and must stay bounded; `tag` is the high-cardinality log/trace facet with no
+        # metrics-billing cost (see Axn.config.logger.debug config comment near vendor_facet, and
+        # `Axn::Webhooks::VendorFacet`'s own dimension/tag split). Getting this backwards would
+        # quietly blow up a metrics backend's cardinality limits the first time a real subscriber
+        # table is wired up.
+        tag :subscriber_id, -> { subscriber_id }
 
         # Only reports when `@exhaustion_error` was set by `retry_or_exhaust!`'s exhaustion branch
         # (see `report_exhaustion_if_needed`) -- a permanent-4xx `fail!` (in `#call`) also fires
@@ -78,10 +101,181 @@ module Axn
         end
 
         # Sign per attempt with a FRESH timestamp (so the receiver's replay window accepts a retry),
-        # reusing the stable webhook_id for idempotent dedup.
+        # reusing the stable webhook_id for idempotent dedup. Merge order is deliberate: custom
+        # (PRO-3214's per-destination `headers`) -> signer -> Deliver-managed, so the signer and
+        # Deliver always win a same-position `.merge`. That alone isn't the whole defense (Net::HTTP
+        # is case-insensitive, Hash keys are not, so a DIFFERENTLY-cased duplicate survives the merge
+        # and Net::HTTP still picks the later one) -- `custom_headers` below additionally drops any
+        # subscriber-supplied name that collides, case-insensitively, with either bucket.
         def signed_headers
-          config.signer.call(id: webhook_id, timestamp: Time.now.to_i, body:)
-                .merge("content-type" => "application/json", "user-agent" => user_agent) # MANAGED_HEADERS
+          # `TargetPolicy.snapshot` (not a bare `Subscriber.new`) -- `url`/`subscriber_id` here are
+          # reconstructed fresh from THIS attempt's job payload, ordinary mutable Strings, never the
+          # frozen copy `TargetPolicy.check!` validated at resolution time (that copy lives only in
+          # `Emit`'s Resolution; `Deliver` never sees it again). A same-position `url:` hash-literal
+          # key below and the `url:` used here reference the SAME object -- so a subscriber-aware
+          # `sign`/`headers` resolver that mutated `subscriber.url` in place would silently swap the
+          # destination `post_args` already captured, sending the request to a host that was never
+          # checked against `allowed_hosts`/`allow_url` at all (Codex P2 finding, round 15). Freezing
+          # a fresh copy here means that mutation attempt raises loudly instead.
+          subscriber = TargetPolicy.snapshot(Subscriber.new(url:, id: subscriber_id))
+          signer_headers = config.signer.call(id: webhook_id, timestamp: Time.now.to_i, body:, subscriber:)
+
+          custom_headers(subscriber, signer_headers)
+            .merge(signer_headers)
+            .merge("content-type" => "application/json", "user-agent" => user_agent) # MANAGED_HEADERS
+        end
+
+        # Per-destination extra headers (PRO-3214) -- a malformed or colliding entry is DROPPED with
+        # a warning, not raised: a bad row from a `headers` resolver shouldn't crash an otherwise-
+        # deliverable attempt (a `headers` callable that itself raises is a different matter and
+        # propagates unchanged -- see `resolve_custom_headers`).
+        def custom_headers(subscriber, signer_headers)
+          raw = resolve_custom_headers(subscriber)
+          return {} if raw.nil?
+
+          # A permanent misconfiguration (the resolver forgot to return a Hash, or a conditional
+          # fell through to `false`) would otherwise raise NoMethodError from unconditional
+          # iteration below -- an UNEXPECTED exception the async adapter reads as a transient
+          # crash and retries forever, even though the malformed result will never become valid
+          # (Codex P2 finding).
+          unless raw.is_a?(Hash)
+            Axn.config.logger.warn("[axn-webhooks] dropping the headers resolver result -- expected a Hash, got #{raw.class}")
+            return {}
+          end
+
+          # Transport::RESERVED_HEADERS (content-length/transfer-encoding) are reserved
+          # unconditionally, not only for the built-in transport -- matching `sign :hmac`'s own
+          # header-name validation, which treats them the same way regardless of what `transport`
+          # ends up configured. Net::HTTP silently REWRITES both, AFTER headers are applied, so a
+          # subscriber-controlled value under either name would otherwise pass every check here
+          # and just never reach the receiver -- the delivery reports success regardless (Codex
+          # P2 finding).
+          #
+          # `signer_headers.keys` is normalized to Strings here: a custom `sign` block returning a
+          # Symbol-keyed Hash (`{ "X-Signature": ... }`, the natural way to write that literal)
+          # would otherwise put a Symbol into `reserved`, and below, `r.casecmp?(key)` returns nil
+          # -- not a match, but not an error either -- whenever `r` and `key` are different types,
+          # even when case-identical. That silently let a subscriber-controlled `headers` entry
+          # ship ALONGSIDE the signer's real header under the same wire name (Codex P2 finding,
+          # round 11).
+          reserved = MANAGED_HEADERS + Transport::RESERVED_HEADERS + signer_headers.keys.map(&:to_s)
+          raw.each_with_object({}) { |(key, value), out| add_custom_header(out, key, value, reserved) }
+        end
+
+        def resolve_custom_headers(subscriber)
+          callable = config.headers
+          return nil if callable.nil?
+
+          # Same precedence (and the Proc/#parameters quirk it works around) as the signing secret
+          # -- see Signer::StandardWebhooksSigner#resolve_secret (Codex P1 finding).
+          CallableArity.prefers_zero_args?(callable) ? callable.call : callable.call(subscriber)
+        end
+
+        # Net::HTTP requires String keys/values; a non-String pair would otherwise raise mid-flight,
+        # a boot-clean declaration turned into a per-attempt crash. A key colliding, CASE-
+        # INSENSITIVELY, with a Deliver-managed header or one the signer just emitted this attempt is
+        # dropped for the reason `signed_headers`' comment gives: Hash keys don't collide there, but
+        # Net::HTTP's header line does, silently, and it is always the LATER assignment that survives
+        # -- which a subscriber-controlled row must never be allowed to be for webhook-signature.
+        def add_custom_header(out, key, value, reserved)
+          # NEVER logs `value` -- `{ Authorization: "Bearer live-token" }` (a plain Symbol-keyed
+          # Hash literal, the single most natural way to write this in Ruby) fails the String-key
+          # check, and logging the value unconditionally here would copy a live credential
+          # straight into application logs the moment anyone wrote a `headers` resolver this way
+          # (Codex P1 finding). The key name alone is enough to debug "which header was malformed" --
+          # true for the DOCUMENTED common case (a plain Symbol/String literal like `Authorization:`)
+          # -- but `headers` exists specifically to carry credentials, and a resolver could just as
+          # easily build a Symbol/String key DYNAMICALLY from one (`token.to_sym`, or a String key
+          # paired with a non-String value, which is what actually routes a row into this branch) --
+          # Symbol/String content is exactly as unconstrained as a compound object's in that case
+          # (Codex P1 finding, round 25; round 16 fixed the compound-object case but still trusted
+          # ANY Symbol/String verbatim). `key_desc` below only shows a key matching a plausible
+          # field-name shape as-is; anything else -- compound, or Symbol/String that doesn't look
+          # like one -- is named by class only.
+          unless key.is_a?(String) && value.is_a?(String)
+            Axn.config.logger.warn("[axn-webhooks] dropping a custom header with a non-String key or value (key: #{key_desc(key)})")
+            return
+          end
+
+          # The built-in Transport rejects CR/LF in a header VALUE, but a String KEY containing
+          # CR/LF (or a space/colon) would otherwise reach `request[key] = value` unchanged --
+          # Net::HTTP serializes whatever key it's handed straight into the wire header line, so a
+          # subscriber-controlled `headers` resolver could inject an entirely separate header
+          # (Codex P1 finding). Same grammar `sign :hmac`'s own header options are validated
+          # against at boot.
+          #
+          # `#match?` itself isn't safe to call unconditionally: a String in a DIFFERENT encoding
+          # than the Regexp (e.g. UTF-16LE) raises `Encoding::CompatibilityError`, and a malformed
+          # byte sequence in its OWN declared encoding raises `ArgumentError` -- either way an
+          # UNEXPECTED exception escaping delivery, which the async adapter reads as a transient
+          # crash and retries forever on a resolver result that will never become valid (Codex P2
+          # finding, round 19). `safely_matches?`'s `on_error:` picks what a raised encoding error
+          # should be treated as -- `false` here (didn't match a valid field-name -- malformed,
+          # drop it).
+          unless safely_matches?(key, Signer::HEADER_NAME, on_error: false)
+            # NEVER logs `key` here -- unlike the non-String/Symbol-key and unknown-Hash-key cases
+            # elsewhere in this file, THIS key already passed "is a String" and just failed the
+            # valid-header-name check, so its content is unconstrained. `headers` exists
+            # specifically to carry credentials, and a resolver mistake could hand back the
+            # credential ITSELF as the key instead of a proper header name (e.g.
+            # `{ "Bearer live-token" => "x" }`, or a URL-keyed map) -- logging it in full would copy
+            # that credential straight into application logs (Codex P1 finding, round 24). A byte
+            # count is enough to debug "the key was malformed" without risking its content.
+            Axn.config.logger.warn("[axn-webhooks] dropping custom header with an invalid HTTP field-name or encoding (key: #{key.bytesize}-byte String)")
+            return
+          end
+
+          # Net::HTTP itself raises `ArgumentError: header field value cannot include CR/LF` for a
+          # value containing either -- unlike a malformed KEY (above), which it happily serializes
+          # verbatim. Left unvalidated, a permanently-malformed value would raise an UNEXPECTED
+          # exception on every attempt, which the async adapter reads as a transient crash and
+          # retries forever, rather than being dropped like every other malformed entry here
+          # (Codex P2 finding). `on_error: true` here (treat a raised encoding error as "found
+          # CR/LF" -- malformed, drop it) for the same reason `safely_matches?` exists above.
+          #
+          # Broadened beyond CR/LF to every control byte the RFC 7230 `field-value` grammar forbids
+          # (HTAB, 0x09, is the one control byte it explicitly permits) -- a value containing NUL or
+          # another stray control character (e.g. BEL) passed this check unvalidated and the
+          # built-in Transport serialized it straight onto the wire, where it's equally invalid and
+          # can get an otherwise-valid webhook rejected by the receiver or a proxy in between (Codex
+          # P2 finding, round 25).
+          if safely_matches?(value, FORBIDDEN_HEADER_VALUE_BYTES, on_error: true)
+            Axn.config.logger.warn(
+              "[axn-webhooks] dropping custom header #{key.inspect} -- value contains a forbidden control character (or has an invalid/incompatible encoding)",
+            )
+            return
+          end
+
+          if reserved.any? { |r| r.casecmp?(key) }
+            Axn.config.logger.warn(
+              "[axn-webhooks] dropping custom header #{key.inspect} -- collides with a header Deliver or the active signer already sets",
+            )
+            return
+          end
+
+          out[key] = value
+        end
+
+        # Only a key matching a plausible field-name shape is safe to show as-is (a Symbol/String
+        # built DYNAMICALLY from a credential is exactly as unconstrained as a compound object's
+        # #inspect -- see `add_custom_header`'s comment above); anything else, including a
+        # Symbol/String that doesn't look like a field name, is named by class only.
+        def key_desc(key)
+          return "instance of #{key.class}" unless key.is_a?(String) || key.is_a?(Symbol)
+
+          safely_matches?(key.to_s, PLAUSIBLE_FIELD_NAME, on_error: false) ? key.inspect : "instance of #{key.class}"
+        end
+
+        # `String#match?` raises rather than returning a boolean for two encoding failure modes:
+        # `Encoding::CompatibilityError` when `string`'s encoding differs from the Regexp's (e.g. a
+        # UTF-16LE header key against a US-ASCII/UTF-8 Regexp), and `ArgumentError` for a malformed
+        # byte sequence in `string`'s own declared encoding. Both are treated as "this string is
+        # unusable" -- `on_error:` supplies what that should count as for the specific check calling
+        # this (see call sites above).
+        def safely_matches?(string, regex, on_error:)
+          string.match?(regex)
+        rescue Encoding::CompatibilityError, ArgumentError
+          on_error
         end
 
         def user_agent
@@ -139,7 +333,8 @@ module Axn
           end
 
           delay = [config.backoff.call(attempt), parse_retry_after(retry_after)].compact.max
-          self.class.call_async(url:, webhook_id:, body:, event:, vendor:, attempt: attempt + 1, _async: { wait: delay })
+          self.class.call_async(url:, webhook_id:, body:, event:, vendor:, subscriber_id:, attempt: attempt + 1,
+                                _async: { wait: delay })
         end
 
         def terminal_message
@@ -208,7 +403,7 @@ module Axn
           # exhaustion into a raise the async adapter would retry. `action: self` routes the warn to
           # the running instance, matching axn's own internal best_effort callers.
           Axn::Extensions.best_effort("reporting outbound delivery exhaustion", action: self) do
-            Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt: })
+            Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt:, subscriber_id: })
           end
         end
       end
