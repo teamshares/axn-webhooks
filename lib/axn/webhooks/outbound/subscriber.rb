@@ -34,16 +34,22 @@ module Axn
           private
 
           # A resolver may construct a Subscriber directly (`Subscriber.new(url:, id: some_record.id)`)
-          # rather than going through the Hash path -- and unlike `coerce_hash`'s `&.to_s`, a
-          # bare `Subscriber.new` applies no such normalization. An Integer id would then reach
-          # `Emit` as `subscriber_id` and fail `Deliver`'s `expects :subscriber_id, type: String`
-          # despite passing every check here (Codex P2 finding). Returns the SAME object when its
-          # id is already normalized (nil or a String), so the existing "passed through unchanged"
-          # identity contract holds for the common case.
+          # rather than going through the Hash path -- and unlike `coerce_hash`'s normalization, a
+          # bare `Subscriber.new` applies none. An Integer id would then reach `Emit` as
+          # `subscriber_id` and fail `Deliver`'s `expects :subscriber_id, type: String` despite
+          # passing every check here (Codex P2 finding). Returns the SAME object when its id is
+          # already a valid String, so the existing "passed through unchanged" identity contract
+          # holds for the common case -- but still runs it through the SAME encoding validation
+          # `normalize_id` applies, so a prebuilt Subscriber isn't a back door around it.
           def coerce_subscriber(raw)
-            return raw if raw.id.nil? || raw.id.is_a?(String)
+            return raw if raw.id.nil?
 
-            new(url: raw.url, id: raw.id.to_s)
+            if raw.id.is_a?(String)
+              validate_id_encoding!(raw.id)
+              return raw
+            end
+
+            new(url: raw.url, id: normalize_id(raw.id))
           end
 
           def coerce_hash(raw)
@@ -82,7 +88,41 @@ module Axn
             # have `raw.inspect` render that object's full #inspect verbatim (Codex P1 finding).
             raise Axn::Webhooks::InvalidTarget, "Hash must include :url (keys present: #{symbolized.keys.inspect})" unless symbolized.key?(:url)
 
-            new(url: symbolized[:url], id: symbolized[:id]&.to_s)
+            new(url: symbolized[:url], id: normalize_id(symbolized[:id]))
+          end
+
+          # `:id` is identity, never a credential -- but that's a PROMISE about what this field is
+          # FOR, not a guarantee about what a resolver actually hands back. A plausible mistake
+          # (passing the whole record instead of `record.id`, or a Hash like `{ token: "live-key" }`)
+          # used to be silently accepted by an unconditional `&.to_s` -- which for a Hash/Struct
+          # commonly renders every field verbatim (`Hash#to_s`/`Struct#to_s` are NOT safe-by-default
+          # the way a bare `Object#to_s` is). That string becomes `subscriber_id`, which isn't just
+          # log/rejection-message text: it's persisted in every async job payload (the exact channel
+          # this whole design exists to keep credential-free), exposed via `result.deliveries`, and
+          # stamped as an observability tag (Codex P1 finding, round 26). Only the documented scalar
+          # shapes are accepted; anything else raises rather than silently embedding its contents.
+          def normalize_id(id)
+            return nil if id.nil?
+            return validate_id_encoding!(id) if id.is_a?(String)
+
+            case id
+            when Integer, Symbol
+              validate_id_encoding!(id.to_s)
+            else
+              raise Axn::Webhooks::InvalidTarget, "id must be a String, Integer, or Symbol (got #{id.class})"
+            end
+          end
+
+          # A String `:id` passed through unchanged by every branch above -- `String#to_s` returns
+          # `self`, so an invalid byte sequence would otherwise reach `Deliver` untouched. `Emit`
+          # forwards it as `subscriber_id`, and a JSON-backed async adapter (Sidekiq) raises
+          # `JSON::GeneratorError` while SERIALIZING the enqueue payload -- an unexpected exception
+          # far from this validation, aborting the whole `emit` rather than rejecting just this one
+          # malformed row (Codex P2 finding, round 26).
+          def validate_id_encoding!(str)
+            raise Axn::Webhooks::InvalidTarget, "id has an invalid encoding" unless str.valid_encoding?
+
+            str
           end
 
           # A plausible field-name typo (`:secret`, `:api_key`, `:token` -- the "unknown key(s)"

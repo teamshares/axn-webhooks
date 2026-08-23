@@ -35,6 +35,49 @@ RSpec.describe Axn::Webhooks::Outbound::Subscriber do
       expect(sub).to eq(described_class.new(url: "https://x.example/hook", id: nil))
     end
 
+    # Codex P1 finding, round 26: `symbolized[:id]&.to_s` accepted ANY value under `:id` and blindly
+    # stringified it -- a resolver mistake passing the whole record instead of `record.id` (or a
+    # Hash like `{ token: "live-key" }`) had its full contents rendered into the resulting
+    # `subscriber_id`, which is NOT just log/rejection-message text: it's persisted in every async
+    # job payload, exposed via `result.deliveries`, and stamped as an observability tag -- the exact
+    # channel this whole design exists to keep credential-free. Only a documented scalar shape
+    # (String, Integer, Symbol, or nil) is accepted; anything else raises loudly instead of silently
+    # embedding its contents.
+    it "raises on a compound (non-scalar) :id value rather than stringifying its contents" do
+      expect { described_class.coerce({ url: "https://x.example/hook", id: { token: "live-key-do-not-leak" } }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget) { |e| expect(e.message).not_to include("live-key-do-not-leak") }
+    end
+
+    it "accepts a Symbol :id, stringifying it like an Integer" do
+      sub = described_class.coerce({ url: "https://x.example/hook", id: :abc123 })
+      expect(sub).to eq(described_class.new(url: "https://x.example/hook", id: "abc123"))
+    end
+
+    # Codex P2 finding, round 26: a String `:id` with an invalid encoding passed through unchanged
+    # (`String#to_s` returns `self`) -- `Emit` forwards it as `subscriber_id`, and a JSON-backed
+    # async adapter (Sidekiq) raises `JSON::GeneratorError` while SERIALIZING the enqueue payload,
+    # aborting the whole `emit` rather than rejecting just this one malformed row.
+    it "raises on a String :id with an invalid encoding" do
+      bad_id = "\xFF".dup.force_encoding("UTF-8")
+
+      expect { described_class.coerce({ url: "https://x.example/hook", id: bad_id }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /encoding/)
+    end
+
+    it "raises on a prebuilt Subscriber's compound (non-scalar) id too, not just the Hash-row path" do
+      sub = described_class.new(url: "https://x.example/hook", id: { token: "live-key-do-not-leak" })
+
+      expect { described_class.coerce(sub) }
+        .to raise_error(Axn::Webhooks::InvalidTarget) { |e| expect(e.message).not_to include("live-key-do-not-leak") }
+    end
+
+    it "raises on a prebuilt Subscriber's invalidly-encoded String id too, not just the Hash-row path" do
+      bad_id = "\xFF".dup.force_encoding("UTF-8")
+      sub = described_class.new(url: "https://x.example/hook", id: bad_id)
+
+      expect { described_class.coerce(sub) }.to raise_error(Axn::Webhooks::InvalidTarget, /encoding/)
+    end
+
     it "accepts String keys, matching the rest of this gem's Hash-tolerance conventions" do
       sub = described_class.coerce({ "url" => "https://x.example/hook", "id" => "17" })
       expect(sub).to eq(described_class.new(url: "https://x.example/hook", id: "17"))
