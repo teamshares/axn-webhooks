@@ -13,6 +13,12 @@
   separately-resolved `secret:`/`headers:` values, not a credential a receiver embeds in its own
   webhook URL (`Deliver` does carry `url:`, and does persist it in the queue for the retry chain's
   lifetime).
+- README: fix the primary outbound example's `allow_url` predicate (Codex review) so it doesn't
+  raise at boot. `uri.host` is a hostname, not necessarily an IP literal (no DNS resolution happens
+  in a host policy — documented elsewhere in this same section), so `IPAddr#include?` raised for
+  one — including the example's own static `example.com`/`internal.example` hosts. The predicate
+  now parses defensively and only compares when the host IS a literal IP, matching the documented
+  no-DNS-resolution limitation instead of contradicting it.
 - README: explain why a missing async adapter degrades to sync under `:auto` (inbound and outbound
   alike) but raises under an explicitly-declared `async`. The three behaviors read as inconsistent
   side by side; they line up once `emit`'s *default* is understood as `:auto` (a per-call

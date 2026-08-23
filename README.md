@@ -712,7 +712,17 @@ Axn::Webhooks.outbound do
   # row both go through it, INCLUDING the static hosts below (`example.com`/`internal.example`) —
   # both optional; nil (the default) means any http(s) URL passes.
   allowed_hosts %w[hooks.partner.example *.customer.example example.com internal.example]  # exact match, or a leading `*.` wildcard
-  allow_url ->(uri) { !PRIVATE_IP_RANGES.any? { |r| r.include?(uri.host) } }  # general escape hatch
+  # `uri.host` is a HOSTNAME, not necessarily an IP literal (no DNS resolution happens here -- see
+  # below), so `IPAddr#include?` raises for one -- e.g. this block's own static "example.com"/
+  # "internal.example" hosts. Parse defensively and only compare when `uri.host` IS a literal IP.
+  allow_url(lambda do |uri|
+    ip = begin
+      IPAddr.new(uri.host)
+    rescue IPAddr::Error
+      nil
+    end
+    ip.nil? || !PRIVATE_IP_RANGES.any? { |r| r.include?(ip) }
+  end)
 
   event :lead_signed, to: ["https://example.com/webhooks/lead_signed"]  # static list
   event :lead_closed                                                    # no `to:` -> resolved via `subscribers`
