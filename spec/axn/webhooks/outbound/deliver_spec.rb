@@ -538,6 +538,24 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers]).not_to include("sym_key", "str_key")
     end
 
+    # Codex P2 finding, round 19: a String KEY/VALUE isn't automatically SAFE to run through
+    # `Signer::HEADER_NAME`/the CR-LF regexp -- a differently-encoded String (e.g. UTF-16LE) raises
+    # `Encoding::CompatibilityError` on `#match?` (the Regexp is US-ASCII/UTF-8), and a malformed
+    # byte sequence in the declared encoding raises `ArgumentError`. Either way, an UNEXPECTED
+    # exception escapes delivery -- exactly the class of bug this file was hardened against
+    # everywhere else: a permanently-malformed resolver result must be DROPPED, not raised, or the
+    # async adapter retries forever on something that will never become valid.
+    it "drops (with a warning) a header key/value with an incompatible or invalid encoding, instead of raising" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "X-Wrong-Encoding".encode("UTF-16LE") => "v", "x-bad-bytes" => "abc\xFF".dup.force_encoding("UTF-8") } })
+      expect(Axn.config.logger).to receive(:warn).twice
+
+      result = nil
+      expect { result = described_class.call(**kwargs) }.not_to raise_error
+      expect(result).to be_ok
+      expect(transport.calls.first[:headers].keys).not_to include(a_string_matching(/wrong-encoding/i), "x-bad-bytes")
+    end
+
     # Codex P1 finding, round 16: the warning above names the non-String KEY via `key.inspect` --
     # safe for the documented case (a Symbol, from `{ sym_key: "v" }`) but a resolver mistake could
     # just as easily use a COMPOUND object as a key (e.g. an ActiveRecord subscription record handed

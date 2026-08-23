@@ -188,8 +188,17 @@ module Axn
           # subscriber-controlled `headers` resolver could inject an entirely separate header
           # (Codex P1 finding). Same grammar `sign :hmac`'s own header options are validated
           # against at boot.
-          unless key.match?(Signer::HEADER_NAME)
-            Axn.config.logger.warn("[axn-webhooks] dropping custom header with an invalid HTTP field-name: #{key.inspect}")
+          #
+          # `#match?` itself isn't safe to call unconditionally: a String in a DIFFERENT encoding
+          # than the Regexp (e.g. UTF-16LE) raises `Encoding::CompatibilityError`, and a malformed
+          # byte sequence in its OWN declared encoding raises `ArgumentError` -- either way an
+          # UNEXPECTED exception escaping delivery, which the async adapter reads as a transient
+          # crash and retries forever on a resolver result that will never become valid (Codex P2
+          # finding, round 19). `safely_matches?`'s `on_error:` picks what a raised encoding error
+          # should be treated as -- `false` here (didn't match a valid field-name -- malformed,
+          # drop it).
+          unless safely_matches?(key, Signer::HEADER_NAME, on_error: false)
+            Axn.config.logger.warn("[axn-webhooks] dropping custom header with an invalid HTTP field-name or encoding: #{key.inspect}")
             return
           end
 
@@ -198,9 +207,10 @@ module Axn
           # verbatim. Left unvalidated, a permanently-malformed value would raise an UNEXPECTED
           # exception on every attempt, which the async adapter reads as a transient crash and
           # retries forever, rather than being dropped like every other malformed entry here
-          # (Codex P2 finding).
-          if value.match?(/[\r\n]/)
-            Axn.config.logger.warn("[axn-webhooks] dropping custom header #{key.inspect} -- value contains CR/LF")
+          # (Codex P2 finding). `on_error: true` here (treat a raised encoding error as "found
+          # CR/LF" -- malformed, drop it) for the same reason `safely_matches?` exists above.
+          if safely_matches?(value, /[\r\n]/, on_error: true)
+            Axn.config.logger.warn("[axn-webhooks] dropping custom header #{key.inspect} -- value contains CR/LF or has an invalid/incompatible encoding")
             return
           end
 
@@ -212,6 +222,18 @@ module Axn
           end
 
           out[key] = value
+        end
+
+        # `String#match?` raises rather than returning a boolean for two encoding failure modes:
+        # `Encoding::CompatibilityError` when `string`'s encoding differs from the Regexp's (e.g. a
+        # UTF-16LE header key against a US-ASCII/UTF-8 Regexp), and `ArgumentError` for a malformed
+        # byte sequence in `string`'s own declared encoding. Both are treated as "this string is
+        # unusable" -- `on_error:` supplies what that should count as for the specific check calling
+        # this (see call sites above).
+        def safely_matches?(string, regex, on_error:)
+          string.match?(regex)
+        rescue Encoding::CompatibilityError, ArgumentError
+          on_error
         end
 
         def user_agent
