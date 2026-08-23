@@ -95,6 +95,19 @@ RSpec.describe Axn::Webhooks::Outbound::Subscriber do
         .to raise_error(Axn::Webhooks::InvalidTarget, /key/)
     end
 
+    # Codex P2 finding, round 22: the `non_symbolizable` check above only rejects a key that ISN'T
+    # a Symbol/String -- but a String CAN still fail `#to_sym` if it has an invalid encoding (e.g.
+    # `"\xFF".force_encoding("UTF-8")`, a malformed byte sequence), even though it passes that "is a
+    # String" check. `raw.to_h { |k, v| [k.to_sym, v] }` then raised a bare `EncodingError`, which
+    # `resolve_subscribers`'s per-row `rescue Axn::Webhooks::InvalidTarget` never catches --
+    # aborting the WHOLE fan-out instead of rejecting just this one malformed row.
+    it "raises InvalidTarget (not EncodingError) on a String key with an invalid encoding" do
+      bad_key = "\xFF".dup.force_encoding("UTF-8")
+
+      expect { described_class.coerce({ bad_key => "17", url: "https://x.example/hook" }) }
+        .to raise_error(Axn::Webhooks::InvalidTarget, /key/)
+    end
+
     # Codex P1 finding, round 13: the message above named the offending key(s) via
     # `non_symbolizable.inspect` -- safe for a plain Integer key, but a resolver mistake could just
     # as easily use a COMPOUND object as a key (e.g. `{ subscription_record => url }`, from a

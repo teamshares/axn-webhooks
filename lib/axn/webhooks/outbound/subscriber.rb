@@ -61,7 +61,17 @@ module Axn
             non_symbolizable = raw.keys.reject { |k| k.is_a?(Symbol) || k.is_a?(String) }
             raise Axn::Webhooks::InvalidTarget, "Hash has non-Symbol/String key(s): #{non_symbolizable.map(&:class).inspect}" if non_symbolizable.any?
 
-            symbolized = raw.to_h { |k, v| [k.to_sym, v] }
+            symbolized = begin
+              raw.to_h { |k, v| [k.to_sym, v] }
+            rescue EncodingError
+              # The check above only rejects a key that ISN'T a Symbol/String -- but a String CAN
+              # still fail `#to_sym` if it has an invalid encoding (a malformed byte sequence), even
+              # though it passes that "is a String" check. Letting THAT raise a bare EncodingError
+              # here would propagate past `resolve_subscribers`'s per-row `rescue
+              # Axn::Webhooks::InvalidTarget`, aborting the WHOLE fan-out instead of rejecting just
+              # this one malformed row (Codex P2 finding, round 22).
+              raise Axn::Webhooks::InvalidTarget, "Hash has a key with an invalid encoding"
+            end
             unknown = symbolized.keys - %i[url id]
             unknown_desc = unknown.map { |k| safe_key_name(k) }.join(", ")
             raise Axn::Webhooks::InvalidTarget, "Hash has unknown key(s): [#{unknown_desc}]" if unknown.any?

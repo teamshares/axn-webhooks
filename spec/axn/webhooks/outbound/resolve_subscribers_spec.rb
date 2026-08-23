@@ -139,6 +139,23 @@ RSpec.describe "Axn::Webhooks::Outbound::Config#resolve_subscribers" do
       expect(resolution.rejections.first[:reason]).to match(/is not a valid URL/)
     end
 
+    # Codex P2 finding, round 22: `Subscriber.coerce`'s `non_symbolizable` check only rejects a key
+    # that ISN'T a Symbol/String -- but a String CAN still fail `#to_sym` if it has an invalid
+    # encoding (a malformed byte sequence), even though it passes that "is a String" check. The bare
+    # `EncodingError` that raised escaped past this rescue, aborting the whole fan-out.
+    it "still rejects (not EncodingError-aborts the whole fan-out for) a row keyed by an invalidly-encoded String" do
+      bad_key = "\xFF".dup.force_encoding("UTF-8")
+
+      config = outbound! do
+        subscribers ->(_event) { ["https://good.example/hook", { bad_key => "17" }] }
+        event :lead_closed
+      end
+      resolution = config.resolve_subscribers(:lead_closed)
+
+      expect(resolution.subscribers.map(&:url)).to eq(["https://good.example/hook"])
+      expect(resolution.rejections.size).to eq(1)
+    end
+
     it "rejects a row carrying an unknown key (e.g. a caller trying to smuggle a secret through) rather than silently dropping it" do
       config = outbound! do
         subscribers ->(_event) { [{ url: "https://a.example/hook", secret: "shh" }] }
