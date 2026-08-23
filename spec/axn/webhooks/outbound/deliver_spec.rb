@@ -538,6 +538,20 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect(transport.calls.first[:headers]).not_to include("sym_key", "str_key")
     end
 
+    # Codex P1 finding, round 25: this branch treated ANY String or Symbol key as safe to
+    # `#inspect` verbatim -- but a resolver could dynamically build either from a credential (e.g.
+    # `token.to_sym`, or a String key paired with a non-String VALUE, which is what actually routes
+    # a row into this branch). Symbol/String content is exactly as unconstrained as a compound
+    # object's -- only a key matching a plausible field-name shape (the documented common case,
+    # `{ Authorization: "..." }`) is safe to show as-is; anything else must not echo its content.
+    it "never echoes a dynamically-built Symbol or String key's content when it isn't a plausible field name" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { :"live-secret-do-not-leak" => "v", "another-secret-do-not-leak" => 123 } })
+      expect(Axn.config.logger).to(receive(:warn).twice { |msg| expect(msg).not_to include("live-secret-do-not-leak", "another-secret-do-not-leak") })
+
+      described_class.call(**kwargs)
+    end
+
     # Codex P2 finding, round 19: a String KEY/VALUE isn't automatically SAFE to run through
     # `Signer::HEADER_NAME`/the CR-LF regexp -- a differently-encoded String (e.g. UTF-16LE) raises
     # `Encoding::CompatibilityError` on `#match?` (the Regexp is US-ASCII/UTF-8), and a malformed
@@ -639,6 +653,32 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
       expect { result = described_class.call(**kwargs) }.not_to raise_error
       expect(result).to be_ok
       expect(transport.calls.first[:headers]).not_to include("x-custom")
+    end
+
+    # Codex P2 finding, round 25: the check above only looked for CR/LF, but RFC 7230's
+    # `field-value` grammar forbids EVERY control byte except HTAB (0x09) -- a value containing NUL
+    # or another stray control character (e.g. BEL, 0x07) passed unvalidated, and the built-in
+    # Transport serializes it straight onto the wire. Such bytes are invalid there too and can get
+    # an otherwise-valid webhook rejected by the receiver or a proxy in between -- the same
+    # "permanently malformed, don't let it out unvalidated" reasoning as the CR/LF check itself.
+    it "drops (with a warning) a custom header value containing a non-CRLF control byte (e.g. NUL)" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "x-custom" => "bad\x00value" } })
+      expect(Axn.config.logger).to receive(:warn)
+
+      result = nil
+      expect { result = described_class.call(**kwargs) }.not_to raise_error
+      expect(result).to be_ok
+      expect(transport.calls.first[:headers]).not_to include("x-custom")
+    end
+
+    it "still allows HTAB in a custom header value (not a forbidden control byte)" do
+      transport = fake_transport(ok(202))
+      declare!(transport:, headers: -> { { "x-custom" => "has\ttab" } })
+
+      described_class.call(**kwargs)
+
+      expect(transport.calls.first[:headers]["x-custom"]).to eq("has\ttab")
     end
 
     it "lets a headers callable that raises propagate as an unexpected exception (adapter retries the un-acked job)" do

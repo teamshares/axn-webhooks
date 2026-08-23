@@ -19,6 +19,18 @@ module Axn
         # replacing the signature. Signer::HmacSigner rejects these at declaration time.
         MANAGED_HEADERS = %w[content-type user-agent].freeze
 
+        # A plausible field-name (`Authorization`, `content_type` -- the documented common case of
+        # writing a `headers` resolver with a Symbol/String literal key) is a short, simple
+        # identifier -- used by `key_desc` to decide whether a malformed header's key is safe to
+        # log as-is (see `add_custom_header`).
+        PLAUSIBLE_FIELD_NAME = /\A[A-Za-z_][A-Za-z0-9_]{0,49}\z/
+
+        # RFC 7230's `field-value` grammar forbids every control byte except HTAB (0x09) -- CR/LF
+        # (0x0D/0x0A) are the ones Net::HTTP itself raises on, but any OTHER control byte (NUL,
+        # BEL, ...) is equally invalid on the wire and unvalidated here would reach the receiver
+        # (see `add_custom_header`).
+        FORBIDDEN_HEADER_VALUE_BYTES = /[\x00-\x08\x0A-\x1F\x7F]/
+
         expects :url, type: String
         expects :webhook_id, type: String
         expects :body, type: String
@@ -171,14 +183,17 @@ module Axn
           # check, and logging the value unconditionally here would copy a live credential
           # straight into application logs the moment anyone wrote a `headers` resolver this way
           # (Codex P1 finding). The key name alone is enough to debug "which header was malformed" --
-          # true for a Symbol (the documented case above), but a resolver mistake could just as
-          # easily use a COMPOUND object as a key (e.g. an ActiveRecord record handed back instead
-          # of a header name); that object's own #inspect would otherwise render straight into
-          # application logs, commonly including every attribute (Codex P1 finding, round 16). Only
-          # a String/Symbol key is safe to name as-is; anything else is named by class only.
+          # true for the DOCUMENTED common case (a plain Symbol/String literal like `Authorization:`)
+          # -- but `headers` exists specifically to carry credentials, and a resolver could just as
+          # easily build a Symbol/String key DYNAMICALLY from one (`token.to_sym`, or a String key
+          # paired with a non-String value, which is what actually routes a row into this branch) --
+          # Symbol/String content is exactly as unconstrained as a compound object's in that case
+          # (Codex P1 finding, round 25; round 16 fixed the compound-object case but still trusted
+          # ANY Symbol/String verbatim). `key_desc` below only shows a key matching a plausible
+          # field-name shape as-is; anything else -- compound, or Symbol/String that doesn't look
+          # like one -- is named by class only.
           unless key.is_a?(String) && value.is_a?(String)
-            key_desc = key.is_a?(String) || key.is_a?(Symbol) ? key.inspect : "instance of #{key.class}"
-            Axn.config.logger.warn("[axn-webhooks] dropping a custom header with a non-String key or value (key: #{key_desc})")
+            Axn.config.logger.warn("[axn-webhooks] dropping a custom header with a non-String key or value (key: #{key_desc(key)})")
             return
           end
 
@@ -217,8 +232,17 @@ module Axn
           # retries forever, rather than being dropped like every other malformed entry here
           # (Codex P2 finding). `on_error: true` here (treat a raised encoding error as "found
           # CR/LF" -- malformed, drop it) for the same reason `safely_matches?` exists above.
-          if safely_matches?(value, /[\r\n]/, on_error: true)
-            Axn.config.logger.warn("[axn-webhooks] dropping custom header #{key.inspect} -- value contains CR/LF or has an invalid/incompatible encoding")
+          #
+          # Broadened beyond CR/LF to every control byte the RFC 7230 `field-value` grammar forbids
+          # (HTAB, 0x09, is the one control byte it explicitly permits) -- a value containing NUL or
+          # another stray control character (e.g. BEL) passed this check unvalidated and the
+          # built-in Transport serialized it straight onto the wire, where it's equally invalid and
+          # can get an otherwise-valid webhook rejected by the receiver or a proxy in between (Codex
+          # P2 finding, round 25).
+          if safely_matches?(value, FORBIDDEN_HEADER_VALUE_BYTES, on_error: true)
+            Axn.config.logger.warn(
+              "[axn-webhooks] dropping custom header #{key.inspect} -- value contains a forbidden control character (or has an invalid/incompatible encoding)",
+            )
             return
           end
 
@@ -230,6 +254,16 @@ module Axn
           end
 
           out[key] = value
+        end
+
+        # Only a key matching a plausible field-name shape is safe to show as-is (a Symbol/String
+        # built DYNAMICALLY from a credential is exactly as unconstrained as a compound object's
+        # #inspect -- see `add_custom_header`'s comment above); anything else, including a
+        # Symbol/String that doesn't look like a field name, is named by class only.
+        def key_desc(key)
+          return "instance of #{key.class}" unless key.is_a?(String) || key.is_a?(Symbol)
+
+          safely_matches?(key.to_s, PLAUSIBLE_FIELD_NAME, on_error: false) ? key.inspect : "instance of #{key.class}"
         end
 
         # `String#match?` raises rather than returning a boolean for two encoding failure modes:
