@@ -50,6 +50,18 @@ history rather than here.
   any need for the `svix` gem), `verify :basic_auth` (owning the full two-legged handshake, including
   the `WWW-Authenticate` challenge that clients like Twilio require), or a custom `verify` block.
   `verify` is mandatory whenever `dispatch` is declared.
+- **Every secret and credential, in both directions, must be a non-empty String** — enforced through
+  one shared guard (`Verifiers.require_secret!`) rather than per-strategy. A blank secret is a *weak
+  key*, not a failure: `""` is a legal HMAC key, so `verify :hmac` with a secret that resolved to
+  blank authenticated anyone who signed with the empty key. `verify :basic_auth` additionally
+  coerced with `to_s` before its blank check, so a `false` credential pair became the guessable
+  `false:false`. `Signature.compute` guards the same at the primitive level.
+- Inbound query/form parsing of an **unverified** body now fails soft (`{}`) like the multipart
+  branch already did, instead of letting a malformed body raise past `verify` — a ~600-byte hostile
+  body turned a 401 into a 500 and fired `on_exception` once per request.
+- Outbound `Deliver` marks `url`/`body` (and `Emit` its `data`) `sensitive:`, and redacts the URL to
+  its origin in failure messages and the exhaustion report. A Slack/Discord/Teams hook carries its
+  token in the URL path, which was being written to the application log on every delivery.
 - Every inbound `verify :standard_webhooks` secret is validated as early as it can be: a literal at
   declaration, a callable or resolver on **every request**. A secret that resolves to `nil` — an
   unset env var, or a `header(…)` on an absent header — used to be coerced with `to_s` and

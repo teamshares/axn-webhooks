@@ -112,19 +112,32 @@ module Axn
       #   body, so even a form-urlencoded default Content-Type header on a GET (common on
       #   challenge requests) must not shadow the query string with an empty-body parse.
       def self.extract_params(env, raw_body, content_type)
-        return Rack::Utils.parse_nested_query(env["QUERY_STRING"]) if %w[GET HEAD].include?(env["REQUEST_METHOD"])
+        return parse_query(env["QUERY_STRING"]) if %w[GET HEAD].include?(env["REQUEST_METHOD"])
 
         if content_type&.start_with?("application/x-www-form-urlencoded")
           # Parsed from raw_body rather than via Rack, so this branch stays independent of Rack's
           # form-hash caching (and of whatever position upstream middleware left rack.input in).
-          Rack::Utils.parse_nested_query(raw_body)
+          parse_query(raw_body)
         elsif content_type&.start_with?("multipart/form-data")
           parse_multipart(env, raw_body)
         else
-          Rack::Utils.parse_nested_query(env["QUERY_STRING"])
+          parse_query(env["QUERY_STRING"])
         end
       end
       private_class_method :extract_params
+
+      # Same fail-soft contract as parse_multipart below, and for the same reason (security audit):
+      # this runs on an UNVERIFIED request, so a parse error must not crash the pipeline before
+      # `verify` gets to reject the sender. Rack 3's own limits are the trigger — QueryLimitError
+      # from a deeply-nested or param-heavy body, InvalidParameterError from bad %-encoding — and a
+      # ~600-byte hostile body was enough to turn a would-be 401 into a 500 AND fire
+      # Axn.config.on_exception once per request, i.e. an unauthenticated pager flood.
+      def self.parse_query(string)
+        Rack::Utils.parse_nested_query(string)
+      rescue StandardError
+        {}
+      end
+      private_class_method :parse_query
 
       # Rack owns multipart parsing (boundary handling differs across Rack 3 minors), so delegate —
       # but feed it a StringIO over the bytes we already captured, never the live rack.input.

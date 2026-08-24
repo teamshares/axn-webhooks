@@ -31,9 +31,15 @@ module Axn
         # (see `add_custom_header`).
         FORBIDDEN_HEADER_VALUE_BYTES = /[\x00-\x08\x0A-\x1F\x7F]/
 
-        expects :url, type: String
+        # sensitive: BOTH of these (security audit). The most common real webhook URL shape —
+        # Slack/Discord/Teams incoming hooks — carries a secret token AS THE PATH, which is exactly
+        # why TargetPolicy.redact_url exists; and `body` is the caller's own event payload, routinely
+        # PII. Without these, axn's per-call auto-logging rendered a live third-party token and the
+        # payload into the application log on EVERY delivery. The inbound half already marks
+        # request/verifier sensitive; this is the same boundary on the sending side.
+        expects :url, type: String, sensitive: true
         expects :webhook_id, type: String
-        expects :body, type: String
+        expects :body, type: String, sensitive: true
         expects :event, type: String
         expects :attempt, type: Integer, default: 1
         # A DB-backed subscriber's own identity (its String id, not a secret/token) -- nil for
@@ -301,7 +307,7 @@ module Axn
         # its status code — truncated so a verbose error page never blows up a log line or an
         # exception report.
         def permanent_failure_message(response)
-          "permanent delivery failure (HTTP #{response.status}) for #{event} to #{url}#{truncated_body(response.body)}"
+          "permanent delivery failure (HTTP #{response.status}) for #{event} to #{safe_url}#{truncated_body(response.body)}"
         end
 
         # net/http labels every response body ASCII-8BIT regardless of actual content, so `body` may
@@ -309,6 +315,12 @@ module Axn
         # BYTES first (encoding-agnostic, so the cut itself never raises), then force UTF-8 and
         # `scrub` — which also repairs a multibyte character split at the 500-byte boundary — before
         # appending the UTF-8 ellipsis, so the two `+` operands are always compatible.
+        # Origin only — scheme://host[:port]. A Slack/Discord/Teams hook puts its secret in the
+        # path (and some receivers use a signed query token), so a bare `url` in any message that
+        # reaches a log or an error tracker publishes a live credential. Correlate on webhook_id /
+        # subscriber_id instead: both are credential-free by design.
+        def safe_url = TargetPolicy.redact_url(url)
+
         def truncated_body(body)
           return "" if body.nil? || body.empty?
 
@@ -328,7 +340,7 @@ module Axn
         # best-effort promise of the sync fallback path).
         def retry_or_exhaust!(retry_after: nil, network_error: nil)
           if attempt >= config.max_attempts || !async_configured?
-            @exhaustion_error = network_error || Axn::Webhooks::Error.new("outbound delivery exhausted for #{event} to #{url}")
+            @exhaustion_error = network_error || Axn::Webhooks::Error.new("outbound delivery exhausted for #{event} to #{safe_url}")
             return fail!(terminal_message)
           end
 
@@ -338,9 +350,9 @@ module Axn
         end
 
         def terminal_message
-          return "delivery exhausted after #{attempt} attempts for #{event} to #{url}" if attempt >= config.max_attempts
+          return "delivery exhausted after #{attempt} attempts for #{event} to #{safe_url}" if attempt >= config.max_attempts
 
-          "delivery failed for #{event} to #{url} (no async adapter configured to retry attempt #{attempt + 1})"
+          "delivery failed for #{event} to #{safe_url} (no async adapter configured to retry attempt #{attempt + 1})"
         end
 
         # Presence check ONLY (never branches on adapter type) — mirrors Dispatch's own
@@ -403,7 +415,8 @@ module Axn
           # exhaustion into a raise the async adapter would retry. `action: self` routes the warn to
           # the running instance, matching axn's own internal best_effort callers.
           Axn::Extensions.best_effort("reporting outbound delivery exhaustion", action: self) do
-            Axn.config.on_exception(error, action: self, context: { event:, url:, webhook_id:, attempt:, subscriber_id: })
+            # url: redacted to its origin — this context is shipped to an external error tracker.
+            Axn.config.on_exception(error, action: self, context: { event:, url: safe_url, webhook_id:, attempt:, subscriber_id: })
           end
         end
       end

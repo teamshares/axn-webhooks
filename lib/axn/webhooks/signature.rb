@@ -122,6 +122,15 @@ module Axn
 
       # The encoded expected signature for `payload`. Reused by outbound's Signer::StandardWebhooksSigner.
       def compute(secret:, payload:, digest: :sha256, encoding: :hex)
+        # A blank secret is a WEAK KEY, not a failure: "" is a legal HMAC key, so the digest it
+        # produces is one any stranger can compute. Guarded at this chokepoint — the lowest layer
+        # every signing and verification path funnels through — so the public primitive is safe on
+        # its own, not merely when reached via a strategy that happens to check first. The README's
+        # own example passes `ENV["WEBHOOK_SECRET"]` straight in, and a set-but-empty env var is
+        # routine in k8s ConfigMaps and CI. Never interpolates the value.
+        raise ArgumentError, "secret must be a non-empty String (got #{secret.is_a?(String) ? 'an empty String' : secret.class})" \
+          unless secret.is_a?(String) && !secret.empty?
+
         raw = OpenSSL::HMAC.digest(openssl_digest(digest), secret, payload.to_s)
         encode(raw, encoding)
       end
