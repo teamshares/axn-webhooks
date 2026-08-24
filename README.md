@@ -186,21 +186,22 @@ to the raw HMAC key. Pass the vendor's value verbatim, prefix included. `id:`, `
 `signature:` default to the spec's `webhook-*` headers and rarely need overriding; `tolerance:`
 defaults to 300 seconds.
 
-> **Gotcha: a raw (non-`whsec_`) secret is not rejected — it fails at request time, two different
-> ways.** Which one you get depends on whether your raw secret happens to be valid Base64:
+A **literal** secret missing the prefix is rejected at declaration, so the mistake fails your boot
+rather than your traffic. A **callable** secret can't be — it may read a secret store or an env var
+set after boot — so it's still checked per request, and there the failure is genuinely nasty:
+
+> **Gotcha: a raw (non-`whsec_`) secret resolved at request time fails two different ways**, neither
+> of them obvious. Which one depends on whether the raw value happens to be valid Base64:
 >
-> - **Not valid Base64** (most secrets — anything with `-`, `_`, or a length that isn't a multiple
->   of 4): the decode raises, which reads as a verifier crash. 401, reported to
->   `Axn.config.on_exception`, no `reason` on the result.
-> - **Valid Base64** (a 32-character hex secret qualifies, and that's a very common shape): it
->   decodes *silently* to the wrong key. You get a plain `:signature_mismatch` — quiet, **nothing
->   reported anywhere**, and genuinely indistinguishable from a rotated secret.
+> - **Not valid Base64** (anything with `-`, `_`, or a length that isn't a multiple of 4): the decode
+>   raises, which reads as a verifier crash. 401, reported to `Axn.config.on_exception`, no `reason`
+>   on the result.
+> - **Valid Base64** — a 32-character hex secret qualifies, and that's a very common shape: it
+>   decodes *silently* to the wrong key. A plain `:signature_mismatch`, quiet, **nothing reported
+>   anywhere**, indistinguishable from a rotated secret.
 >
-> Both 401 every request. The second is the one that will cost you an afternoon, so: if an endpoint
-> rejects 100% of traffic from its first deploy, check the prefix before you check the key.
->
-> Outbound is stricter — a literal `sign :standard_webhooks` secret missing the prefix is
-> [rejected at boot](#boot-time-validation), before it can ship a single unverifiable delivery.
+> Both 401 every request. If an endpoint rejects 100% of traffic from its first deploy, check the
+> prefix before you check the key.
 
 ### `verify :basic_auth`
 
@@ -211,10 +212,18 @@ has to do instead. Prefer signature verification wherever the vendor offers it.
 
 ### Custom `verify` blocks
 
-The contract is `->(request) { Boolean }`. To name your own failure cause, return an
-`Axn::Webhooks::Signature::Check` instead — `Signature` exports ready-made verdicts (`OK`,
-`MISMATCH`, `SIGNATURE_MISSING`, `CREDENTIALS_MISSING`, `CREDENTIALS_MISMATCH`), so you rarely have
-to build one:
+The contract is `->(request) { Boolean }`. A return value is read as:
+
+| Return | Read as |
+| -- | -- |
+| an object responding to `ok?` (a `Signature::Check`, an `Axn::Result`, …) | whatever its `ok?` says |
+| any other truthy value | verified |
+| `nil` / `false` | rejected |
+
+So returning an `Axn::Result` works — a failed one rejects the request rather than silently
+verifying it. To name your own failure *cause*, return an `Axn::Webhooks::Signature::Check`;
+`Signature` exports ready-made verdicts (`OK`, `MISMATCH`, `SIGNATURE_MISSING`,
+`CREDENTIALS_MISSING`, `CREDENTIALS_MISMATCH`), so you rarely have to build one:
 
 ```ruby
 verify do |req|
@@ -222,8 +231,12 @@ verify do |req|
 end
 ```
 
-> **Gotcha:** never return an `Axn::Result` from a `verify` block — it is truthy even when `ok?` is
-> false, so every rejected request would verify and dispatch. See
+Without a `Check`, a rejection is reported as `:signature_mismatch`.
+
+> **Gotcha: `ok?` on an `Axn::Result` means the action SUCCEEDED, not that the signature was
+> valid.** The two coincide only if your action `fail!`s on a bad signature. An action that
+> succeeds while carrying its verdict in an exposure (`expose(valid: false)`) still reads as
+> verified — so `fail!` on rejection, or translate to a `Check` as above. See
 > [Don't return an Axn::Result](DESIGN-NOTES.md#dont-return-an-axnresult-from-a-verify-block).
 
 ### Why verification failed

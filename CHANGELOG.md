@@ -48,6 +48,9 @@ history rather than here.
   any need for the `svix` gem), `verify :basic_auth` (owning the full two-legged handshake, including
   the `WWW-Authenticate` challenge that clients like Twilio require), or a custom `verify` block.
   `verify` is mandatory whenever `dispatch` is declared.
+- A **custom `verify` block's return value is duck-typed on `#ok?`** — any object reporting its own
+  verdict (a `Signature::Check`, an `Axn::Result`) is asked for it; any other truthy value means
+  verified; `nil`/`false` mean rejected. A literal `whsec_` secret is validated at declaration.
 - **Verification failures name their cause** on the result and as a bounded `reason` metrics
   dimension: `:replay_window` (carrying `skew` and `suggested_unit`), `:replay_timestamp_invalid`,
   `:signature_missing`, `:signature_mismatch`, `:credentials_missing`, `:credentials_mismatch`.

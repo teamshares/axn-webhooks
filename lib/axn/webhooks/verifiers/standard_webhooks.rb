@@ -13,6 +13,38 @@ module Axn
 
         def decode_secret(secret) = Base64.strict_decode64(secret.to_s.delete_prefix("whsec_"))
 
+        # The raw HMAC key behind a `whsec_<base64>` secret, or nil if the value isn't one.
+        # The single source of truth for "is this a usable Standard Webhooks secret", shared by
+        # inbound's declaration-time check and outbound's (Outbound::Signer), so the two can't drift.
+        #
+        # The `whsec_` prefix check is what carries this: an unprefixed secret is very often still
+        # VALID Base64 — a 32-char hex secret is, and that's a common shape — so it would decode
+        # silently to the wrong key rather than raising. The rescue is scoped to the decode alone;
+        # a caller that RESOLVES a secret (from a callable or a secret store) must do so outside
+        # this method, or its own ArgumentError would be swallowed and rewritten.
+        def secret_key(secret)
+          return nil unless secret.is_a?(String) && secret.start_with?("whsec_")
+
+          key = decode_secret(secret)
+          key.empty? ? nil : key
+        rescue ArgumentError
+          nil
+        end
+
+        # Describes a rejected secret's SHAPE for an error message, never its bytes: this can be
+        # raised per delivery attempt on the outbound side, and would otherwise flow the live
+        # signing credential into whatever Axn.config.on_exception is wired to.
+        def describe_secret(secret)
+          return secret.class.name unless secret.is_a?(String)
+          return "a #{secret.length}-char String not prefixed with whsec_" unless secret.start_with?("whsec_")
+
+          "a whsec_-prefixed String that failed to decode"
+        end
+
+        def invalid_secret_message(declaration, secret)
+          "#{declaration} secret must be a whsec_<base64> value (got #{describe_secret(secret)})"
+        end
+
         # Keep only `v1,<sig>` candidates, stripped to the bare base64 signature.
         # Done here (not via Signature's generic splitter) because that splitter treats
         # the comma as a separator and would break `v1,<sig>` into two tokens.
@@ -25,6 +57,22 @@ module Axn
                                        id: Resolvers.header("webhook-id"),
                                        timestamp: Resolvers.header("webhook-timestamp"),
                                        signature: Resolvers.header("webhook-signature")|
+        # A LITERAL secret is fully knowable now, so the whsec_ format is checked once here (this
+        # block runs at `inbound` declaration) instead of failing every request forever. Symmetric
+        # with outbound `sign :standard_webhooks`, and ArgumentError for the same reason: a
+        # declaration mistake, not a runtime condition.
+        #
+        # Worth the eager check because BOTH request-time failure modes are near-undiagnosable: a
+        # non-Base64 raw secret raises (reported as a verifier crash, no `reason` on the result),
+        # and a raw secret that IS valid Base64 decodes silently to the wrong key — a quiet
+        # :signature_mismatch, nothing reported anywhere, indistinguishable from a rotated key.
+        #
+        # A callable/Resolver secret is deliberately NOT resolved here: it may read a secret store
+        # or an env var set after boot, so its value stays a per-request concern.
+        if secret.is_a?(String) && StandardWebhooks.secret_key(secret).nil?
+          raise ArgumentError, StandardWebhooks.invalid_secret_message("verify :standard_webhooks", secret)
+        end
+
         lambda do |request|
           ts = Resolvers.resolve(timestamp, request)
           payload = "#{Resolvers.resolve(id, request)}.#{ts}.#{request.raw_body}"

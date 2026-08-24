@@ -82,10 +82,25 @@ module Axn
         "#{message} — would fit as unit: #{rejection.suggested_unit.inspect}"
       end
 
-      # A Check reports its own verdict; anything else (a custom verifier block, per the
-      # documented `->(request) { Boolean }` contract) is read for truthiness. Checked in this
-      # order because a rejecting Check is still a truthy Ruby object.
-      def verified?(check) = check.is_a?(Signature::Check) ? check.ok? : !!check
+      # Anything that reports its OWN verdict via #ok? is asked; anything else (a custom verifier
+      # block, per the documented `->(request) { Boolean }` contract) is read for truthiness.
+      #
+      # Duck-typed on #ok? rather than `is_a?(Signature::Check)` because the truthiness fallback is
+      # a silent authentication-disabled bug for any verdict object: a REJECTING one is still a
+      # truthy Ruby object, so it verified and dispatched every rejected request while recording no
+      # verify failure anywhere. `Axn::Result` is the one that actually bites — in an axn-consuming
+      # app, returning `MyCheck.call(request:)` from a `verify` block is the obvious thing to write.
+      #
+      # Order matters: #ok? is asked FIRST, since every such object is truthy regardless of verdict.
+      # A truthy object with no #ok? still means verified — plenty of custom blocks end in a lookup
+      # returning a record rather than a boolean — and nil/false still mean rejected, since neither
+      # responds to #ok?.
+      #
+      # NOTE this reads the object's own notion of "ok", which for an Axn::Result means the action
+      # SUCCEEDED, not necessarily that the signature was valid. An action that returns ok while
+      # carrying its verdict in an exposure is still mis-read; see the README's custom-verify
+      # section. Fixing the always-verifies case does not make every Result shape safe.
+      def verified?(check) = check.respond_to?(:ok?) ? check.ok? : !!check
     end
   end
 end

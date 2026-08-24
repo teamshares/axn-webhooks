@@ -87,16 +87,32 @@ None of this applies to body-signing verifiers (`:hmac`, `:standard_webhooks`), 
 
 <sub>README: [Custom `verify` blocks](README.md#custom-verify-blocks)</sub>
 
-In an axn-consuming app the instinct is to put the check in an action. But the contract is read as
-`check.is_a?(Signature::Check) ? check.ok? : !!check` — and an `Axn::Result` is neither a `Check` nor
-a boolean, and is **truthy even when `ok?` is false**. A verifier returning one reports every rejected
-request as verified and dispatches it, with no verify failure recorded anywhere.
+In an axn-consuming app the instinct is to put the check in an action and return its result. This
+used to be actively dangerous: the contract was read as
+`check.is_a?(Signature::Check) ? check.ok? : !!check`, and an `Axn::Result` is neither a `Check` nor
+a boolean — but it *is* **truthy even when `ok?` is false**. So a verifier returning one reported
+every rejected request as verified and dispatched it, with no verify failure recorded anywhere.
+Authentication silently off, and nothing in the logs to say so.
 
-If the logic belongs in an action, call it from the block and translate to a `Check`. Usually it
-doesn't need to be an action at all: `Verify` is already the Axn boundary for this stage — it owns the
-`expects`/`exposes` contract, the `sensitive:` redaction of the verifier, the `reason` dimension, and
-the exception report. That's why both built-in strategies are a plain class and a lambda rather than
-actions.
+The contract is now duck-typed on `#ok?`, so any object that reports its own verdict is asked for it
+rather than read for truthiness. That closes the silent-bypass hole: a failed `Axn::Result` now
+rejects the request.
+
+**One sharp edge survives, and it can't be fixed from this side.** `ok?` on an `Axn::Result` means
+*the action succeeded*, which is not the same claim as *the signature was valid*. The two coincide
+only when the action `fail!`s on a bad signature. An action that succeeds while carrying its verdict
+in an exposure —
+
+```ruby
+def call = expose(valid: signature_matches?)   # ok? is TRUE even when valid: false
+```
+
+— still reads as verified. `fail!` on rejection, or translate to a `Check` explicitly.
+
+Usually it doesn't need to be an action at all: `Verify` is already the Axn boundary for this stage —
+it owns the `expects`/`exposes` contract, the `sensitive:` redaction of the verifier, the `reason`
+dimension, and the exception report. That's why both built-in strategies are a plain class and a
+lambda rather than actions.
 
 ## Basic auth is two-legged
 

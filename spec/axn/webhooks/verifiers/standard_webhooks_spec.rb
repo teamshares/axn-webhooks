@@ -84,6 +84,50 @@ RSpec.describe "verify :standard_webhooks strategy" do
     expect(Axn::Webhooks::Inbound[:codat].verify(tampered).reason).to eq(:signature_mismatch)
   end
 
+  # A LITERAL secret is knowable at declaration, so the whsec_ format is checked there — symmetric
+  # with outbound `sign :standard_webhooks`. Without it, a raw secret fails only at REQUEST time,
+  # and does so two different ways depending on whether it happens to be valid Base64: it either
+  # raises (a reported verifier crash) or — for a 32-char hex secret, a very common shape — decodes
+  # SILENTLY to the wrong key, producing a quiet :signature_mismatch with nothing reported anywhere,
+  # indistinguishable from a rotated key. Every request 401s either way.
+  describe "literal secret validation at declaration" do
+    def declare(secret)
+      Axn::Webhooks::Inbound.reset!
+      Axn::Webhooks.inbound(:v) { verify :standard_webhooks, secret: }
+    end
+
+    it "rejects a raw secret that isn't valid Base64" do
+      expect { declare("sk_live_abc123") }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    # The dangerous one: valid Base64, so it would decode silently to the wrong key at request time.
+    it "rejects a raw 32-char hex secret, which IS valid Base64 and would decode silently" do
+      expect { declare("deadbeefdeadbeefdeadbeefdeadbeef") }
+        .to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    it "rejects a whsec_ secret whose Base64 body doesn't decode" do
+      expect { declare("whsec_!!!not-base64!!!") }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    it "names the shape without leaking the secret's bytes" do
+      expect { declare("hunter2hunter2") }.to raise_error(ArgumentError) do |e|
+        expect(e.message).to include("14-char String")
+        expect(e.message).not_to include("hunter2")
+      end
+    end
+
+    it "accepts a valid literal whsec_ secret" do
+      expect { declare("whsec_#{Base64.strict_encode64('k')}") }.not_to raise_error
+    end
+
+    # A CALLABLE (or Resolver) secret is resolved per REQUEST — it may read a secret store or an
+    # env var set after boot — so its value stays a request-time concern, exactly as outbound's is.
+    it "does not resolve a callable secret at declaration" do
+      expect { declare(-> { raise "should not be called at boot" }) }.not_to raise_error
+    end
+  end
+
   describe Axn::Webhooks::Verifiers::StandardWebhooks do
     it "decodes a whsec_ secret to its raw bytes" do
       expect(described_class.decode_secret("whsec_#{Base64.strict_encode64('abc')}")).to eq("abc")
