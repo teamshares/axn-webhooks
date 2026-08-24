@@ -9,6 +9,8 @@ _Nothing yet._
 
 ## [0.1.0] - 2026-08-24
 
+_Prepared, not yet tagged — the version is cut immediately on merge. Update this date if that slips._
+
 Initial release. Webhook handling for [axn](https://github.com/teamshares/axn) in both directions,
 built on one shared signature primitive, and usable in or out of Rails.
 
@@ -139,6 +141,3 @@ history rather than here.
 - `Axn::Webhooks::Inbound.reset!` / `Outbound.reset!` clear the process-global registries for tests.
 - The packaged gem ships an allowlist of paths (`lib/`, `README.md`, `DESIGN-NOTES.md`,
   `CHANGELOG.md`, `LICENSE.txt`), so development artifacts never leak into the release.
-
-[Unreleased]: https://github.com/teamshares/axn-webhooks/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/teamshares/axn-webhooks/releases/tag/v0.1.0
