@@ -53,7 +53,21 @@ module Axn
       # Two pass-throughs: an UnparseableBody the proc raised itself (already the right answer — don't
       # double-wrap and bury its message), and a RetryLater (handled by #call's rescue above).
       def parse_event
-        parse.call(request)
+        event = parse.call(request)
+
+        # `Request#params` fails SOFT (returns {}) because it is reachable before verification,
+        # where a raise would let an unauthenticated sender turn a 401 into a reported 500. That
+        # softness must not survive into here: this runs only after verification, and a verified
+        # request whose form body did not parse has to be reported as UnparseableBody and mapped to
+        # `unparseable_status` — not silently dispatched with an empty event (Codex review).
+        #
+        # Gated on `params_consumed?` so the failure only surfaces for a parse that actually
+        # depended on params: a JSON `parse:` never reads them, so a hostile query string appended
+        # to a validly-signed request (the signature covers the body, not the query) cannot
+        # downgrade it.
+        raise request.params_error if request.params_error && request.params_consumed?
+
+        event
       rescue Axn::Webhooks::RetryLater, Axn::Webhooks::UnparseableBody
         raise
       rescue StandardError => e

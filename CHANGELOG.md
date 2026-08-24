@@ -67,7 +67,11 @@ history rather than here.
   echoes request data can't be used to inject headers or split the response.
 - Inbound query/form parsing of an **unverified** body now fails soft (`{}`) like the multipart
   branch already did, instead of letting a malformed body raise past `verify` — a ~600-byte hostile
-  body turned a 401 into a 500 and fired `on_exception` once per request.
+  body turned a 401 into a 500 and fired `on_exception` once per request. The failure is not
+  discarded: `Request#params_error` carries it, and the parse step (which runs only *after*
+  verification) re-raises it as `UnparseableBody` when the parse actually read `params`, so a
+  verified request with a malformed form body still gets the documented report and
+  `unparseable_status` rather than silently dispatching an empty event.
 - Outbound `Deliver` marks `url`/`body` (and `Emit` its `data`) `sensitive:`, and redacts the URL to
   its origin in failure messages and the exhaustion report. A Slack/Discord/Teams hook carries its
   token in the URL path, which was being written to the application log on every delivery.

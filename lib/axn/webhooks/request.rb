@@ -10,15 +10,38 @@ module Axn
     # only from this object, so the same pipeline works behind a Rack mount, a controller,
     # or a plain test constructor. Header lookup is case-insensitive.
     class Request
-      def initialize(raw_body:, headers: {}, params: {}, url: nil, http_method: "POST")
+      def initialize(raw_body:, headers: {}, params: {}, url: nil, http_method: "POST", params_error: nil)
         @raw_body = raw_body.frozen? ? raw_body : raw_body.dup.freeze
         @headers = (headers || {}).each_with_object({}) { |(k, v), h| h[k.to_s.downcase] = v }
         @params = (params || {}).dup.freeze
+        # The failure `extract_params` swallowed, if any — see #params. Kept so the POST-verification
+        # parse step can still see it, without it ever reaching the pre-verification path.
+        @params_error = params_error
+        @params_consumed = false
         @url = url
         @http_method = http_method.to_s.upcase
       end
 
-      attr_reader :raw_body, :params, :url, :http_method
+      attr_reader :raw_body, :url, :http_method
+
+      # The exception raised while parsing the query/form params, or nil. Public so Dispatch can
+      # surface it AFTER verification (see #params).
+      attr_reader :params_error
+
+      # Whether anything actually read #params. The parse step re-raises `params_error` only when
+      # this is true, which keeps the failure scoped to a parse that genuinely depended on params:
+      # a JSON `parse:` never touches them, so a hostile QUERY STRING appended to a validly-signed
+      # request (the signature covers the body, not the query) cannot downgrade it to unparseable.
+      def params_consumed? = @params_consumed
+
+      # Always a Hash, never raises — this is reachable BEFORE verification (a custom verifier or a
+      # `challenge_required` predicate may read it), where a raise would let an unauthenticated
+      # sender turn a 401 into a reported 500. The swallowed failure is not lost: it is kept on
+      # #params_error and re-raised by the parse step, which runs only after verification.
+      def params
+        @params_consumed = true
+        @params
+      end
 
       def header(name)
         @headers[name.to_s.downcase]
@@ -61,10 +84,12 @@ module Axn
         rewind(input) # courtesy for anything downstream of us
 
         content_type = env["CONTENT_TYPE"]
+        params_result = extract_params(env, raw_body, content_type)
         new(
           raw_body:,
           headers: extract_headers(env),
-          params: extract_params(env, raw_body, content_type),
+          params: params_result.value,
+          params_error: params_result.error,
           url: extract_url(env),
           http_method: env["REQUEST_METHOD"],
         )
@@ -111,6 +136,10 @@ module Axn
       #   Nylas/Meta GET challenge, read via `req.params["challenge"]`). GET/HEAD never carry a
       #   body, so even a form-urlencoded default Content-Type header on a GET (common on
       #   challenge requests) must not shadow the query string with an empty-body parse.
+      # Parsed params plus whatever failure produced them, so the caller decides when the failure
+      # matters. `value` is always a Hash.
+      ParamsResult = Data.define(:value, :error)
+
       def self.extract_params(env, raw_body, content_type)
         return parse_query(env["QUERY_STRING"]) if %w[GET HEAD].include?(env["REQUEST_METHOD"])
 
@@ -119,7 +148,7 @@ module Axn
           # form-hash caching (and of whatever position upstream middleware left rack.input in).
           parse_query(raw_body)
         elsif content_type&.start_with?("multipart/form-data")
-          parse_multipart(env, raw_body)
+          ParamsResult.new(value: parse_multipart(env, raw_body), error: nil)
         else
           parse_query(env["QUERY_STRING"])
         end
@@ -133,9 +162,9 @@ module Axn
       # ~600-byte hostile body was enough to turn a would-be 401 into a 500 AND fire
       # Axn.config.on_exception once per request, i.e. an unauthenticated pager flood.
       def self.parse_query(string)
-        Rack::Utils.parse_nested_query(string)
-      rescue StandardError
-        {}
+        ParamsResult.new(value: Rack::Utils.parse_nested_query(string), error: nil)
+      rescue StandardError => e
+        ParamsResult.new(value: {}, error: e)
       end
       private_class_method :parse_query
 
