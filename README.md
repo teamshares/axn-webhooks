@@ -175,12 +175,32 @@ end
 
 ### `verify :standard_webhooks`
 
-The secret is **`whsec_<base64>`** — pass the vendor's value verbatim, prefix included. `id:`,
-`timestamp:` and `signature:` default to the spec's `webhook-*` headers and rarely need overriding.
+Implements [Standard Webhooks](https://www.standardwebhooks.com/) — the cross-vendor spec (Zapier,
+Twilio, Svix and others) for signed webhooks. It's what Codat, Lob and any Svix-backed sender emit,
+and it's the same scheme this gem's own [`sign :standard_webhooks`](#sign-standard_webhooks) sends,
+so the two halves round-trip. Full details in the
+[specification](https://github.com/standard-webhooks/standard-webhooks).
 
-> **Gotcha:** a raw (non-`whsec_`) secret makes the Base64 decode raise, which reads as a verifier
-> crash — **every request 401s**, with no `reason` to distinguish it from a rotated key. If an
-> endpoint rejects 100% of traffic from its first deploy, check the prefix before the key.
+Per that spec the secret is **`whsec_<base64>`** — the prefix is stripped and the rest Base64-decoded
+to the raw HMAC key. Pass the vendor's value verbatim, prefix included. `id:`, `timestamp:` and
+`signature:` default to the spec's `webhook-*` headers and rarely need overriding; `tolerance:`
+defaults to 300 seconds.
+
+> **Gotcha: a raw (non-`whsec_`) secret is not rejected — it fails at request time, two different
+> ways.** Which one you get depends on whether your raw secret happens to be valid Base64:
+>
+> - **Not valid Base64** (most secrets — anything with `-`, `_`, or a length that isn't a multiple
+>   of 4): the decode raises, which reads as a verifier crash. 401, reported to
+>   `Axn.config.on_exception`, no `reason` on the result.
+> - **Valid Base64** (a 32-character hex secret qualifies, and that's a very common shape): it
+>   decodes *silently* to the wrong key. You get a plain `:signature_mismatch` — quiet, **nothing
+>   reported anywhere**, and genuinely indistinguishable from a rotated secret.
+>
+> Both 401 every request. The second is the one that will cost you an afternoon, so: if an endpoint
+> rejects 100% of traffic from its first deploy, check the prefix before you check the key.
+>
+> Outbound is stricter — a literal `sign :standard_webhooks` secret missing the prefix is
+> [rejected at boot](#boot-time-validation), before it can ship a single unverifiable delivery.
 
 ### `verify :basic_auth`
 
@@ -687,8 +707,10 @@ resolver's rows are validated identically at **every** `emit`, but collected int
 
 ### `sign :standard_webhooks`
 
-The default and the symmetric counterpart to a receiver's `verify :standard_webhooks`. The body is
-the Standard Webhooks envelope; `id` and `timestamp` are mirrored into the signed headers:
+The default, and the symmetric counterpart to a receiver's
+[`verify :standard_webhooks`](#verify-standard_webhooks). The body is the
+[Standard Webhooks](https://www.standardwebhooks.com/) envelope; `id` and `timestamp` are mirrored
+into the signed headers:
 
 ```
 POST <subscriber-url>
