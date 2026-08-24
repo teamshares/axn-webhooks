@@ -192,22 +192,22 @@ to the raw HMAC key. Pass the vendor's value verbatim, prefix included. `id:`, `
 `signature:` default to the spec's `webhook-*` headers and rarely need overriding; `tolerance:`
 defaults to 300 seconds.
 
-A **literal** secret missing the prefix is rejected at declaration, so the mistake fails your boot
-rather than your traffic. A **callable** secret can't be — it may read a secret store or an env var
-set after boot — so it's still checked per request, and there the failure is genuinely nasty:
+A secret missing the prefix is rejected, and the check happens as early as it possibly can:
 
-> **Gotcha: a raw (non-`whsec_`) secret resolved at request time fails two different ways**, neither
-> of them obvious. Which one depends on whether the raw value happens to be valid Base64:
->
-> - **Not valid Base64** (anything with `-`, `_`, or a length that isn't a multiple of 4): the decode
->   raises, which reads as a verifier crash. 401, reported to `Axn.config.on_exception`, no `reason`
->   on the result.
-> - **Valid Base64** — a 32-character hex secret qualifies, and that's a very common shape: it
->   decodes *silently* to the wrong key. A plain `:signature_mismatch`, quiet, **nothing reported
->   anywhere**, indistinguishable from a rotated secret.
->
-> Both 401 every request. If an endpoint rejects 100% of traffic from its first deploy, check the
-> prefix before you check the key.
+| Secret form | Checked | On failure |
+| -- | -- | -- |
+| a literal (`"whsec_…"`, or anything else) | at declaration | `ArgumentError` — your boot fails, not your traffic |
+| a callable or `header(…)` resolver | on **every request** | `Axn::Webhooks::Error` — reported to `Axn.config.on_exception`, 401 |
+
+A callable can't be settled at boot (it may read a secret store, or an env var set after boot), so
+it's validated each time it resolves. Either way the error names the value's *shape*, never its
+bytes.
+
+> **Why this is checked so aggressively:** the decode used to coerce with `to_s`, so a secret that
+> resolved to `nil` — an unset env var, or a `header(…)` on an absent header — became an **empty
+> HMAC key**. Anyone who knew the credential was missing could sign with that empty key and verify.
+> A missing secret now fails loudly instead of authenticating strangers, and it can never degrade
+> into a quiet `:signature_mismatch` that reads like a rotated key.
 
 ### `verify :basic_auth`
 

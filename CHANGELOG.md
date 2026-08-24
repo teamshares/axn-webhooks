@@ -50,9 +50,11 @@ history rather than here.
   any need for the `svix` gem), `verify :basic_auth` (owning the full two-legged handshake, including
   the `WWW-Authenticate` challenge that clients like Twilio require), or a custom `verify` block.
   `verify` is mandatory whenever `dispatch` is declared.
-- Every inbound `verify :standard_webhooks` secret that isn't a callable is validated at
-  declaration — including `nil`, which previously reached request time and Base64-decoded to an
-  **empty HMAC key**, verifying any signature computed with it.
+- Every inbound `verify :standard_webhooks` secret is validated as early as it can be: a literal at
+  declaration, a callable or resolver on **every request**. A secret that resolves to `nil` — an
+  unset env var, or a `header(…)` on an absent header — used to be coerced with `to_s` and
+  Base64-decoded into an **empty HMAC key**, so anyone who knew the credential was missing could
+  sign with that key and verify. It now fails loudly instead.
 - A **custom `verify` block's return value is duck-typed on `#ok?`** — any object reporting its own
   verdict (a `Signature::Check`, an `Axn::Result`) is asked for it; any other truthy value means
   verified; `nil`/`false` mean rejected. A literal `whsec_` secret is validated at declaration.

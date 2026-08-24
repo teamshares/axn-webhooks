@@ -11,7 +11,24 @@ module Axn
       module StandardWebhooks
         module_function
 
-        def decode_secret(secret) = Base64.strict_decode64(secret.to_s.delete_prefix("whsec_"))
+        # NOT `secret.to_s` (Codex round-4 finding): coercing here is what turned a nil secret —
+        # an unset ENV var, or a `header(...)` resolver on an absent header — into "", which is
+        # valid Base64 and decodes to an EMPTY HMAC key. That is an authentication bypass, since
+        # anyone who knows the credential is missing can sign with the empty key. Callers must hand
+        # this a String; `secret_key` guards the type, and `require_secret_key!` is the safe entry
+        # point for anything resolved at request time.
+        def decode_secret(secret)
+          raise ArgumentError, "secret must be a String (got #{secret.class})" unless secret.is_a?(String)
+
+          Base64.strict_decode64(secret.delete_prefix("whsec_"))
+        end
+
+        # The raw key for a secret resolved at REQUEST time, raising if it isn't usable. Loud on
+        # purpose: a secret that has gone missing is a misconfiguration worth paging on, and must
+        # never degrade into a quiet :signature_mismatch that reads like a rotated key.
+        def require_secret_key!(secret)
+          secret_key(secret) || raise(Axn::Webhooks::Error, invalid_secret_message("verify :standard_webhooks", secret))
+        end
 
         # The raw HMAC key behind a `whsec_<base64>` secret, or nil if the value isn't one.
         # The single source of truth for "is this a usable Standard Webhooks secret", shared by
@@ -88,7 +105,9 @@ module Axn
 
           # hmac_check (not hmac): returns a Signature::Check so Verify can name the cause.
           Signature.hmac_check(
-            secret: StandardWebhooks.decode_secret(Resolvers.resolve(secret, request)),
+            # Resolve THEN validate. A declaration-time check can't cover this: a callable or
+            # Resolver is resolved fresh per request and can go missing at any point after boot.
+            secret: StandardWebhooks.require_secret_key!(Resolvers.resolve(secret, request)),
             payload:,
             signature: candidates.join(" "),
             digest: :sha256,
