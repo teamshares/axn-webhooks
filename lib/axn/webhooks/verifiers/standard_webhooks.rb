@@ -67,9 +67,17 @@ module Axn
         # and a raw secret that IS valid Base64 decodes silently to the wrong key — a quiet
         # :signature_mismatch, nothing reported anywhere, indistinguishable from a rotated key.
         #
-        # A callable/Resolver secret is deliberately NOT resolved here: it may read a secret store
-        # or an env var set after boot, so its value stays a per-request concern.
-        if secret.is_a?(String) && StandardWebhooks.secret_key(secret).nil?
+        # Exempt CALLABLES (a lambda, or a Resolver like `header("X-Secret")`) — deliberately not
+        # resolved here, since they may read a secret store or an env var set after boot, so their
+        # value stays a per-request concern. Everything ELSE is validated now.
+        #
+        # Keyed on respond_to?(:call), NOT on is_a?(String) (Codex round-3 finding): a `nil` secret
+        # — an unset ENV var being the obvious way to get one — is neither a String nor a callable,
+        # so a String-keyed check waved it through to request time, where `decode_secret` coerced it
+        # with #to_s and Base64-decoded "" into an EMPTY HMAC key. That is an authentication bypass,
+        # not a mismatch: anyone who knows the secret is unset can compute a signature with the empty
+        # key and be verified. Same fail-closed-on-blank stance verify :basic_auth already takes.
+        unless secret.respond_to?(:call) || StandardWebhooks.secret_key(secret)
           raise ArgumentError, StandardWebhooks.invalid_secret_message("verify :standard_webhooks", secret)
         end
 

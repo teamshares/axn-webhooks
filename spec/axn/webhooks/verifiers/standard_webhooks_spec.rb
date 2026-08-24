@@ -117,6 +117,36 @@ RSpec.describe "verify :standard_webhooks strategy" do
       end
     end
 
+    # SECURITY: `secret: nil` (an unset ENV var is the obvious way in) reached request time, where
+    # `decode_secret` coerced it with #to_s and Base64-decoded "" into an EMPTY HMAC key — so anyone
+    # who knew that could forge a signature that verifies. Same fail-closed-on-blank concern
+    # `verify :basic_auth` already handles. Exempt CALLABLES from the boot check, not non-Strings.
+    it "rejects a nil secret rather than HMACing with an empty key" do
+      expect { declare(nil) }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    it "rejects non-String, non-callable literals (Integer, Symbol)" do
+      expect { declare(42) }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+      expect { declare(:a_symbol) }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    it "rejects an empty-String secret" do
+      expect { declare("") }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    # Regression guard for the bypass itself, not just the declaration: a nil secret must never
+    # leave an endpoint that accepts a signature computed with an empty key.
+    it "leaves no endpoint that would verify a signature forged with an empty key" do
+      expect { declare(nil) }.to raise_error(ArgumentError)
+      expect { Axn::Webhooks::Inbound[:v] }.to raise_error(KeyError)
+    end
+
+    # A Resolver (e.g. `header("X-Secret")`) responds to #call, so it stays a request-time concern
+    # exactly like a lambda.
+    it "does not validate a Resolver secret at declaration" do
+      expect { declare(Axn::Webhooks::Resolvers.header("X-Secret")) }.not_to raise_error
+    end
+
     it "accepts a valid literal whsec_ secret" do
       expect { declare("whsec_#{Base64.strict_encode64('k')}") }.not_to raise_error
     end

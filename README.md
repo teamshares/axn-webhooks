@@ -76,7 +76,13 @@ end
 Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })
 ```
 
-The receiver gets a Standard Webhooks envelope, signed, with automatic retries on failure.
+The receiver gets a signed Standard Webhooks envelope.
+
+**Retries need an async adapter.** With an `async :sidekiq` / `async :active_job` default configured
+for axn, each delivery retries itself on a retryable failure, up to `max_attempts`. Without one,
+`emit` falls back to a best-effort inline send that logs a warning and does **not** retry — the first
+retryable failure is treated as exhausted, so a transient receiver outage drops the delivery. See
+[Async posture](DESIGN-NOTES.md#async-posture-auto-vs-explicit).
 
 ---
 

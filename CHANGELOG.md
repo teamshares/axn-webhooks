@@ -50,6 +50,9 @@ history rather than here.
   any need for the `svix` gem), `verify :basic_auth` (owning the full two-legged handshake, including
   the `WWW-Authenticate` challenge that clients like Twilio require), or a custom `verify` block.
   `verify` is mandatory whenever `dispatch` is declared.
+- Every inbound `verify :standard_webhooks` secret that isn't a callable is validated at
+  declaration — including `nil`, which previously reached request time and Base64-decoded to an
+  **empty HMAC key**, verifying any signature computed with it.
 - A **custom `verify` block's return value is duck-typed on `#ok?`** — any object reporting its own
   verdict (a `Signature::Check`, an `Axn::Result`) is asked for it; any other truthy value means
   verified; `nil`/`false` mean rejected. A literal `whsec_` secret is validated at declaration.
@@ -105,9 +108,12 @@ history rather than here.
   `subscribers` resolver, both re-resolved on every `emit`. A row may be a bare URL String or a
   `{ url:, id: }` Hash carrying a subscriber identity that `sign`'s `secret:` and the `headers`
   resolver can key off of.
-- **Credentials stay out of the queue.** `Deliver` carries only a subscriber's *identity*; the signing
-  secret and per-destination `headers` are re-resolved from it on every attempt, never serialized into
-  the job payload for the life of the retry chain.
+- **Separately-resolved credentials stay out of the queue.** `Deliver` carries only a subscriber's
+  *identity*; the signing secret and per-destination `headers` are re-resolved from it on every
+  attempt, never serialized into the job payload for the life of the retry chain. This covers those
+  resolved values only — `Deliver` does declare `expects :url`, so a credential a receiver embeds in
+  its own webhook URL (a secret path segment or signed query token) *is* persisted in the queue
+  backend for that same lifetime.
 - **Target policy** — `allowed_hosts` (exact or `*.` wildcard, case-insensitive) and `allow_url` (the
   parsed `URI`, for real IP-range logic). A static `to:` is checked at boot; a resolver's rows are
   checked at every `emit` and collected into `rejected`/`rejected_count` rather than failing the fan-out.
