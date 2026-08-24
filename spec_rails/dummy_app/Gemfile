@@ -5,7 +5,8 @@ source "https://rubygems.org"
 # The gem under test — pulls in its own axn dependency and any Railtie/Engine it defines.
 gem "axn-webhooks", path: "../../"
 
-gem "rails", ">= 7.1"
+# 7.2 is the real floor: `axn` requires activesupport >= 7.2, so Rails 7.1 can never resolve.
+gem "rails", ">= 7.2"
 gem "sqlite3", "~> 2.0"
 
 group :development, :test do
