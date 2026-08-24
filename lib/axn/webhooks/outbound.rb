@@ -65,10 +65,9 @@ module Axn
     # this call only (never merges) — the event must still be declared, since it supplies the wire
     # `type` and `vendor`. `async: true` requires a configured adapter and raises without one;
     # `async: false` forces the inline path. Omitted means today's `:auto`.
-    # rubocop:disable Naming/MethodParameterName
+    # rubocop:disable-next Naming/MethodParameterName
     def self.emit(event, data: {}, to: nil, async: nil)
       Outbound::Emit.call!(event:, data:, to:, async:)
     end
-    # rubocop:enable Naming/MethodParameterName
   end
 end
