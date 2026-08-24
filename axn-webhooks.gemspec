@@ -30,7 +30,7 @@ Gem::Specification.new do |spec|
   # AGENTS-consuming.md ships if you write one (agent-facing usage guide, read via `bundle show`);
   # `git ls-files` just omits it when absent, so it's a harmless no-op until then.
   spec.files = IO.popen(
-    %w[git ls-files -z -- lib README.md CHANGELOG.md LICENSE.txt AGENTS-consuming.md],
+    %w[git ls-files -z -- lib README.md DESIGN-NOTES.md CHANGELOG.md LICENSE.txt AGENTS-consuming.md],
     chdir: __dir__, err: IO::NULL,
   ) { |ls| ls.readlines("\x0", chomp: true) }
   spec.bindir = "exe"

@@ -1,118 +1,99 @@
 # axn-webhooks
 
-Webhook handling for [axn](https://github.com/teamshares/axn), both directions, on one signature primitive:
+Webhook handling for [axn](https://github.com/teamshares/axn), both directions, on one signature
+primitive. Works in or out of Rails.
 
-* **Inbound** — verify a vendor's signature, dispatch the event to a handler action, and acknowledge — declared per vendor, and runnable in or out of Rails.
-* **Outbound** — declare your own events and subscribers, and emit signed, self-retrying deliveries — declared once per sending app.
+* **[Inbound](#inbound)** — verify a vendor's signature, dispatch the event to a handler action, and
+  acknowledge. Declared per vendor; mounts as a Rack app, no controller needed.
+* **[Outbound](#outbound)** — declare your own events and subscribers, and emit signed,
+  self-retrying deliveries. Declared once per sending app.
+
+**Contents:** [Installation](#installation) · [Quick start](#quick-start) · [Inbound](#inbound) ·
+[Outbound](#outbound) · [Signature primitive](#signature-primitive) · [Testing](#testing)
+
+The *why* behind the surprising parts — and the traps worth naming — lives in
+[DESIGN-NOTES.md](DESIGN-NOTES.md).
 
 ## Installation
-
-Add to your Gemfile:
 
 ```ruby
 gem "axn-webhooks"
 ```
 
-## Signature primitive
+Requires Ruby 3.2.1+ and Rack 3. Under Rails, `axn`'s own ActiveSupport 7.2 floor makes **Rails 7.2+**
+the effective minimum.
 
-`Axn::Webhooks::Signature` is a standalone, Rails-agnostic HMAC verifier:
+## Quick start
 
-```ruby
-Axn::Webhooks::Signature.hmac(
-  secret:    ENV["WEBHOOK_SECRET"],
-  payload:   request.raw_body,                 # exact bytes the vendor signed
-  signature: request.header("X-Signature"),
-  digest:    :sha256,                           # :sha256 (default) | :sha1 | :md5
-  encoding:  :hex,                              # :hex (default) | :base64 | :base64_urlsafe
-  prefix:    nil,                               # e.g. "v0=" for Slack
-  timestamp: request.header("X-Timestamp"),     # optional replay guard
-  tolerance: 300,
-)
-```
+### Receiving a webhook
 
-It always uses a constant-time comparison and supports multi-signature (key-rotation) headers.
-
-`hmac` answers *whether* a request verified. `hmac_check` answers *why* it didn't — same check,
-returning an `Axn::Webhooks::Signature::Check` instead of a boolean (`hmac` is literally
-`hmac_check(...).ok?`, so there is only ever one replay window and one comparison):
+Declare the endpoint once (e.g. `config/initializers/webhooks.rb`):
 
 ```ruby
-check = Axn::Webhooks::Signature.hmac_check(secret:, payload:, signature:, timestamp:, tolerance: 300)
-check.ok?            # => false
-check.reason         # => :replay_window
-check.skew           # => 10_000  (seconds, signed: positive = in the past; only for :replay_window)
-check.suggested_unit # => nil     (a Symbol only when a pinned `unit:` is what missed the window)
-```
-
-`mismatched_unit` answers that last question on its own — the scale that *would* have put a
-timestamp inside the window, or `nil` when the configured `unit:` already fits, the timestamp is
-missing/unparseable, or no scale rescues it. Side-effect-free, so a caller decides what to do with it
-(`hmac_check` uses it to fill `suggested_unit`):
-
-```ruby
-Axn::Webhooks::Signature.mismatched_unit(timestamp:, tolerance: 300, unit: :seconds)  # => :ms
-```
-
-### Replay protection
-
-Pass `timestamp:` and `tolerance:` to guard against replayed requests — `hmac` returns `false` if
-the timestamp is more than `tolerance` seconds from now, in either direction. Epoch seconds,
-milliseconds and microseconds are all handled without configuration:
-
-```ruby
-Axn::Webhooks::Signature.hmac(
-  secret:, payload:, signature:,
-  timestamp: request.header("X-Timestamp"),  # epoch s, ms or µs — inferred per timestamp
-  tolerance: 300,
-)
-```
-
-`unit:` defaults to `:auto`, which reads the scale off each timestamp's magnitude. The three scales
-sit 1000× apart and their plausible-date ranges don't overlap — a 13-digit value read as seconds is
-the year 58,601 — so inference is unambiguous for anything a vendor could legitimately send. It also
-can't widen what's accepted: a misread lands ~56 years off, which no realistic tolerance admits.
-
-This matters for vendors that send **more than one** unit. Lob delivers epoch seconds through Svix
-and epoch milliseconds from its dashboard's debug send; no single fixed unit is correct for it.
-
-Pass `unit:` explicitly to pin a vendor to one scale, so a change in what it sends fails loudly
-instead of being absorbed:
-
-```ruby
-Axn::Webhooks::Signature.hmac(
-  secret:, payload:, signature:,
-  timestamp: request.header("X-Timestamp"),
-  tolerance: 300,
-  unit:      :ms,   # :auto (default) | :seconds | :ms | :milliseconds | :microseconds
-)
-```
-
-`unit:` only describes the resolution of the incoming `timestamp:` — `tolerance:`/`within:` is
-always in seconds, regardless of `unit:`. A `Time` timestamp ignores `unit:` entirely (it's already
-unambiguous). An unrecognized `unit:` raises `ArgumentError` immediately, even when `timestamp:`
-happens to be a `Time` — the unit is validated before the timestamp is inspected.
-
-The same `unit:` option is available on `verify :hmac`'s `replay:` hash, and is equally optional:
-
-```ruby
-Axn::Webhooks.inbound :lob do
-  verify :hmac, secret: ENV.fetch("LOB_WEBHOOK_SECRET"), signature: header("X-Lob-Signature"),
-                replay: { timestamp: header("X-Lob-Signature-Timestamp"), within: 300 }
+Axn::Webhooks.inbound :codat do
+  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
+  dispatch on: ->(e) { e["eventType"] },
+           to: { "connection.updated" => "Actions::Codat::ConnectionUpdated" }
 end
 ```
 
-## Inbound endpoints
-
-Declare each vendor webhook in one place (e.g. a Rails initializer). The symbol you pass to
-`inbound` is the vendor's name — pick whatever you'll reference it by:
+Mount it:
 
 ```ruby
-# Codat — Standard Webhooks (Svix) preset
+# config/routes.rb
+mount Axn::Webhooks::Inbound[:codat], at: "/webhooks/codat"
+```
+
+Write the handler as an ordinary Axn:
+
+```ruby
+module Actions
+  module Codat
+    class ConnectionUpdated
+      include Axn::Webhooks::Handler   # includes Axn; makes `retry_later!` a quiet failure
+
+      expects :event
+
+      def call
+        Connection.find_by(external_id: event.dig("data", "connectionId"))&.refresh!
+      end
+    end
+  end
+end
+```
+
+That's the whole loop: a signed POST is verified, parsed, routed, and acked with a bare 200.
+
+### Sending a webhook
+
+```ruby
+Axn::Webhooks.outbound do
+  sign :standard_webhooks, secret: -> { ENV.fetch("WEBHOOK_SIGNING_SECRET") }  # "whsec_<base64>"
+
+  event :lead_signed, to: ["https://partner.example/hooks/leads"]
+end
+
+Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })
+```
+
+The receiver gets a Standard Webhooks envelope, signed, with automatic retries on failure.
+
+---
+
+# Inbound
+
+## Declaring an endpoint
+
+`Axn::Webhooks.inbound(:name) { … }` registers an endpoint; `Axn::Webhooks::Inbound[:name]` looks it
+up. The symbol is the vendor's name — whatever you'll reference it by.
+
+```ruby
+# Standard Webhooks (Svix) preset
 Axn::Webhooks.inbound :codat do
   verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
 end
 
-# Merge (merge.dev) — parametric HMAC
+# Parametric HMAC
 Axn::Webhooks.inbound :merge_dev do
   verify :hmac,
     secret:    ENV.fetch("MERGE_WEBHOOK_SIGNATURE_KEY"),
@@ -120,182 +101,100 @@ Axn::Webhooks.inbound :merge_dev do
     encoding:  :base64_urlsafe
 end
 
-# Twilio — custom verifier delegating to the vendor SDK. Twilio signs the URL, so the trailing
-# slash a mount adds has to come off first — see "URL-signing verifiers" below.
+# HTTP Basic auth rather than a signature
+Axn::Webhooks.inbound :legacy_vendor do
+  verify :basic_auth,
+    username: -> { ENV.fetch("WEBHOOKS_AUTH_USERNAME") },
+    password: -> { ENV.fetch("WEBHOOKS_AUTH_PASSWORD") }
+end
+
+# Custom verifier delegating to a vendor SDK
 Axn::Webhooks.inbound :twilio do
   verify do |req|
-    path, query = req.url.split("?", 2)
+    path, query = req.url.split("?", 2)   # see URL-signing verifiers in DESIGN-NOTES.md
 
     Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
       .validate([path.chomp("/"), query].compact.join("?"), req.params, req.header("X-Twilio-Signature"))
   end
 end
-
-# A vendor gated by HTTP Basic auth rather than a signature
-Axn::Webhooks.inbound :legacy_vendor do
-  verify :basic_auth,
-    username: -> { ENV.fetch("WEBHOOKS_AUTH_USERNAME") },
-    password: -> { ENV.fetch("WEBHOOKS_AUTH_PASSWORD") },
-    realm:    "Webhook"   # optional; appears in the WWW-Authenticate challenge
-end
 ```
 
-#### A note on `verify :basic_auth`
+Blocks are evaluated with `instance_exec` against an internal DSL, so `self` is **not** the
+surrounding object. `ENV`, constants and local variables are fine; the surrounding object's helper
+methods and ivars are not.
 
-Basic auth is a two-legged protocol, and the second leg is easy to lose. A client that doesn't
-authenticate preemptively — **Twilio is one** — sends its first request with no `Authorization`
-header, expects a `401` carrying `WWW-Authenticate: Basic realm="…"`, and only then repeats the
-request with credentials. Return a bare 401 and that retry never comes: every webhook is dropped,
-and it reads as an ordinary stream of auth failures rather than an outage.
+### DSL reference
 
-`verify :basic_auth` owns that challenge for you, along with constant-time comparison and
-fail-closed behaviour on a missing or blank credential (comparing against `""` would authenticate
-`Authorization: Basic Og==` for anyone, and CI and secret managers can both set an empty string).
-If you hand-roll Basic auth in a custom `verify` block instead, declare the challenge yourself:
+| Declaration | Purpose |
+| -- | -- |
+| `verify :strategy, **opts` / `verify { \|req\| … }` | How to authenticate the request. Required whenever `dispatch` is declared. |
+| `dispatch …` | Route the parsed event to a handler. See [Dispatching](#dispatching-to-a-handler). |
+| `respond { \|result\| … }` | Render a body from the handler's result. See [Responding](#responding). |
+| `static_respond { … }` | Render a fixed body that doesn't read the result. |
+| `challenge resolver, if: nil` | Answer a vendor's `GET` verification handshake. |
+| `challenge_required { \|req\| … }` | Mark a request as the bare first leg of a challenge-response auth handshake. |
+| `unauthorized_headers "H" => "v"` | Extra headers on the 401 (e.g. `WWW-Authenticate`). |
+| `endpoint(:child) { … }` | [Nested endpoints](#nested-endpoints) sharing this block's declarations. |
 
-```ruby
-Axn::Webhooks.inbound :vendor do
-  verify { |req| my_own_check(req) }
-  unauthorized_headers "WWW-Authenticate" => %(Basic realm="Webhook")
-end
-```
+Inside a block, `header(name)`, `raw_body`, `params` and `url` build deferred lookups against the
+request, and `async(target, **)` / `sync(target, **)` build dispatch-map entries.
 
-That bare first leg is **not** a verification failure — there is nothing to verify. It's answered
-with the challenge before `verify` runs at all, so it records nothing: without that, the
-highest-volume outcome on a healthy Basic-auth endpoint would be a recorded failure, and a
-cross-vendor monitor on verify failures couldn't tell a stream of them from an outage. The request
-still gets the same `401` and still can never reach a handler.
+## Verifying
 
-`verify :basic_auth` knows which requests those are. A custom block doesn't, so say so — the same
-way you declare its challenge, and with the same precedence (a declaration wins):
-
-```ruby
-Axn::Webhooks.inbound :vendor do
-  verify { |req| my_own_check(req) }
-  unauthorized_headers "WWW-Authenticate" => %(Basic realm="Webhook")
-  challenge_required { |req| req.header("Authorization").to_s.strip.empty? }
-end
-```
-
-The two go together: an endpoint that requires a challenge but has none to send raises at boot —
-whether the predicate came from a `challenge_required` declaration or from a custom verifier's own
-`#challenge_required?` — since challenging a client with nothing drops every request forever and,
-now that answering the challenge skips `verify`, records nothing about it.
-
-`Endpoint#challenge_required?(request)` is public for callers who drive `#verify`/`#handle`
-themselves rather than mounting the endpoint: those two stay honest about a bare request (it does
-not verify), so answer the challenge before asking them.
-
-Prefer signature verification where the vendor offers it: it's one request rather than two, it
-authenticates the *payload* and not merely the caller, and it needs no challenge — Twilio
-[recommends it over Basic auth](https://www.twilio.com/docs/usage/webhooks/webhooks-security) for
-exactly these reasons.
-
-Verify a request (dispatch/respond and HTTP mounting land in later phases):
-
-```ruby
-result = Axn::Webhooks::Inbound[:codat].verify(request)  # => Axn::Result
-result.ok?  # signature valid?
-```
-
-#### URL-signing verifiers
-
-Some vendors — Twilio most notably — sign the **request URL** rather than the body, and compare
-against the URL as registered in their dashboard. `Request#url` is rebuilt from the Rack env, and two
-properties of that rebuild will bite.
-
-**A mount whose path is the whole route adds a trailing slash.** Rack puts the mount point in
-`SCRIPT_NAME` and leaves `PATH_INFO` as `"/"` for a request matching it exactly:
-
-```ruby
-mount Axn::Webhooks::Inbound[:twilio], at: "/webhooks/twilio"
-
-# vendor POSTs to https://example.com/webhooks/twilio
-req.url   # => "https://example.com/webhooks/twilio/"             <- note the slash
-# ...and with a query string:
-req.url   # => "https://example.com/webhooks/twilio/?callId=42"
-```
-
-The vendor signed the URL *without* that slash, so passing `req.url` straight to a URL-signing
-validator rejects every request — a valid signature over a URL that doesn't match, which reads in the
-logs exactly like a rotated secret. Split on the query, then chomp the path:
-
-```ruby
-path, query = req.url.split("?", 2)
-signed_url = [path.chomp("/"), query].compact.join("?")
-```
-
-Chomping the whole URL is **not** equivalent: it strips nothing when a query string is present, which
-is precisely the case a status-callback URL (`…/update?callId=N`) exercises. Matching `/` before
-`?`-or-end across the whole URL isn't either — the leftmost match lands in the *query* for something
-like `?redirect=a/`. A mount at a prefix (`at: "/webhooks"`, vendor posts `/webhooks/twilio`) leaves a
-non-`"/"` `PATH_INFO` and so has no slash to strip, and the form above is a no-op there — so it is
-safe to apply unconditionally rather than per-route, **as long as the URL registered with the vendor
-doesn't itself end in `/`**. It's indistinguishable from the mount artifact at this layer: both
-produce a `req.url` ending in `/`, but one should be chomped and the other must not be. Register the
-webhook URL without a trailing slash (the natural spelling of an `at:` mount path) and this doesn't
-come up.
-
-**`url` reflects the scheme and host the proxy reported.** It comes from `Rack::Request#url`, so a CDN
-or load balancer added in front, a change in `X-Forwarded-Proto` handling, or a new domain changes
-what actually gets verified. The only symptom is `:signature_mismatch` on every request — again
-indistinguishable from a rotated secret, so it is worth naming in whatever alerts on `reason`.
-
-Nothing about this applies to body-signing verifiers (`:hmac`, `:standard_webhooks`), which never
-read `url`.
-
-### Why verification failed
-
-A rejected request is always a bare 401 on the wire, but the *cause* is on the result and on the
-call's log/metric line as a bounded `reason` dimension — so verify failures can be grouped and
-alerted on separately rather than all reading as "signature mismatch":
-
-```ruby
-result.reason  # => :replay_window
-result.skew    # => 10_000  (seconds, signed: positive = the timestamp is in the past)
-result.error   # => "Webhook verification failed: replay window exceeded (timestamp skew 10000s)"
-```
-
-| `reason` | What it means | Usually caused by |
+| Strategy | For | Key options |
 | -- | -- | -- |
-| `:replay_window` | Validly-formed timestamp, outside the window. Carries `skew`. | A genuine replay or real clock drift — since `unit:` [infers the scale](#replay-protection), a wrong unit can only cause this if one was explicitly pinned |
-| `:replay_timestamp_invalid` | The timestamp is absent or unparseable | A typo'd `replay: { timestamp: header(…) }` name, or a vendor that stopped sending it |
-| `:signature_missing` | No signature header at all | A typo'd `signature:` header name, or an unsigned sender |
-| `:signature_mismatch` | The HMAC genuinely didn't match | Wrong/rotated secret, or the wrong `signing_string` |
-| `:credentials_missing` | `verify :basic_auth` only. An `Authorization` header that isn't a Basic credential. The bare first leg of the handshake is [challenged before verification](#a-note-on-verify-basic_auth) and never reaches here. | A client that meant to authenticate and used the wrong scheme, or a scanner |
-| `:credentials_mismatch` | `verify :basic_auth` only. Credentials were offered and rejected. | Wrong/rotated `username:`/`password:`, or a scanner guessing |
+| `verify :standard_webhooks` | Standard Webhooks / Svix (Codat, Lob, …) | `secret:`, `tolerance:` (300) |
+| `verify :hmac` | Anything signing the body with an HMAC | `secret:`, `signature:`, `signing_string:`, `digest:`, `encoding:`, `prefix:`, `replay:` |
+| `verify :basic_auth` | Vendors gated by HTTP Basic auth | `username:`, `password:`, `realm:` (`"Webhook"`) |
+| `verify { \|req\| … }` | Anything else (vendor SDKs, URL signing) | — |
 
-A `:replay_window` rejection additionally carries **`suggested_unit`** — the scale that *would* have
-put the timestamp inside the window (`Signature.mismatched_unit`), stamped as its own dimension:
+Every `secret:`/`username:`/`password:` accepts a plain value or a zero-arity callable, re-resolved
+per request so a rotation needs no reboot.
+
+### `verify :hmac`
+
+| Option | Default | Notes |
+| -- | -- | -- |
+| `secret:` | required | Plain value or callable. |
+| `signature:` | required | Usually `header("X-…-Signature")`. There is no universal header name. |
+| `signing_string:` | `:raw_body` | `:raw_body`, or a lambda building the exact signed string. |
+| `digest:` | `:sha256` | `:sha256` / `:sha1` / `:md5` |
+| `encoding:` | `:hex` | `:hex` / `:base64` / `:base64_urlsafe` |
+| `prefix:` | `nil` | Stripped before comparison, e.g. `"v0="` for Slack. |
+| `replay:` | `nil` | `{ timestamp:, within:, unit: }` — see [Replay protection](#replay-protection). |
 
 ```ruby
-result.reason         # => :replay_window
-result.suggested_unit # => :ms     -- nil for a genuine replay
-result.error          # => "…: replay window exceeded (timestamp skew -1784947346919s) — would fit as unit: :ms"
+Axn::Webhooks.inbound :slack do
+  verify :hmac, secret:         ENV.fetch("SLACK_SIGNING_SECRET"),
+                signature:      header("X-Slack-Signature"),
+                prefix:         "v0=",
+                signing_string: ->(r) { "v0:#{r.header('X-Slack-Request-Timestamp')}:#{r.raw_body}" },
+                replay:         { timestamp: header("X-Slack-Request-Timestamp"), within: 300 }
+end
 ```
 
-Since `unit:` [infers the scale per timestamp](#replay-protection) by default, this is only ever
-non-nil when a `unit:` was explicitly pinned and doesn't fit. Its **presence** splits the
-misconfigured half of `:replay_window` from the genuine half — a group-by that says "this endpoint's
-pinned `unit:` is wrong" rather than "someone is replaying us" — and its **value** names the fix.
+### `verify :standard_webhooks`
 
-The built-in `:hmac` and `:standard_webhooks` strategies report all four reasons above. A **custom `verify` block**
-keeps the documented `->(request) { Boolean }` contract — a falsey return is reported as
-`:signature_mismatch`. To name its own cause, a custom block may return a
-`Axn::Webhooks::Signature::Check` (e.g. by delegating to `Signature.hmac_check`) instead of a boolean.
+The secret is **`whsec_<base64>`** — pass the vendor's value verbatim, prefix included. `id:`,
+`timestamp:` and `signature:` default to the spec's `webhook-*` headers and rarely need overriding.
 
-`Signature` exports the ready-made verdicts, so a custom block rarely has to construct a `Check`:
-`OK`, `MISMATCH`, `SIGNATURE_MISSING`, `CREDENTIALS_MISSING`, `CREDENTIALS_MISMATCH`. Returning
-`SIGNATURE_MISSING` rather than `MISMATCH` when the header is absent earns its one extra line on a
-guessable public path — it keeps ordinary unsigned scanner traffic out of `:signature_mismatch`,
-which is the reason actually worth alerting on.
+> **Gotcha:** a raw (non-`whsec_`) secret makes the Base64 decode raise, which reads as a verifier
+> crash — **every request 401s**, with no `reason` to distinguish it from a rotated key. If an
+> endpoint rejects 100% of traffic from its first deploy, check the prefix before the key.
 
-**Don't return an `Axn::Result` from a `verify` block.** In an axn-consuming app the instinct is to
-put the check in an action, but the contract above is read as
-`check.is_a?(Signature::Check) ? check.ok? : !!check` — and an `Axn::Result` is neither a `Check` nor
-a boolean, and is **truthy even when `ok?` is false**. A verifier that returns one therefore reports
-every rejected request as verified and dispatches it, with no verify failure recorded anywhere. If the
-logic belongs in an action, call it from the block and translate:
+### `verify :basic_auth`
+
+Handles the full two-legged handshake for you, including the `WWW-Authenticate` challenge that
+clients like Twilio require before they will send credentials at all — see
+[Basic auth is two-legged](DESIGN-NOTES.md#basic-auth-is-two-legged) for why that matters and what a custom block
+has to do instead. Prefer signature verification wherever the vendor offers it.
+
+### Custom `verify` blocks
+
+The contract is `->(request) { Boolean }`. To name your own failure cause, return an
+`Axn::Webhooks::Signature::Check` instead — `Signature` exports ready-made verdicts (`OK`,
+`MISMATCH`, `SIGNATURE_MISSING`, `CREDENTIALS_MISSING`, `CREDENTIALS_MISMATCH`), so you rarely have
+to build one:
 
 ```ruby
 verify do |req|
@@ -303,236 +202,263 @@ verify do |req|
 end
 ```
 
-Usually it doesn't need to be an action at all: `Verify` is already the Axn boundary for this stage —
-it owns the `expects`/`exposes` contract, the `sensitive:` redaction of the verifier, the `reason`
-dimension, and the exception report — which is why both built-in strategies are a plain class and a
-lambda rather than actions.
+> **Gotcha:** never return an `Axn::Result` from a `verify` block — it is truthy even when `ok?` is
+> false, so every rejected request would verify and dispatch. See
+> [Don't return an Axn::Result](DESIGN-NOTES.md#dont-return-an-axnresult-from-a-verify-block).
 
-### The request object
+### Why verification failed
 
-Verifiers, `parse:`, and `challenge` blocks all receive an `Axn::Webhooks::Request` — a
-Rails-agnostic view of the inbound request, so the same endpoint works behind a Rack mount, a
-controller, or a plain test constructor:
-
-| | |
-|---|---|
-| `raw_body` | the exact bytes the vendor signed (frozen; never re-encoded) |
-| `header(name)` | case-insensitive header lookup |
-| `params` | the request's **primary** param source (see below) |
-| `url` | full URL including scheme, host, mount prefix, and query string |
-| `http_method` | upcased (`"POST"`, `"GET"`, …) |
-
-`params` is one source, never a query+form merge — `url` already carries the query string, and
-merging both would double-count query params for URL-signing verifiers (Twilio's
-`validate(req.url, req.params, sig)` HMACs it once via the url already):
-
-- **POST with a form body** — `application/x-www-form-urlencoded` (Twilio) or
-  `multipart/form-data` (Dropbox Sign, which posts the whole event in a single `json` field) →
-  the form fields. A malformed multipart body yields `{}` rather than raising, so an unverified
-  sender can't crash the pipeline ahead of `verify`.
-- **Everything else** — JSON POST, and any GET/HEAD (the Nylas/Meta challenge handshake) → the
-  query string.
-
-`inspect`/`pp` redact `raw_body` and headers, since webhook payloads routinely carry bank
-account numbers, credentials, and addresses that must not reach logs or exception reports.
-
-### Dispatch to a handler
-
-Add `dispatch` to route the (verified, parsed) event to a handler Axn. The body is parsed as
-JSON by default (string keys) — pass `parse:` for other bodies. Handlers receive the whole
-event as `event:`, or scalar args via a `with:` extractor (`with: :payload` is the rename-only
-shorthand: the whole event, under that kwarg name instead of `event:`). A handler target may be a class-name
-**string** or the **class itself** (`"Actions::Codat::ConnectionUpdated"` or
-`Actions::Codat::ConnectionUpdated`) — both resolve the constant lazily at request time, so either
-form stays reload-safe under Rails/Zeitwerk. Strings are the safe default when declaring endpoints in
-an initializer, since they never force the handler to be autoloadable at boot.
+A rejection is always a bare 401 on the wire, but the cause is on the result and stamped as a
+bounded `reason` metrics dimension, so failures can be grouped and alerted on separately:
 
 ```ruby
-Axn::Webhooks.inbound :codat do
-  verify :standard_webhooks, secret: ENV.fetch("CODAT_WEBHOOK_SECRET")
-  dispatch on: ->(e) { e["eventType"] },
-           to: { "connection.updated" => "Actions::Codat::ConnectionUpdated" },
-           otherwise: :ack        # unknown-but-expected events: log + 2xx (omit to raise loudly)
+result = Axn::Webhooks::Inbound[:codat].verify(request)
+result.reason  # => :replay_window
+result.skew    # => 10_000  (seconds, signed: positive = the timestamp is in the past)
+result.error   # => "Webhook verification failed: replay window exceeded (timestamp skew 10000s)"
+```
+
+| `reason` | What it means | Usually caused by |
+| -- | -- | -- |
+| `:replay_window` | Valid timestamp, outside the window. Carries `skew`. | A genuine replay or real clock drift |
+| `:replay_timestamp_invalid` | Timestamp absent or unparseable | A typo'd `replay: { timestamp: … }`, or a vendor that stopped sending it |
+| `:signature_missing` | No signature header at all | A typo'd `signature:` header name, or an unsigned sender |
+| `:signature_mismatch` | The HMAC genuinely didn't match | Wrong/rotated secret, or the wrong `signing_string` |
+| `:credentials_missing` | (`:basic_auth`) An `Authorization` header that isn't a Basic credential | A client using the wrong scheme, or a scanner |
+| `:credentials_mismatch` | (`:basic_auth`) Credentials offered and rejected | Wrong/rotated credentials, or a scanner guessing |
+
+A `:replay_window` rejection also carries **`suggested_unit`** — the scale that *would* have fit
+(`nil` for a genuine replay). Since `unit:` [infers the scale](#replay-protection) by default, it is
+only ever set when a `unit:` was explicitly pinned and is wrong, which cleanly splits misconfiguration
+from attack.
+
+## Mounting
+
+An endpoint is itself a Rack app.
+
+```ruby
+# config/routes.rb (Rails)
+Rails.application.routes.draw do
+  mount Axn::Webhooks::Inbound[:codat], at: "/webhooks/codat"
 end
+```
 
-# One endpoint, one handler; form-encoded body. See "URL-signing verifiers" below for why the
-# URL is normalized before validation.
-Axn::Webhooks.inbound :twilio do
-  verify do |req|
-    path, query = req.url.split("?", 2)
+```ruby
+# config.ru (no Rails)
+require "axn-webhooks"
+map("/webhooks/codat") { run Axn::Webhooks::Inbound[:codat] }
+```
 
-    Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
-      .validate([path.chomp("/"), query].compact.join("?"), req.params, req.header("X-Twilio-Signature"))
-  end
-  dispatch to: "Actions::Twilio::HandleSms", parse: ->(req) { req.params }
-end
+The mount owns the whole path and every verb: `POST` runs verify → dispatch → respond; `GET` runs a
+declared `challenge`, or 405s; anything else is a 405 — including `HEAD` on a bare `Rack::Builder`
+mount with no `Rack::Head` upstream. (Rails inserts `Rack::Head`, so `HEAD` becomes `GET` there.)
 
+Or drive it yourself from a controller — `#verify`, `#handle` and `#to_response` all take an
+`Axn::Webhooks::Request`.
+
+## Dispatching to a handler
+
+`dispatch` routes the verified, parsed event to a handler Axn.
+
+| Option | Default | Notes |
+| -- | -- | -- |
+| `to:` | — | A handler, a map, or a namespace. See [Routing forms](#routing-forms). |
+| `on:` | `nil` | `->(event) { key }` — makes `to:` a map or namespace. |
+| `otherwise:` | `nil` | `:ack` or a callable for unmatched keys. Omit to raise loudly. |
+| `via:` | `nil` | Custom key → constant-name transform (namespace routing only). |
+| `parse:` | `:json` | `:json`, or `->(request) { … }` for other bodies. |
+| `mode:` | `:auto` | `:auto` / `:async` / `:sync`. See [Sync vs async](#sync-vs-async). |
+| `unparseable_status:` | global | Per-endpoint override of [`unparseable_status`](#unparseable-bodies). |
+
+Handler targets may be a class-name **String** or the **class itself** — both resolve the constant
+lazily per request, so either stays reload-safe under Zeitwerk. Strings are the safe default in an
+initializer, since they never force the handler to be autoloadable at boot.
+
+```ruby
 result = Axn::Webhooks::Inbound[:codat].handle(request)  # verify + dispatch => Axn::Result
 result.handler_result  # the handler's own Axn::Result (nil on ack / failure)
 ```
 
-A missing handler class or an unmatched event with no `otherwise:` is reported to your
+A missing handler class, or an unmatched event with no `otherwise:`, is reported to
 `Axn.config.on_exception` and returned as a failed result — never an unhandled exception.
-Handlers run synchronously or asynchronously depending on `mode:` — see [Async dispatch](#async-dispatch) below.
 
-### Respond with a custom body
+### Routing forms
 
-By default a successful request gets a bare 2xx ack — most vendors want nothing else. Add
-`respond` when the body itself depends on what the handler computed — an instruction body like
-TwiML, or a JSON instruction body. The block receives the handler's own `Axn::Result` and runs
-with `ack`/`text`/`xml`/`json` available as bare calls:
+| Declaration | Resolves to |
+| -- | -- |
+| `to: "Handler"` (no `on:`) | that one handler, for every event |
+| `on: ->(e) { … }, to: { key => target }` | the target the key maps to — an explicit map |
+| `on: ->(e) { … }, to: "Namespace"` | `Namespace::<KeyCamelized>` — by convention, no map to maintain |
+
+A String `to:` means different things with and without `on:`: alone it's the handler, with `on:` it's
+the **namespace** keys resolve under. The convention splits the key on `.` and `_` and capitalizes
+each part (`"connection.updated"` → `Actions::Codat::ConnectionUpdated`); `via:` replaces that
+transform:
 
 ```ruby
-# Twilio call-control: the handler computes TwiML; respond renders it.
+dispatch on: ->(e) { e["eventType"] },
+         to:  "Actions::Codat",
+         via: ->(key) { "#{key.split('.').map(&:capitalize).join}Handler" }
+```
+
+Namespace routing has no map to miss, so `otherwise:` doesn't apply — an unknown key is a
+constant-resolution failure at request time.
+
+### Handler arguments (`with:`)
+
+By default a handler receives the whole parsed event as `event:`. To change that, use the
+**map-entry Hash** form, where `with:` is a Symbol (rename-only) or a callable returning the kwargs:
+
+```ruby
+dispatch on: ->(e) { e["type"] },
+         to: {
+           # rename only — handler declares `expects :payload`
+           "interaction"  => { call: "Actions::Slack::HandleInteraction", with: :payload },
+           # project to scalars — handler declares `expects :lead_id, :status`
+           "lead.updated" => { call: "Actions::Leads::Update", with: ->(e) { { lead_id: e["id"], status: e["status"] } } },
+         }
+```
+
+`with:` lives on the entry, not on `dispatch` — `dispatch to: "H", with: :payload` raises
+`ArgumentError: unknown keyword: :with`. The `async(…)`/`sync(…)` helpers build the same Hash and
+pass `with:` through, so `async("H", with: :payload)` composes.
+
+### `otherwise:`
+
+`:ack` logs the unmatched key and returns a 2xx. A **callable** is invoked with the event first (its
+return value is ignored) and then acks — the seam for alerting without failing the request:
+
+```ruby
+dispatch on: ->(e) { e["type"] },
+         to: { "lead.updated" => "Actions::Leads::Update" },
+         otherwise: ->(event) { Honeybadger.notify("unhandled webhook", context: { type: event["type"] }) }
+```
+
+## Responding
+
+By default a successful request gets a bare 2xx ack — most vendors want nothing else.
+
+**`respond`** renders a body from what the handler computed. The block receives the handler's
+`Axn::Result` and runs with `ack`/`text`/`xml`/`json` available as bare calls:
+
+```ruby
 Axn::Webhooks.inbound :twilio do
-  verify do |req|
-    path, query = req.url.split("?", 2)
-
-    Twilio::Security::RequestValidator.new(ENV.fetch("TWILIO_AUTH_TOKEN"))
-      .validate([path.chomp("/"), query].compact.join("?"), req.params, req.header("X-Twilio-Signature"))
-  end
-  dispatch to: "Actions::Twilio::HandleCall", parse: ->(req) { req.params }
-  respond { |result| xml(result.twiml) }   # handler exposes :twiml
-end
-
-# JSON instruction body: pass a Hash/Array (JSON-encoded) or a pre-serialized String.
-Axn::Webhooks.inbound :slack do
   verify { |req| … }
-  dispatch to: "Actions::Slack::HandleInteraction"
-  respond { |result| json(result.response_action, status: 200) }   # handler exposes :response_action
+  dispatch to: "Actions::Twilio::HandleCall", parse: ->(req) { req.params }
+  respond { |result| xml(result.twiml) }            # handler exposes :twiml
 end
 ```
 
-`respond` only runs for a genuine handler success — an unmatched event acked via
-`otherwise: :ack`, a handler's own business `fail!`, and a verify failure or crash all get
-their own fixed status (see below) regardless of any declared `respond`. For a literal body
-that doesn't need to read the handler's result — a fixed string the vendor requires no matter
-how dispatch resolves — see `static_respond` below.
+`json` takes a Hash/Array (JSON-encoded) or a pre-serialized String, and all four take
+`status:`/`headers:`.
 
-#### static_respond
-
-For a body that must render regardless of how dispatch resolves — including async enqueue,
-`otherwise: :ack`, and business `fail!` — use `static_respond` instead. Unlike `respond`, its
-block takes **no arguments** (it never reads the handler's result), so declaring it does not
-force sync dispatch and is compatible with explicit `mode: :async`:
+**`static_respond`** renders a fixed body that never reads the result. Its block takes no arguments,
+so it doesn't force sync dispatch:
 
 ```ruby
-# DropboxSign requires this exact literal string, and DropboxSign's handler must run async
-# (it makes outbound API calls) — static_respond renders regardless of dispatch outcome:
+# DropboxSign requires this exact literal string, and its handler must run async:
 Axn::Webhooks.inbound :dropbox_sign do
   verify { |req| … }
-  dispatch to: "Actions::DropboxSign::HandleWebhook"   # stays async under mode: :auto
+  dispatch to: "Actions::DropboxSign::HandleWebhook"
   static_respond { text("Hello API Event Received") }
 end
-
-response = Axn::Webhooks::Inbound[:dropbox_sign].to_response(request)  # => Axn::Webhooks::Response
-response.status   # => 200
-response.body     # => "Hello API Event Received"
 ```
 
-`respond` and `static_respond` are mutually exclusive — declaring both on one endpoint raises at
-registration time.
+Declaring both on one endpoint raises at registration.
 
-### The staged HTTP outcome mapping
+### HTTP status reference
 
-`Axn::Webhooks::Inbound[:vendor].to_response(request)` runs the whole pipeline and maps the
-outcome to an HTTP status:
+`Inbound[:vendor].to_response(request)` runs the whole pipeline and maps the outcome:
 
-| Stage | Outcome | Status |
-| -- | -- | -- |
-| Verify | a rejected signature (see [Why verification failed](#why-verification-failed)), or the verifier itself crashes | 401 |
-| Dispatch | missing/unresolvable handler, unmatched event with no `otherwise:`, or a handler crash | 500 (reported to `Axn.config.on_exception`) |
-| Dispatch | the body doesn't parse | `unparseable_status` — **200** by default (still reported) |
-| Dispatch | unknown-but-expected event (`otherwise: :ack`) | 2xx ack |
-| Handle | the handler's own business `fail!` ("we don't care") | 2xx ack (logged) |
-| Handle | success | the declared `respond` body, or a bare 2xx ack |
+| Stage | Outcome | Status | `static_respond` renders? |
+| -- | -- | -- | -- |
+| Verify | rejected signature, or the verifier crashed | 401 | no |
+| Dispatch | missing/unresolvable handler, unmatched event with no `otherwise:`, handler crash | 500 (reported) | no |
+| Dispatch | body doesn't parse | [`unparseable_status`](#unparseable-bodies) — **200** by default (reported) | yes |
+| Dispatch | unknown-but-expected event (`otherwise: :ack`) | 2xx ack | yes |
+| Handle | handler's own business `fail!` | 2xx ack (logged) | yes |
+| Handle | [`retry_later!`](#asking-for-redelivery) | 503 (+ `Retry-After`) | no |
+| Handle | success | declared `respond` body, or a bare 2xx ack | yes |
 
-A declared `static_respond` renders on every row above except the 401 row and the 500 row — and,
-not shown in the table above, a `retry_later!` 503 — including `otherwise: :ack`, business
-`fail!`, a genuine handler success with no `respond` declared, and an unparseable body (where it
-renders under the configured status rather than its own).
+`respond` runs **only** for a genuine handler success; every other row gets its fixed status
+regardless.
 
-### Async dispatch
+## Sync vs async
 
-By default (`mode: :auto`) a handler runs **async when it has an axn async adapter configured**
-(an `async :sidekiq` / `async :active_job` on the handler, or a host-app global default), and
-**sync otherwise** — so it works out of the box standalone and automatically uses async once you
-wire an adapter up, the same way you would for any other axn. This gem never references a
-specific adapter (`:sidekiq`/`:active_job`); it only checks whether one is present.
+By default (`mode: :auto`) a handler runs **async when it has an axn async adapter configured** — an
+`async :sidekiq` / `async :active_job` on the handler, or a host-app global default — and **sync
+otherwise**. This gem never references a specific adapter; it only checks whether one is present.
 
-Pin a mode explicitly when you want to override the default:
+| Setting | Behavior |
+| -- | -- |
+| `mode: :auto` (default) | Async if an adapter is configured, else sync |
+| `mode: :async` | Always async; reported as an exception if no adapter is configured |
+| `mode: :sync` | Always inline |
+| a declared `respond` | Forces sync (you can't read a result you enqueued) |
+| a map entry's `async:` | Overrides everything above, for that route only |
 
-```ruby
-Axn::Webhooks.inbound :merge_dev do
-  verify :hmac, secret: ENV.fetch("MERGE_WEBHOOK_SIGNATURE_KEY"), signature: header("X-Merge-Webhook-Signature")
-  dispatch to: "Actions::MergeDev::HandleWebhook", mode: :async   # force async (handler must have an adapter)
-end
-```
+Precedence, most specific first: the entry's `async:` → an explicit endpoint `mode:` → a declared
+`respond` → `:auto` adapter detection. Declaring both `mode: :async` and a custom `respond` raises at
+registration.
 
-A custom `respond` block reads the handler's own result, so those hooks always run **sync** (you
-can't read a result you enqueued) regardless of adapter config — and declaring both an explicit
-`mode: :async` and a custom `respond` raises at registration time.
+### Per-route sync/async
 
-`static_respond`, by contrast, never reads a result, so it never forces sync and is compatible
-with an explicit `mode: :async` — it's the right choice for a vendor like DropboxSign that needs
-both a literal ack body and an async handler.
-
-#### Per-route sync/async on one endpoint
-
-`mode:` is endpoint-wide, but a single fixed URL sometimes needs both disciplines per message —
-the interaction-platform pattern (Slack, Discord, Telegram) multiplexes a synchronous body and
-ack-then-async on one Request URL. Set a per-route `async:` on any explicit-map entry to override
-just that route; the helpers `async(...)` / `sync(...)` build the entry for you (they're plain DSL
-methods, so they're callable right inside the `to:` map):
+A single fixed URL sometimes needs both disciplines — the interaction-platform pattern (Slack,
+Discord, Telegram) multiplexes a synchronous body and ack-then-async on one Request URL. `async(…)`
+and `sync(…)` build the entry for you:
 
 ```ruby
-# Slack interactivity: one URL, one respond block, per-message discipline.
 Axn::Webhooks.inbound :slack do
-  verify :hmac, secret: ENV.fetch("SLACK_SIGNING_SECRET"), signing_string: ->(r) { "v0:#{r.header('X-Slack-Request-Timestamp')}:#{r.raw_body}" }
+  verify :hmac, secret:         ENV.fetch("SLACK_SIGNING_SECRET"),
+                signature:      header("X-Slack-Signature"),
+                prefix:         "v0=",
+                signing_string: ->(r) { "v0:#{r.header('X-Slack-Request-Timestamp')}:#{r.raw_body}" }
   dispatch on: ->(e) { e["type"] },
            to: {
-             "view_submission" => "Actions::Slack::HandleViewSubmission",       # sync (respond default): returns a response_action body
+             "view_submission" => "Actions::Slack::HandleViewSubmission",       # sync: returns a response_action body
              "block_actions"   => async("Actions::Slack::HandleBlockActions"),  # ack now, run async
            }
-  respond { |result| json(result.response_action) }  # sync route renders JSON; async route auto-acks (bare 2xx)
+  respond { |result| json(result.response_action) }  # sync route renders JSON; async route auto-acks
 end
 ```
 
-`async("H")` is sugar for `{ call: "H", async: true }` and `sync("H")` for `{ call: "H", async: false }`;
-both pass extra kwargs through, so they compose with a `with:` extractor: `async("H", with: ->(e) { … })`,
-`sync("H", with: :payload)`.
+`async("H")` is sugar for `{ call: "H", async: true }`, `sync("H")` for `{ call: "H", async: false }`;
+both pass extra kwargs through.
 
-The per-route flag is the most specific rung of the mode decision — precedence, most specific first:
-the entry's `async:`, then an explicit endpoint `mode:`, then a declared `respond` (which keeps sync
-as the per-route **default**), then `:auto` adapter detection. So on a `respond` endpoint a route is
-sync unless you mark it `async` — a route that acks-async simply produces no result and the `respond`
-block acks it (nil result → bare 2xx), while a sync route's result is rendered. A route marked
-`async` whose handler has no adapter is reported as an exception (the same guard as `mode: :async`).
+## Challenge (GET-echo handshake)
 
-**A missing adapter is only ever a fallback under `:auto`, never under an explicit request.** The
-two look inconsistent side by side — `:auto` silently runs sync, an explicit `async` 500s, and
-[outbound's `emit`](#async-posture) warns and runs sync — but they line up once you compare
-like for like: `emit` defaults to `:auto`, so its fallback is `:auto` behavior, identical to
-inbound's — and `emit(..., async: true)`, the explicit form, raises here too. The raise fires only when an app declared `async` and the configuration can't honor
-it. Downgrading that silently would be wrong twice over: `async` is usually declared *because* the
-handler outlives the vendor's ack window (Slack's 3s), so running it inline trades a clean 500 for a
-vendor timeout, a redelivery, and duplicate processing — and it changes the response the vendor
-sees, since the async path acks with no handler result while the sync path renders one (a handler
-`fail!` included). It's also the same no-silent-downgrade stance outbound's `to:` takes: a *declared*
-resolver that returns nil delivers nowhere rather than falling back to `subscribers`. That rule is what the shipped per-`emit` `async:` override follows: `emit(..., async: true)` raises
-when no adapter is configured, exactly as an explicitly-`async` inbound route does, rather than
-inheriting `Emit`'s `:auto` fallback.
+Some vendors (Nylas, Meta) verify a new endpoint with a `GET` before sending real events. No extra
+route is needed — `challenge` teaches the same mount to answer `GET`:
 
-### Nested endpoints
+```ruby
+Axn::Webhooks.inbound :nylas do
+  verify { |req| … }
+  challenge ->(req) { req.params["challenge"] }   # echoed verbatim, 200 text/plain
+end
 
-When several endpoints share a vendor's verification, declare it once and nest the endpoints that
-differ:
+Axn::Webhooks.inbound :meta do
+  challenge ->(req) { req.params["hub.challenge"] },
+            if: ->(req) { req.params["hub.verify_token"] == ENV.fetch("META_VERIFY_TOKEN") }
+end
+```
+
+An `if:` rejection is a **403**; a missing/nil challenge value is a **400**; a raise is reported and
+mapped to **500**.
+
+Slack's in-band `url_verification` handshake is **not** this — Slack sends it as a POST event, so
+it's a normal `dispatch` entry.
+
+## Nested endpoints
+
+When several endpoints share a vendor's verification, declare it once and nest what differs:
 
 ```ruby
 Axn::Webhooks.inbound :slack do
-  verify :hmac, secret: ENV.fetch("SLACK_SIGNING_SECRET"), prefix: "v0=",
-                replay: { timestamp: header("X-Slack-Request-Timestamp"), within: 300 }
-  challenge_required { |req| req.params["type"] == "url_verification" }
+  verify :hmac, secret:         ENV.fetch("SLACK_SIGNING_SECRET"),
+                signature:      header("X-Slack-Signature"),
+                prefix:         "v0=",
+                signing_string: ->(r) { "v0:#{r.header('X-Slack-Request-Timestamp')}:#{r.raw_body}" },
+                replay:         { timestamp: header("X-Slack-Request-Timestamp"), within: 300 }
 
   endpoint :interactivity do
     dispatch on: ->(e) { e["type"] }, to: { "block_actions" => async("Actions::Slack::HandleBlockActions") }
@@ -546,272 +472,223 @@ end
 # => registers Inbound[:slack_interactivity] and Inbound[:slack_events]
 ```
 
-* **Each child registers as `:"#{parent}_#{child}"`.** The parent (`Inbound[:slack]`) is **not**
-  registered — a parent with `endpoint` blocks is a container, and declaring a top-level `dispatch`
-  alongside them raises at boot rather than leaving an extra endpoint nobody mounted. A parent
-  `respond`/`static_respond` is fine, and is often the point: it renders nothing on its own, and
-  one shared renderer across a vendor's endpoints is exactly what nesting is for.
-* **Children inherit every parent declaration** — `verify`, `challenge`, `challenge_required`,
-  `unauthorized_headers`, `respond`, `static_respond` — and override any of it by re-declaring it.
-  Siblings are independent; a declaration in one child never leaks into another. `dispatch` is the
-  one thing a parent cannot declare (above), so each child brings its own.
-  A child may swap renderer forms — declaring `static_respond` over an inherited `respond`, or the
-  reverse — and the inherited one is dropped. Declaring both in the *same* block is still an error.
-  There is no way to *un*-declare an inherited block outright: a child that must render nothing
-  needs the parent's `respond` moved down into the siblings that do want it.
+* **Each child registers as `:"#{parent}_#{child}"`.** The parent is **not** registered — it's a
+  container. Declaring a top-level `dispatch` alongside `endpoint` blocks raises at boot.
+* **Children inherit every parent declaration** (`verify`, `challenge`, `challenge_required`,
+  `unauthorized_headers`, `respond`, `static_respond`) and override by re-declaring. Siblings are
+  independent. `dispatch` is the one thing a parent can't declare, so each child brings its own.
+* A child may swap renderer forms (`static_respond` over an inherited `respond`, or the reverse).
+  There is no way to *un*-declare an inherited block — move the parent's `respond` down into the
+  siblings that want it instead.
 * **One level only.** An `endpoint` inside an `endpoint` raises.
 
-Each child is validated exactly as a standalone endpoint would be, so a child that declares
-`dispatch` without inheriting or declaring a `verify` still fails at boot.
+Each child is validated exactly as a standalone endpoint, so a child with `dispatch` and no
+inherited or declared `verify` still fails at boot.
 
-Nesting is sugar, not a new capability: a shared options hash splatted with `**`, or a shared lambda
-passed to `verify(&lambda)`, expresses the same thing and remains a fine choice.
+Nesting is sugar: a shared options hash splatted with `**`, or a shared lambda passed to
+`verify(&lambda)`, expresses the same thing and remains a fine choice.
 
-**Note on block scoping**: The `inbound do … end` block is evaluated with `instance_exec` against an internal DSL, so `self` inside the block is NOT the surrounding object. You can reference `ENV`, constants, and local variables, but don't call surrounding-object helper methods or access its instance variables from within the block.
+## The request object
 
-**Note on Rails autoloading**: `inbound` blocks are evaluated where they're declared — at boot, if
-that's an initializer — and Rails disallows autoloading during initialization. So naming a class from
-`app/` while the initializer runs raises `NameError` and fails the boot. Handler classes are already
-safe: `dispatch to:` accepts a **string**, which is resolved via `const_get` per request. A custom
-`verify` block needs the same treatment — keep the constant inside the block, which runs per request
-rather than at boot:
+Verifiers, `parse:` and `challenge` blocks all receive an `Axn::Webhooks::Request` — a
+Rails-agnostic view, so the same endpoint works behind a Rack mount, a controller, or a plain test
+constructor.
 
-```ruby
-# NameError at boot — the constant is named while the initializer runs
-checker = MyApp::SignatureChecker.new(secret: ENV.fetch("SECRET"))
-Axn::Webhooks.inbound(:vendor) { verify { |req| checker.call(req) } }
+| | |
+|---|---|
+| `raw_body` | the exact bytes the vendor signed (frozen; never re-encoded) |
+| `header(name)` | case-insensitive header lookup |
+| `params` | the request's **primary** param source (see below) |
+| `url` | full URL including scheme, host, mount prefix, and query string |
+| `http_method` | upcased (`"POST"`, `"GET"`, …) |
 
-# Fine — the constant is named when a request arrives
-Axn::Webhooks.inbound(:vendor) do
-  verify { |req| MyApp::SignatureChecker.verify(req, secret: ENV.fetch("SECRET")) }
-end
-```
+`params` is one source, never a query+form merge:
 
-### Mounting
+- **POST with a form body** — `application/x-www-form-urlencoded` (Twilio) or `multipart/form-data`
+  (Dropbox Sign) → the form fields. A malformed multipart body yields `{}` rather than raising.
+- **Everything else** — JSON POST, and any GET/HEAD → the query string.
 
-An `Inbound[:vendor]` endpoint is a Rack app — mount it directly, no controller needed. The Rack
-mount requires **Rack 3** (so **Rails 7.1+**); Rails 7.0 (Rack 2) is not supported.
+`inspect`/`pp` redact `raw_body` and headers, since webhook payloads routinely carry bank account
+numbers, credentials and addresses that must not reach logs or exception reports.
 
-```ruby
-# config/routes.rb (Rails)
-Rails.application.routes.draw do
-  mount Axn::Webhooks::Inbound[:codat], at: "/webhooks/codat"
-end
-```
-
-```ruby
-# config.ru (no Rails)
-require "axn-webhooks"
-map "/webhooks/codat" { run Axn::Webhooks::Inbound[:codat] }
-```
-
-The mount owns the whole path and every verb: `POST` runs verify → dispatch → respond; `GET` runs
-a declared `challenge`, or 405s if none was declared. Any other verb — including `HEAD` on a bare `Rack::Builder` mount without `Rack::Head` upstream — returns 405. (Rails inserts `Rack::Head` before middleware, so `HEAD` becomes `GET` there.)
-
-### Challenge (GET-echo handshake)
-
-Some vendors (Nylas, Meta) verify a new endpoint with a `GET` request before sending real events:
-
-```ruby
-Axn::Webhooks.inbound :nylas do
-  verify { |req| ... }
-  challenge ->(req) { req.params["challenge"] }   # echoed verbatim, 200 text/plain
-end
-
-Axn::Webhooks.inbound :meta do
-  challenge ->(req) { req.params["hub.challenge"] },
-            if: ->(req) { req.params["hub.verify_token"] == ENV.fetch("META_VERIFY_TOKEN") }
-end
-```
-
-No extra `routes.rb` line is needed — `challenge` just teaches the same mount how to answer `GET`.
-An `if:` guard rejection (e.g. a bad Meta `hub.verify_token`) is a **403**; a missing/nil challenge
-value is a **400**; a `challenge`/`if:` proc that raises is reported and mapped to **500**. (Slack's
-in-band `url_verification` handshake is NOT this — it's a normal `dispatch` entry, since Slack sends
-it as a POST event, not a GET.)
-
-### Unparseable bodies (`unparseable_status`)
+## Unparseable bodies
 
 A verified request whose body doesn't parse is **terminal, not retryable** — a redelivery of the same
-bytes will never parse either. So the parse step reports (you want to know a vendor is sending
-garbage) and then **acks**:
+bytes will never parse either. So the parse step reports and then **acks**:
 
 ```ruby
-Axn::Webhooks.configure { |c| c.unparseable_status = 400 }             # global; default 200
+Axn::Webhooks.configure { |c| c.unparseable_status = 400 }   # global; default 200
 
 Axn::Webhooks.inbound :lob do
   verify :hmac, secret: ENV.fetch("LOB_WEBHOOK_SECRET"), signature: header("Lob-Signature")
-  dispatch to: "Actions::Lob::HandleWebhook", unparseable_status: 200  # per-endpoint override
+  dispatch to: "Actions::Lob::HandleWebhook", unparseable_status: 200   # per-endpoint override
 end
 ```
 
-Whatever the `parse:` step raises is wrapped in `Axn::Webhooks::UnparseableBody` (the original stays
-reachable as `cause`) and reported to `Axn.config.on_exception` exactly once — it's a real exception
-outcome, just not one the vendor should act on. Because the whole step is wrapped rather than a list
-of known JSON errors, a custom XML/form/protobuf `parse:` proc gets the same treatment without
-knowing about this gem's error classes.
+Whatever `parse:` raises is wrapped in `Axn::Webhooks::UnparseableBody` (the original stays reachable
+as `cause`) and reported to `Axn.config.on_exception` exactly once. Because the whole step is wrapped
+rather than a list of known JSON errors, a custom XML/form/protobuf `parse:` gets the same treatment.
 
-The default is **200** rather than the semantically tidier 400 because 2xx is the only answer every
-vendor reads as "stop redelivering": Lob retries non-2xx for 5 days and then disables the endpoint,
-Stripe, Slack and Shopify all retry non-2xx too, and the last two also disable an endpoint after
-sustained failures. Set `400` for a vendor that does honor 4xx as terminal (nicer status codes in
-their delivery dashboard), or `500` to restore the old retry-inviting behavior. A declared
-`static_respond` still renders its body here — Dropbox Sign and friends key the ack on the body text,
-not the status, so without it they'd redeliver anyway.
+The default is 200 rather than the tidier 400 because [2xx is the only answer every vendor reads as
+"stop redelivering"](DESIGN-NOTES.md#why-unparseable-bodies-ack-with-200). A `parse:` proc that does I/O can opt back
+into redelivery by raising [`retry_later!`](#asking-for-redelivery).
 
-A `parse:` proc that does I/O (a lookup that could fail transiently) can opt back into redelivery by
-raising [`retry_later!`](#asking-for-redelivery-retry_later) — that's the one thing the parse step
-doesn't treat as terminal.
+## Asking for redelivery
 
-### Per-vendor observability (`vendor_facet`)
+A handler can ask the sender to redeliver later without paging:
+
+```ruby
+class HandleWebhook
+  include Axn::Webhooks::Handler
+
+  def call
+    Axn::Webhooks.retry_later!(after: 30) unless dependency_ready?   # => 503, Retry-After: 30
+  end
+end
+```
+
+Raising `Axn::Webhooks::RetryLater` (directly or via the helper) **always** maps to a **503** —
+`after:` only controls whether the `Retry-After` header is present. It's rescued around the whole
+synchronous dispatch, so the handler, a `parse:` proc, a `with:` extractor and an `otherwise:`
+callable can all defer.
+
+> **`include Axn::Webhooks::Handler`, not plain `include Axn`.** The concern includes `Axn` and
+> declares `fails_on Axn::Webhooks::RetryLater`, so a deferral settles as a quiet failure. Without it
+> you still get the 503, but you *also* page `Axn.config.on_exception` on every single deferral —
+> the opposite of the promise.
+
+Only synchronous dispatch can defer: a `retry_later!` raised inside an async worker is just a worker
+exception, unrelated to the response already sent.
+
+## Per-vendor observability
 
 ```ruby
 Axn::Webhooks.configure { |c| c.vendor_facet = :dimension }  # or :tag; default false
 ```
 
 When set, every `verify`/`dispatch`/`respond`/`challenge` call for a registered endpoint is stamped
-with the endpoint's registered name as that Datadog/OTel facet — `:dimension` for a bounded,
-low-cardinality grouping (Teamshares' choice); `:tag` for the higher-cardinality path. Ships `false`
-(no stamping) so a standalone consumer opts in explicitly.
+with the endpoint's name as that Datadog/OTel facet — `:dimension` for a bounded, low-cardinality
+grouping; `:tag` for the higher-cardinality path. Ships `false` so a standalone consumer opts in.
 
-This setting governs the **vendor** facet only. `Verify`'s
-[`reason` dimension](#why-verification-failed) is stamped unconditionally: it's a closed four-value
-enum rather than a per-endpoint identity, so there's no cardinality decision to defer to the
-consumer — group by `reason`, filter by `vendor`.
+This governs the **vendor** facet only. The [`reason` dimension](#why-verification-failed) is always
+stamped — it's a closed enum, so there's no cardinality decision to defer. Group by `reason`, filter
+by `vendor`.
 
-## Outbound (sending webhooks)
+---
 
-Declare your own events and their subscribers once (e.g. a Rails initializer), then emit by symbol
-from wherever the triggering event happens:
+# Outbound
+
+## Declaring events and subscribers
+
+Declare once (e.g. a Rails initializer), then emit by symbol from wherever the triggering event
+happens:
 
 ```ruby
 Axn::Webhooks.outbound do
-  # Standard Webhooks signing (reuses Axn::Webhooks::Signature under the hood) — symmetric with
-  # a receiver's own `verify :standard_webhooks`. A custom signer block is accepted in the same slot.
-  # `secret:` may be a plain value, a zero-arity callable (resolved fresh on every signing attempt,
-  # so a secret can rotate without a reboot — the same convention as every inbound `verify` secret),
-  # or a ONE-arity callable that receives the resolved Subscriber — a per-subscriber secret. `id` is
-  # nil for the statically-routed events below (a bare URL String carries no identity), so this
-  # guards for that rather than raising `Subscription.find(nil)` the first time one of those fires.
-  sign :standard_webhooks, secret: ->(subscriber) {
-    subscriber.id ? Subscription.find(subscriber.id).signing_secret : ENV.fetch("WEBHOOKS_DEFAULT_SECRET")
-  }
+  sign :standard_webhooks, secret: -> { ENV.fetch("WEBHOOK_SIGNING_SECRET") }
 
-  # Default subscriber resolver — any event declared with no explicit `to:` falls back to this.
-  # A row may be a bare URL String (shown on `lead_signed`/`invoice_paid`/`internal_only` below) or
-  # a `{ url:, id: }` Hash carrying an identity `sign`/`headers`/`Deliver` can key off of.
+  event :lead_signed,  to: ["https://partner.example/hooks/leads"]   # static list
+  event :lead_closed                                                 # resolved via `subscribers`
+  event :invoice_paid, type: "invoice.paid", to: ["https://partner.example/hooks/invoices"]
+
   subscribers ->(event) { Subscription.where(event:).map { |s| { url: s.url, id: s.id.to_s } } }
-
-  # Per-destination extra headers (e.g. a subscriber's own bearer token) — resolved fresh per
-  # DELIVERY ATTEMPT from the Subscriber, same convention as `secret:` above: never stored, so
-  # nothing here ever sits in a Sidekiq/ActiveJob payload. 0- or 1-arity; optional. Same nil-id
-  # guard as `secret:` above, for the same reason.
-  headers ->(subscriber) { subscriber.id ? { "authorization" => "Bearer #{Subscription.find(subscriber.id).token}" } : {} }
-
-  # A host policy for a resolved target — a static `to:` entry and a runtime `subscribers`/`to:`
-  # row both go through it, INCLUDING the static hosts below (`example.com`/`internal.example`) —
-  # both optional; nil (the default) means any http(s) URL passes.
-  allowed_hosts %w[hooks.partner.example *.customer.example example.com internal.example]  # exact match, or a leading `*.` wildcard
-  # `uri.host` is a HOSTNAME, not necessarily an IP literal (no DNS resolution happens here -- see
-  # below), so `IPAddr#include?` raises for one -- e.g. this block's own static "example.com"/
-  # "internal.example" hosts. Parse defensively and only compare when `uri.host` IS a literal IP.
-  allow_url(lambda do |uri|
-    ip = begin
-      IPAddr.new(uri.host)
-    rescue IPAddr::Error
-      nil
-    end
-    ip.nil? || !PRIVATE_IP_RANGES.any? { |r| r.include?(ip) }
-  end)
-
-  event :lead_signed, to: ["https://example.com/webhooks/lead_signed"]  # static list
-  event :lead_closed                                                    # no `to:` -> resolved via `subscribers`
-  event :invoice_paid, type: "invoice.paid", to: ["https://example.com/webhooks/invoice_paid"]  # override the wire `type`
-  event :internal_only, to: ["https://internal.example/hook"], vendor: :internal  # override the vendor facet, this event only
-
-  max_attempts 8                                                # default shown
-  backoff ->(attempt) { [30 * (3**(attempt - 1)), 6 * 3600].min } # default shown (seconds; capped at 6h, jittered — see below)
-  transport MyFaradayTransport                                  # optional; defaults to stdlib net/http
-  timeouts open: 5, read: 10                                    # defaults shown, seconds; built-in transport only
-  vendor :internal                                              # optional; the observability facet default for every event (overridable per event, above)
-  user_agent -> { "#{Rails.application.class.module_parent_name} / #{Rails.application.config.git_sha}" } # optional suffix; plain value or callable
 end
-
-result = Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })  # => Axn::Result
-result.webhook_ids     # => ["msg_<uuid>", ...] — one per ENQUEUED target
-result.target_count    # => 1
-result.deliveries      # => [{ webhook_id: "msg_<uuid>", url: "https://...", subscriber_id: nil }, ...] — `:lead_signed`'s `to:` is a bare URL String, no identity; a `subscribers`-resolved event like `:lead_closed` would show its `id` here instead
-result.rejected_count  # => 0
-result.rejected        # => [{ target: "...", reason: "..." }, ...] — rows TargetPolicy refused
 ```
 
-* **Symbols are the identity.** `emit(:unknown_event)` raises `Axn::Webhooks::Error` immediately,
-  listing the known events — no silent no-op for a typo'd event name. A statically declared
-  `event :x, to: []` warns at boot (it will deliver nowhere). A second `Axn::Webhooks.outbound` block
-  replaces the first and logs a warning — only one is ever active.
-* **Wire `type`** defaults to the symbol as a string (`:lead_signed` → `"lead_signed"`), overridable
-  per event with `type:` when a receiver expects a dotted convention or another exact value.
-* **`to:`** accepts a static Array or a lambda (`->(event) { … }`); the block-level `subscribers`
-  resolver is the shared default when an event declares no `to:` at all. Either may resolve to a
-  bare URL String or a `{ url:, id: }` Hash — an unknown Hash key (e.g. a stray `secret:`) is
-  rejected rather than silently dropped. A static Array's entries are validated (shape + your
-  `allowed_hosts`/`allow_url` policy, if declared) at boot; a lambda's/`subscribers`' return value
-  is validated identically, but at **every** `emit`, since it depends on runtime state — see
-  [Routing](#routing-sender-owned-config-today) for what "validated" rejects and how.
-* **Fan-out**: `emit` resolves the event's subscribers and enqueues one independent, self-retrying
-  `Axn::Webhooks::Outbound::Deliver` per target — one slow/failing subscriber can't block another.
-  Each delivery gets its own stable `webhook-id`, generated once per (emission × target) and reused
-  across every retry attempt of that delivery, so receivers can dedup. `emit`'s result exposes the
-  full list of `webhook_ids`, a `target_count` (rows actually **enqueued**), and `deliveries` — one
-  `{ webhook_id:, url:, subscriber_id: }` Hash per target, the correlation to persist a delivery
-  record without re-resolving and trusting ordering.
-* **`rejected_count`/`rejected`.** A row a validated `to:`/`subscribers` resolver returns that fails
-  shape or host-policy validation is **not** counted in `target_count` and is **not** delivered to —
-  it's collected into `rejected` (`{ target:, reason: }` per row) instead, and `rejected_count`
-  reports how many. Reported once per `emit` (not once per bad row) via `Axn.config.on_exception`.
-  `emit` still reports `ok`: the good rows really were enqueued.
-* **`failed_count`** counts deliveries that came back failed — but **only on the synchronous
-  fallback path**, and it is **always `0` on the async path**, because at `emit` time nothing has
-  failed yet: the deliveries are enqueued, and a later failure is reported by `Deliver` itself
-  (exhaustion via `on_exception`, a permanent 4xx via its own result). Note that is the *path*, not
-  adapter presence — an `emit(..., async: false)` runs inline and counts failures even when an
-  adapter is configured. `emit`'s
-  result stays `ok` even when every delivery failed — fan-out succeeded, and a subscriber being
-  down is not an emit failure. `target_count - failed_count` is the sync-path success count.
-* **Per-call overrides.** `emit` accepts `to:` and `async:`:
+| Declaration | Default | Purpose |
+| -- | -- | -- |
+| `event :name, to:, type:, vendor:` | — | Declare an emittable event. `type:` overrides the wire type; `vendor:` overrides the facet. |
+| `sign :strategy, **opts` / `sign { … }` | — | How to sign each delivery. See [Signing](#signing). |
+| `subscribers ->(event) { … }` | `nil` | Default resolver for events with no `to:`. |
+| `headers ->(subscriber) { … }` | `nil` | Per-destination extra headers, resolved per attempt. |
+| `allowed_hosts %w[…]` | `nil` (any) | Host allowlist; exact match or a leading `*.` wildcard. |
+| `allow_url ->(uri) { … }` | `nil` (any) | Arbitrary target predicate. |
+| `max_attempts 8` | `8` | Attempts before giving up. |
+| `backoff ->(attempt) { … }` | capped exponential | Seconds until the next attempt. |
+| `transport MyTransport` | stdlib `net/http` | Injectable HTTP seam. |
+| `timeouts open: 5, read: 10` | `5` / `10` | Built-in transport only. |
+| `vendor :name` | `nil` | Block-level observability facet default. |
+| `user_agent value_or_callable` | `nil` | Suffix: `axn-webhooks/<version> (<value>)`. Plain value or zero-arity callable, resolved per attempt. |
 
-  ```ruby
-  Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 },
-                     to:    "https://one-off.example/hook",  # String or Array
-                     async: false)
-  ```
+**Wire `type`** defaults to the symbol as a string (`:lead_signed` → `"lead_signed"`).
+`emit(:unknown_event)` raises immediately, listing the known events — no silent no-op for a typo. A
+statically declared `event :x, to: []` warns at boot. A second `outbound` block replaces the first
+and logs a warning; only one is ever active.
 
-  `to:` **replaces** the event's declared targets for that call — it never merges with them, the
-  same stance a declared `to:` resolver returning nil takes. The event must still be declared (it
-  supplies the wire `type` and `vendor`), and a one-off URL goes through the same validation
-  (including your `allowed_hosts`/`allow_url`) as a declared target, raising `Axn::Webhooks::Error`
-  rather than being silently rejected — a one-off override is caller-supplied, single-URL, this one
-  call; a typo deserves an immediate raise, unlike a resolver's many rows. `async: true` **raises**
-  when no adapter is configured rather than running inline — a missing adapter degrades to sync only
-  under `:auto`, never under an explicit request (same rule as an inbound route marked `async`).
-  `async: false` forces the inline path and suppresses the degraded-mode warning, since a caller
-  asking for sync isn't degraded.
+### Subscriber rows
 
-  There is deliberately no per-call `headers:`: it is the obvious place to hang a bearer token, and
-  it would be serialized into the async job's args and persist in the queue for the whole retry
-  lifetime — the opposite of the convention `secret:` follows (a callable re-resolved per attempt,
-  never stored). Per-destination headers are the block-level `headers` resolver instead — see
-  [Routing](#routing-sender-owned-config-today).
-* **`vendor`** stamps the same observability facet (`Axn::Webhooks.config.vendor_facet`) inbound
-  endpoints already use, letting Datadog/Honeybadger group outbound deliveries by event or
-  subscriber. A per-event `vendor:` overrides the block-level default; an event with neither is
-  unstamped. A resolved `subscriber_id` is stamped as a **tag** (unbounded cardinality), never a
-  dimension — see [Routing](#routing-sender-owned-config-today).
+`to:` accepts a static Array or a lambda (`->(event) { … }`); `subscribers` is the shared default for
+events with no `to:`. Either may resolve to:
 
-### Envelope & signing
+- a bare URL **String** — no identity, and
+- a **`{ url:, id: }` Hash** — an identity that `sign`'s `secret:`, the `headers` resolver, and
+  `Deliver`'s observability can key off of.
 
-The body is the Standard Webhooks envelope; `id` and `timestamp` are mirrored into the signed
-headers:
+An unknown Hash key (e.g. a stray `secret:`) is rejected rather than silently dropped, since it's
+almost certainly a credential the caller thought they were setting.
+
+Both resolvers run fresh on **every** `emit`, never memoized at boot, so a DB-backed lambda picks up
+rows added or removed at runtime. Resolution runs inline in whatever process called `emit`, so a
+store that raises (a database outage) raises out of `emit`.
+
+### Per-subscriber secrets and headers
+
+`sign`'s `secret:` and the `headers` resolver both accept a **one-arity** callable receiving the
+resolved `Subscriber`, re-resolved per delivery attempt:
+
+```ruby
+Axn::Webhooks.outbound do
+  subscribers ->(event) { Subscription.where(event:).map { |s| { url: s.url, id: s.id.to_s } } }
+
+  sign :standard_webhooks, secret: ->(subscriber) { Subscription.find(subscriber.id).signing_secret }
+  headers ->(subscriber) { { "authorization" => "Bearer #{Subscription.find(subscriber.id).token}" } }
+
+  allowed_hosts %w[hooks.partner.example *.customer.example]
+
+  event :lead_closed
+end
+```
+
+> **`subscriber.id` is `nil` for a bare URL String row.** If an event mixes static `to:` URLs with
+> `subscribers`-resolved rows, guard for it —
+> `subscriber.id ? Subscription.find(subscriber.id).signing_secret : ENV.fetch("DEFAULT_SECRET")` —
+> rather than letting `find(nil)` raise on the first static delivery.
+
+Neither value ever enters the job payload; see
+[Credentials never enter the queue](DESIGN-NOTES.md#credentials-never-enter-the-queue).
+
+### Host policy
+
+`allowed_hosts` matches case-insensitively; a `*.suffix` entry matches any subdomain of `suffix` but
+**not** the bare suffix itself. `allow_url` is the general escape hatch — called with the parsed
+`URI`, must return truthy. Both are nil by default (any http(s) URL passes); when both are declared, a
+target must pass both.
+
+> **A host policy, not a network one.** Neither resolves DNS, so neither is proof against DNS
+> rebinding or a hostname that resolves to a private IP at request time. `uri.host` is a hostname,
+> not necessarily an IP literal — an `allow_url` doing IP-range math must parse defensively:
+
+```ruby
+allow_url(lambda do |uri|
+  ip = begin
+    IPAddr.new(uri.host)
+  rescue IPAddr::Error
+    nil   # not a literal IP — nothing to range-check
+  end
+  ip.nil? || PRIVATE_IP_RANGES.none? { |r| r.include?(ip) }
+end)
+```
+
+A static `to:` Array is validated at **boot** (an `ArgumentError` — a declaration mistake); a
+resolver's rows are validated identically at **every** `emit`, but collected into
+[`rejected`](#the-emit-result) rather than failing the fan-out.
+
+## Signing
+
+### `sign :standard_webhooks`
+
+The default and the symmetric counterpart to a receiver's `verify :standard_webhooks`. The body is
+the Standard Webhooks envelope; `id` and `timestamp` are mirrored into the signed headers:
 
 ```
 POST <subscriber-url>
@@ -824,27 +701,16 @@ user-agent: axn-webhooks/<version>
 {"id":"msg_<uuid>","timestamp":1721160000,"type":"lead_signed","data":{"lead_id":42}}
 ```
 
-Receivers verify with the inbound half's `verify :standard_webhooks` — end-to-end symmetry, and
-`id`/`timestamp` give idempotency + replay protection for free. **Signing happens per attempt**: each
-retry recomputes the signature with a fresh `webhook-timestamp` (so it lands inside the receiver's
-replay-tolerance window) while reusing the same `webhook-id` from the first attempt (so the receiver
-can still dedup a redelivered message). The envelope body's own `timestamp` field, by contrast, is
-fixed once at emit time (it's part of the dedup identity) — so a retried delivery's signed
-`webhook-timestamp` header and its body's `timestamp` field deliberately diverge; read the header as
-"when this attempt was signed", not the body's "when this event happened".
+`secret:` is a **`whsec_<base64>`** value. A literal one is validated at boot; a callable's resolved
+value is checked per attempt.
 
-`user-agent` is `axn-webhooks/<version>`, plus an optional suffix — `axn-webhooks/<version>
-(<value>)` — from `user_agent` in the `outbound` block (a plain value or a zero-arity callable,
-resolved per attempt).
+### `sign :hmac`
 
-#### `sign :hmac`
-
-For a receiver that expects a plain signature header rather than the Standard Webhooks envelope:
+For a receiver that expects a plain signature header rather than an envelope:
 
 ```ruby
 # minimal — one header, signature over the raw body
 sign :hmac, secret: -> { ENV.fetch("PARTNER_SECRET") }, header: "X-Signature"
-# => X-Signature: 3f9a1c…
 
 # …or a replay-protectable signature, Slack-style
 sign :hmac,
@@ -853,226 +719,275 @@ sign :hmac,
      timestamp_header: "X-Timestamp",
      signing_string:   "v0:{timestamp}:{body}",
      prefix:           "v0="
-# => X-Timestamp: 1755740000
-#    X-Signature: v0=3f9a1c…
 ```
 
-`secret:` (plain value, or a zero- or one-arity callable — see [Routing](#routing-sender-owned-config-today)
-for the one-arity per-subscriber form — re-resolved per attempt) and `header:` are required — there
-is no universal signature-header name, the same reason inbound's `verify :hmac` requires
-`signature:`. `digest:` (`:sha256`), `encoding:` (`:hex`), `prefix:` (`nil`) and `signing_string:`
-(`"{body}"`) mirror the inbound verifier's options, so a `sign :hmac` sender and a `verify :hmac`
-receiver configured alike round-trip.
+| Option | Default | Notes |
+| -- | -- | -- |
+| `secret:` | required | Plain value, or a 0-/1-arity callable re-resolved per attempt. |
+| `header:` | required | There is no universal signature-header name. |
+| `timestamp_header:` | `nil` | Required if `signing_string:` references `{timestamp}`. |
+| `signing_string:` | `"{body}"` | A **template**. `{timestamp}` and `{body}` are the only placeholders. |
+| `digest:` | `:sha256` | |
+| `encoding:` | `:hex` | |
+| `prefix:` | `nil` | |
 
-`digest:`, `encoding:` and both header names are validated at declaration time: an unsupported
-digest/encoding, or a header name that isn't a valid HTTP field token (no spaces, colons or
-newlines), fails at boot rather than inside every delivery attempt. `header:` and
-`timestamp_header:` may not be the same name as each other, nor any header the delivery pipeline
-sets after signing: `content-type` and `user-agent` (which `Deliver` merges in afterwards) or
-`content-length`/`transfer-encoding` (which the transport rewrites at send time — the first
-regenerated from the request body, the second deleted outright). In every one
-of those cases the later value replaces the signature and each delivery ships unverifiable. Braces in
-`signing_string:` must be exactly `{timestamp}` or `{body}`; a malformed one (`{time-stamp}`, or an
-unclosed `{timestamp`) is rejected rather than silently signed as literal text, so a literal brace
-is not supported there.
+`digest:`, `encoding:`, both header names and the template are validated at boot rather than inside
+every delivery attempt. Header names must be valid HTTP field tokens, must differ from each other,
+and may not collide with anything the pipeline sets after signing (`content-type`, `user-agent`,
+`content-length`, `transfer-encoding`) — in every one of those cases the later value would replace
+the signature and each delivery would ship unverifiable.
 
-`signing_string:` is a **template**, not a callable: `{timestamp}` and `{body}` are the only
-placeholders, and an unknown one is rejected at declaration time — which a lambda would make
-impossible. Referencing `{timestamp}` without declaring `timestamp_header:` is also rejected: the
-receiver would have no way to reconstruct the signed string. If you need logic a template can't
-express, use the custom `sign { |id:, timestamp:, body:| … }` block, which has always been there —
-it may also declare `subscriber:` to receive the resolved Subscriber; a block that doesn't declare
-it (or `**`) simply isn't passed one.
+There is no id header here: a signature bound to a per-message id is what `:standard_webhooks` is for.
 
-A secret that resolves to a blank or non-String value raises `Axn::Webhooks::Error` rather than
-signing with an empty key — the error names the value's class or shape, never its bytes.
+### Custom signer
 
-Note there is no id header: a signature bound to a per-message id is what `:standard_webhooks` is
-for.
+```ruby
+sign { |id:, timestamp:, body:| { "X-My-Sig" => my_signature(body) } }
+```
 
-### Transport
+Return the header Hash. The block may also declare `subscriber:` to receive the resolved Subscriber;
+a block that doesn't declare it (or `**`) simply isn't passed one.
 
-The HTTP call is an injectable seam (`.post(url:, body:, headers:) -> Transport::Response`, a
-`Data.define(:status, :headers, :body)` — `body:` defaults to `nil`, so a transport built against the
-original two-field shape still works). The default is stdlib `net/http` — no new runtime dependency —
-and a consuming app can swap in its own object (e.g. Faraday-backed) via `transport` in the `outbound`
-block. `timeouts open:`/`read:` (defaults 5s/10s) only reach the **built-in** transport — a custom one
-owns its own timeout configuration, since the documented seam is `.post(url:, body:, headers:)` with
-no timeout kwargs guaranteed.
+## Emitting
 
-### Async posture
+```ruby
+result = Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 })
+```
 
-Mirrors inbound's `:auto`: **async when an axn async adapter is configured** for `Deliver` (an
-`async :sidekiq`/`async :active_job` global default, per axn's own presence-check semantics — never
-a branch on adapter type), else a **synchronous inline fallback** so the gem works standalone without
-Sidekiq. The sync path is best-effort: no cross-process retries/backoff, and it logs a warning (once
-per `emit` call, not once per subscriber) so the degraded mode is never silent. That degrade-rather-
-than-raise behavior is what `:auto` means, and it is the **default**; a caller who explicitly demands
-async with `emit(..., async: true)` gets a raise instead when no adapter is configured, exactly as an
-explicitly-`async` inbound route does (see [per-route sync/async](#per-route-syncasync-on-one-endpoint)
-and the per-call overrides above).
+`emit` resolves the event's subscribers and enqueues one independent, self-retrying delivery per
+target, so one slow or failing subscriber can't block another. Each delivery gets its own stable
+`webhook-id`, generated once per (emission × target) and reused across every retry of that delivery,
+so receivers can dedup.
 
-### Delivery contract
+### The emit result
 
-Each delivery attempt classifies the receiver's response. This is the canonical contract — useful
-both for reading this gem's `Deliver` behavior and for a single-side (non-gem) implementer of either
-half:
+| Field | Meaning |
+| -- | -- |
+| `webhook_ids` | One id per **enqueued** target |
+| `target_count` | Rows actually enqueued |
+| `deliveries` | One `{ webhook_id:, url:, subscriber_id: }` per target — the correlation to persist a delivery record without re-resolving and trusting ordering |
+| `rejected` | `{ target:, reason: }` per row the host/shape policy refused |
+| `rejected_count` | How many |
+| `failed_count` | Deliveries that came back failed — **sync path only**, always `0` when enqueued async |
+
+A rejected row is neither counted in `target_count` nor delivered to; the rejection is reported once
+per `emit` (not once per bad row). `emit` still reports `ok` — the good rows really were enqueued,
+and a subscriber being down is not an emit failure.
+
+`failed_count` is about the *path*, not adapter presence: `emit(…, async: false)` runs inline and
+counts failures even when an adapter is configured. `target_count - failed_count` is the sync-path
+success count.
+
+### Per-call overrides
+
+```ruby
+Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 },
+                   to:    "https://one-off.example/hook",  # String or Array
+                   async: false)
+```
+
+`to:` **replaces** the event's declared targets for that call — it never merges. The event must still
+be declared (it supplies the wire `type` and `vendor`), and the URL goes through the same validation
+as a declared target, raising rather than being silently rejected.
+
+`async: true` **raises** when no adapter is configured rather than running inline; `async: false`
+forces the inline path and suppresses the degraded-mode warning. See
+[Async posture](DESIGN-NOTES.md#async-posture-auto-vs-explicit).
+
+There is deliberately **no per-call `headers:`** — it would be serialized into the job payload. Use
+the block-level `headers` resolver.
+
+## Delivery, retries, and failure
+
+Each attempt classifies the receiver's response:
 
 | Receiver responds | Delivery does |
 | -- | -- |
 | **2xx** | success |
-| **408, 425, 429, 5xx, 503 + `Retry-After`, timeout, connection error** | retryable → self-reschedule the next attempt |
-| **other 4xx** (400, 401/403 bad-sig/auth, 404, 410 Gone, 422) | permanent → quiet `fail!`, no retry (a silent business failure surfaced via the `Deliver` result + axn's routine outcome logging, NOT via `on_exception`) — the failure message includes a truncated (500-byte) copy of the response body, the one piece of receiver-supplied detail a bare status code can't carry |
-| **unexpected exception** (crash / OOM / network raise mid-flight) | propagates → adapter retries the un-acked job (at-least-once safety net) |
+| **408, 425, 429, 5xx, timeout, connection error** | retryable → self-reschedule the next attempt |
+| **other 4xx** (400, 401/403, 404, 410, 422) | permanent → quiet `fail!`, no retry. Not reported via `on_exception`; the failure message carries a truncated (500-byte) copy of the response body |
+| **unexpected exception** (crash / OOM / network raise mid-flight) | propagates → the adapter retries the un-acked job (at-least-once safety net) |
 
 **One self-managed retry engine, adapter-agnostic.** On a retryable response, `Deliver` computes its
-own delay and re-enqueues itself via axn's adapter-agnostic delayed-enqueue seam
-(`call_async(_async: { wait: delay })`, carrying `attempt: n + 1`) rather than inheriting whatever
-default backoff curve the underlying adapter has — identical retry behavior across every axn adapter,
-and `Retry-After` is honored precisely: `delay = max(backoff(attempt), retry_after_seconds)`. The
-default `backoff` curve applies **equal jitter** (half the computed delay is fixed, half is random) so
-a fan-out event whose receiver is down doesn't have every failing target retry in lockstep. After
-`max_attempts`, exhaustion is reported **once** (via `Axn.config.on_exception`) and then delivery
-stops — it never raises, so the async adapter doesn't also retry an already-exhausted job. If no
-async adapter is configured at all, a retryable failure is treated the same as an exhausted retry
-budget (reported once, no retry), matching the sync fallback's best-effort promise.
+own delay and re-enqueues itself via axn's delayed-enqueue seam rather than inheriting whatever
+backoff the underlying adapter has — identical behavior across every adapter. `Retry-After` is
+honored precisely: `delay = max(backoff(attempt), retry_after_seconds)`, including the HTTP-date
+form. The default curve applies **equal jitter** (half fixed, half random, capped at 6h) so a fan-out
+whose receiver is down doesn't have every target retry in lockstep.
 
-**At-least-once is preserved for crashes**: response-based retries are self-managed, but an
-*unexpected* exception still propagates so the adapter retries the un-acked job as a safety net.
-Because every attempt reuses the same `webhook-id`, a double-delivery from that safety net is
+After `max_attempts`, exhaustion is reported **once** via `Axn.config.on_exception` and delivery
+stops. It never raises, so the adapter doesn't also retry an already-exhausted job. With no async
+adapter configured at all, a retryable failure is treated the same as an exhausted budget.
+
+Because every attempt reuses the same `webhook-id`, a double-delivery from the crash safety net is
 idempotent on the receiver side.
 
-### Asking for redelivery (`retry_later!`)
+### Transport
 
-A handler on the **inbound** side can ask the sender to redeliver later without paging, independent
-of the outbound engine above:
+The HTTP call is an injectable seam:
 
 ```ruby
-class HandleWebhook
-  include Axn::Webhooks::Handler
-  def call
-    Axn::Webhooks.retry_later!(after: 30) unless dependency_ready?  # => 503, Retry-After: 30
+class MyFaradayTransport
+  # Must return an Axn::Webhooks::Outbound::Transport::Response.
+  def self.post(url:, body:, headers:)
+    res = Faraday.post(url, body, headers)
+    Axn::Webhooks::Outbound::Transport::Response.new(status: res.status, headers: res.headers, body: res.body)
   end
 end
 ```
 
-Raising `Axn::Webhooks::RetryLater` (directly, or via the `Axn::Webhooks.retry_later!(after: nil)`
-helper) **always** maps to a **503** — `after:` only controls whether the `Retry-After` header is
-present, distinct from a crash (which is a reported plain 500). It's rescued around the whole
-synchronous dispatch, so anything the request runs in-process can defer — the handler, a `parse:`
-proc, a `with:` extractor, an `otherwise:` callable. That also makes it the escape hatch for a
-`parse:` proc that does I/O, whose other errors are [terminal](#unparseable-bodies-unparseable_status).
-The affordance requires **synchronous** dispatch: a `retry_later!` raised inside an async worker is
-just a worker exception, unrelated to the HTTP response already sent.
-
-**"Without paging" requires `include Axn::Webhooks::Handler`** (in place of plain `include Axn`) —
-it's a thin concern that includes `Axn` and declares `fails_on Axn::Webhooks::RetryLater`, so a
-deferral settles as a quiet failure instead of an unhandled exception. Without it (or an equivalent
-manual `fails_on Axn::Webhooks::RetryLater`), a plain `include Axn` handler calling `retry_later!`
-still 503s the response (`Dispatch` rescues the exception either way), but it **also** reports to
-`Axn.config.on_exception` (e.g. Honeybadger) on every single deferral — the opposite of the
-"without paging" promise.
-
-### Routing: sender-owned config today
-
-**Routing is sender-owned config, not a service.** The event→targets map lives in each *sending*
-app's own `outbound` block (`to:` / `subscribers`), not in this gem. A general-purpose DB-backed
-self-registration store — where receivers register their own endpoint URLs at runtime, no deploy
-required to add a listener — is a real future shape, but it's **intentionally deferred until a real
-use-case justifies it**. The `subscribers`/`to:` lambda is the seam it slots into with no API
-change: both are resolved fresh on **every** `emit`, never memoized at boot, so swapping the lambda
-body for a DB lookup already picks up rows added or removed at runtime.
-
-A row may be a bare URL String (today's shape, unchanged) or a `{ url:, id: }` Hash carrying a
-subscriber's own identity — an unknown Hash key (e.g. `secret:`) is rejected rather than silently
-dropped, since it's almost certainly a credential the caller thought they were setting:
-
-```ruby
-Axn::Webhooks.outbound do
-  subscribers ->(event) { Subscription.where(event:).map { |s| { url: s.url, id: s.id.to_s } } }
-
-  # A per-subscriber secret: 1-arity receives the Subscriber, resolved fresh per attempt (never
-  # stored — the same convention every callable secret already followed).
-  sign :standard_webhooks, secret: ->(subscriber) { Subscription.find(subscriber.id).signing_secret }
-
-  # Per-destination extra headers, e.g. a subscriber-specific bearer token. Same per-attempt
-  # resolution, same never-stored guarantee.
-  headers ->(subscriber) { { "authorization" => "Bearer #{Subscription.find(subscriber.id).token}" } }
-
-  # A host policy for anything NOT hand-written into your own deploy.
-  allowed_hosts %w[hooks.partner.example *.customer.example]
-
-  event :lead_closed
-end
-```
-
-**The signing secret and extra headers never enter the job payload.** `Deliver` re-enqueues
-*itself* on a retry (`call_async`), so anything in its `expects` is persisted, plaintext, in the
-queue backend (Redis for Sidekiq) for the life of the retry chain (`max_attempts` × the backoff
-curve — hours, by default). `Deliver` **does** carry `url:` — so a credential a receiver embeds in
-its own webhook URL (a Slack/Discord/Teams-style secret path segment, or a signed query token) is
-persisted there for that same lifetime; this guarantee covers only the *separately resolved*
-`secret:`/`headers:` values, which is why `Deliver` only ever carries a subscriber's **identity**
-(`subscriber_id`, a String) — never a `secret:`/`headers:` value. `sign`'s secret and the `headers` resolver are called
-fresh **per delivery attempt**, from that identity, exactly like every other callable secret in this
-gem. There is deliberately no per-emit `headers:` override for the identical reason (see the
-"Per-call overrides" bullet above) — the block-level `headers` resolver is the seam for that.
-
-**Validation is shared between a static `to:` and a runtime resolver.** Both a statically-declared
-`to:` Array (checked once at boot) and whatever `subscribers`/`to:` resolves to (checked on every
-`emit`) go through the same `TargetPolicy`: shape (a String URL or a `{ url:, id: }` Hash, http(s)
-scheme, a real host) plus your declared `allowed_hosts`/`allow_url`, if any. A row a static Array
-fails at **boot** as an `ArgumentError` (a declaration mistake); a row a resolver returns at
-**runtime** is instead collected into `emit`'s `rejected`/`rejected_count` — the fan-out proceeds
-with the rows that passed, and the rejection is reported once (not once per bad row) via
-`Axn.config.on_exception`.
-
-`allowed_hosts`/`allow_url` are a **host policy, not a network one** — neither resolves DNS, so
-neither is proof against DNS rebinding or a hostname that resolves to a private IP at request time.
-`allowed_hosts` matches case-insensitively; a `*.suffix` entry matches any subdomain of `suffix` but
-**not** the bare suffix itself. `allow_url` is the general escape hatch — called with the parsed
-`URI`, must return truthy — for anything that needs real IP-range logic. Both nil by default (any
-http(s) URL passes, today's behavior unchanged); when both are declared, a target must pass both.
-
-**`emit`'s result now correlates what went where.** `deliveries` is one
-`{ webhook_id:, url:, subscriber_id: }` Hash per **enqueued** target — the piece a DB-backed sender
-needs to persist a delivery record per subscription without re-resolving `subscribers` and trusting
-undocumented ordering. `webhook_ids` is unchanged (still one id per target) but is now derived from
-`deliveries`. **Behavior change**: `target_count` now counts rows actually **enqueued**, not rows
-*resolved* — a malformed row used to get a `webhook_id` and be counted even though its `Deliver` call
-immediately failed its own `expects :url, type: String`; it's now caught earlier and reflected in
-`rejected_count` instead.
-
-**A resolved subscriber's id is observability, not routing.** `Deliver` stamps `subscriber_id` as a
-**tag** — the high-cardinality log/trace facet — never a **dimension** (axn's bounded metrics
-facet, the one `event`/`vendor` already use): a subscriber id off a live table is unbounded, and
-stamping it as a dimension would quietly blow up a metrics backend's cardinality limits the first
-time a real subscriber table is wired up.
-
-Resolution runs inline in whatever process called `emit`, so a store that raises (a database
-outage) raises out of `emit` — inside your `after_commit`, if that's where you emit from.
+The default is stdlib `net/http` — no new runtime dependency. `timeouts open:`/`read:` reach only the
+built-in transport; a custom one owns its own timeout configuration, since the documented seam is
+`.post(url:, body:, headers:)` with no timeout kwargs guaranteed. `Response`'s `body:` is optional
+(defaults to `nil`) — only `status` is read for the retry classification.
 
 ### Boot-time validation
 
-An `outbound` block fails loudly at declaration time — rather than as an unexpected exception mid-
-delivery, which the async adapter would otherwise retry as if it were a network failure — for:
-`max_attempts` that isn't a positive Integer; a `backoff` that doesn't accept the attempt number
-(arity 1); a `to:` that is neither an Array nor a callable; a statically-declared `to:` entry that
-fails `TargetPolicy` (shape, or your declared `allowed_hosts`/`allow_url`); a non-Array
-`allowed_hosts`, or one with a non-String/blank entry; an `allow_url` that isn't a callable
-accepting the parsed URL (arity 1); and a `headers` that isn't a callable accepting zero or one
-arguments. A callable `to:`'s/`subscribers`' *return value* isn't validated at boot (it depends on
-runtime state — see [Routing](#routing-sender-owned-config-today) for how it's validated instead,
-at every `emit`), nor is a callable `secret:`'s *resolved value*, though its **arity** is: 0 (ignores
-the subscriber) or 1 (receives it) is accepted, anything else is rejected at declaration time.
+An `outbound` block fails loudly at declaration — rather than as an unexpected exception mid-delivery,
+which the async adapter would retry as if it were a network failure — for: a non-positive-Integer
+`max_attempts`; a `backoff` that doesn't accept the attempt number; a `to:` that is neither an Array
+nor a callable; a static `to:` entry that fails shape or host policy; a malformed `allowed_hosts`; an
+`allow_url` or `headers` with the wrong arity; any invalid `sign :hmac` option; and a **literal**
+`sign :standard_webhooks` secret that isn't a decodable `whsec_<base64>` value.
 
-### Testing
+What can't be checked at boot is anything depending on runtime state: a callable `to:`'s/`subscribers`'
+*return value* (validated at every `emit` instead), and a callable `secret:`'s *resolved value* — only
+its **arity** is settled at declaration (0 ignores the subscriber, 1 receives it).
 
-`Axn::Webhooks::Outbound.reset!` clears the declared `outbound` block — call it in an `after` hook
-between examples that each declare their own, the same way `Axn::Webhooks::Inbound.reset!` clears
-registered vendors.
+---
 
-## Development
+# Signature primitive
+
+`Axn::Webhooks::Signature` is a standalone, Rails-agnostic HMAC verifier — usable directly, with no
+endpoint involved:
+
+```ruby
+Axn::Webhooks::Signature.hmac(
+  secret:    ENV["WEBHOOK_SECRET"],
+  payload:   request.raw_body,                 # exact bytes the vendor signed
+  signature: request.header("X-Signature"),
+  digest:    :sha256,                          # :sha256 (default) | :sha1 | :md5
+  encoding:  :hex,                             # :hex (default) | :base64 | :base64_urlsafe
+  prefix:    nil,                              # e.g. "v0=" for Slack
+  timestamp: request.header("X-Timestamp"),    # optional replay guard
+  tolerance: 300,
+)
+```
+
+Always constant-time, and it supports multi-signature (key-rotation) headers.
+
+`hmac` answers *whether* a request verified; `hmac_check` answers *why* it didn't — same check,
+returning a `Signature::Check` instead of a boolean (`hmac` is literally `hmac_check(...).ok?`, so
+there is only ever one replay window and one comparison):
+
+```ruby
+check = Axn::Webhooks::Signature.hmac_check(secret:, payload:, signature:, timestamp:, tolerance: 300)
+check.ok?            # => false
+check.reason         # => :replay_window
+check.skew           # => 10_000  (seconds, signed: positive = in the past)
+check.suggested_unit # => nil     (a Symbol only when a pinned `unit:` is what missed the window)
+```
+
+## Replay protection
+
+Pass `timestamp:` and `tolerance:` to guard against replayed requests — verification fails if the
+timestamp is more than `tolerance` seconds from now in either direction. Epoch seconds, milliseconds
+and microseconds are all handled without configuration:
+
+```ruby
+Axn::Webhooks::Signature.hmac(
+  secret:, payload:, signature:,
+  timestamp: request.header("X-Timestamp"),  # epoch s, ms or µs — inferred per timestamp
+  tolerance: 300,
+)
+```
+
+`unit:` defaults to `:auto`, reading the scale off each timestamp's magnitude. Pin it explicitly to
+make a change in what a vendor sends fail loudly instead of being absorbed:
+
+```ruby
+Axn::Webhooks::Signature.hmac(
+  secret:, payload:, signature:, timestamp:, tolerance: 300,
+  unit: :ms,   # :auto (default) | :seconds | :ms | :milliseconds | :microseconds
+)
+```
+
+`unit:` describes only the incoming timestamp's resolution — `tolerance:`/`within:` is always in
+seconds. A `Time` timestamp ignores it. An unrecognized value raises `ArgumentError` immediately,
+even when `timestamp:` is a `Time`.
+
+The same option is available on `verify :hmac`'s `replay:` hash:
+
+```ruby
+Axn::Webhooks.inbound :lob do
+  verify :hmac, secret: ENV.fetch("LOB_WEBHOOK_SECRET"), signature: header("X-Lob-Signature"),
+                replay: { timestamp: header("X-Lob-Signature-Timestamp"), within: 300, unit: :auto }
+end
+```
+
+`mismatched_unit` answers "would another scale have fit?" on its own — side-effect-free, so a caller
+decides what to do with it:
+
+```ruby
+Axn::Webhooks::Signature.mismatched_unit(timestamp:, tolerance: 300, unit: :seconds)  # => :ms
+```
+
+---
+
+# Testing
+
+Both registries are process-global, so reset them between examples that declare their own:
+`Axn::Webhooks::Inbound.reset!` clears registered vendors, `Axn::Webhooks::Outbound.reset!` clears
+the declared `outbound` block.
+
+To exercise an inbound endpoint without a Rack stack, build a `Request` directly:
+
+```ruby
+request = Axn::Webhooks::Request.new(
+  raw_body:    JSON.dump({ "eventType" => "connection.updated" }),  # the exact bytes you sign
+  headers:     { "Content-Type" => "application/json", "X-Signature" => signature },
+  url:         "https://example.com/webhooks/codat",
+  http_method: "POST",
+  params:      {},   # form/query params; `raw_body` is the only required kwarg
+)
+
+Axn::Webhooks::Inbound[:codat].verify(request)       # => Axn::Result (just the signature check)
+Axn::Webhooks::Inbound[:codat].handle(request)       # => Axn::Result (verify + dispatch)
+Axn::Webhooks::Inbound[:codat].to_response(request)  # => Axn::Webhooks::Response (the full mapping)
+```
+
+`to_response` is the one to assert against when you care about the status a vendor actually sees —
+it's the whole [status mapping](#http-status-reference), which `handle` stops short of. For the Rack
+layer, `Request.from_rack(env)` and `Inbound[:codat].call(env)` take a Rack env instead.
+
+On the outbound side, inject a recording double via `transport`:
+
+```ruby
+recorder = Class.new do
+  def self.calls = (@calls ||= [])
+  def self.post(url:, body:, headers:)
+    calls << { url:, body:, headers: }
+    Axn::Webhooks::Outbound::Transport::Response.new(status: 200, headers: {}, body: "")
+  end
+end
+
+Axn::Webhooks.outbound do
+  sign :hmac, secret: -> { "test-secret" }, header: "X-Signature"
+  transport recorder
+  event :lead_signed, to: ["https://example.com/hook"]
+end
+
+Axn::Webhooks.emit(:lead_signed, data: { lead_id: 42 }, async: false)
+recorder.calls.first[:headers]["X-Signature"]  # => the signature the receiver will verify
+```
+
+Pass `async: false` so the delivery runs inline and the assertion sees it, rather than depending on
+whether the test environment happens to have an async adapter configured.
+
+---
+
+# Development
 
 - `bin/refresh` — pull latest and install dependencies (fails on a dirty working tree).
-- `bundle exec rake` — run the default task (specs + rubocop) before pushing.
+- `bundle exec rake` — the default task (Rails-free specs + rubocop).
+- `bundle exec rake verify` — the full suite (library specs, Rails specs, rubocop).
