@@ -18,11 +18,45 @@ module Axn
         # Keys are lower-cased (Rack 3's SPEC forbids uppercase in response header keys, and
         # Rack::Lint rejects them). Keys AND values are frozen deeply (Array multi-value headers
         # freeze their elements too) so a caller's mutable value can't mutate this rendered-later value.
+        # Values carrying CR/LF (or any other byte RFC 7230 forbids) are DROPPED, not rendered:
+        # a `respond`/`static_respond`/`unauthorized_headers` declaration that echoes request data
+        # into a header would otherwise let a sender inject headers or split the response. Dropped
+        # rather than raised so a rendering mistake degrades to a missing header instead of a 500,
+        # matching what the outbound half already does with a subscriber's custom headers.
         @headers = headers.each_with_object({}) do |(key, value), frozen|
-          frozen[key.to_s.downcase.freeze] = deep_freeze(value)
+          safe = sanitize_header(key, value)
+          next if safe.nil?
+
+          frozen[key.to_s.downcase.freeze] = deep_freeze(safe)
         end.freeze
         freeze
       end
+
+      # An Array multi-value header (Set-Cookie, per Rack 3) is filtered element-wise so one bad
+      # cookie doesn't discard the good ones; nil means "drop this header entirely".
+      def sanitize_header(key, value)
+        if value.is_a?(Array)
+          kept = value.select { |element| HeaderValue.safe?(element) }
+          warn_dropped(key) if kept.size != value.size
+          return kept.empty? ? nil : kept
+        end
+
+        return value if HeaderValue.safe?(value)
+
+        warn_dropped(key)
+        nil
+      end
+      private :sanitize_header
+
+      # Never logs the value itself — it is attacker-influenced by construction here, and echoing it
+      # into the log is a smaller version of the same injection problem.
+      def warn_dropped(key)
+        Axn.config.logger.warn(
+          "[axn-webhooks] dropping response header #{key.to_s.downcase.inspect} — value contains a " \
+          "forbidden control character (or has an invalid encoding)",
+        )
+      end
+      private :warn_dropped
 
       def self.ack(status: 200, headers: {}) = new(status:, headers:)
 

@@ -241,8 +241,18 @@ RSpec.describe Axn::Webhooks::Signature do
       expect(described_class.within_tolerance?(timestamp: now - 10, tolerance: 300, now:)).to be(true)
     end
 
-    it "ignores the window entirely when tolerance is nil" do
-      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: nil, tolerance: nil, now:)).to be(true)
+    # Was "ignores the window entirely when tolerance is nil" — that fail-open is the LOW finding
+    # from the lib/ security audit. OMITTING tolerance still skips the window (the documented
+    # default); explicitly PASSING a blank one now raises, because such a value came from somewhere
+    # (`ENV["TOLERANCE"]&.to_i`) and silently disabling replay protection for it is not a default,
+    # it is a bug.
+    it "ignores the window entirely when tolerance is OMITTED" do
+      expect(described_class.hmac(secret:, payload:, signature: hex, timestamp: nil, now:)).to be(true)
+    end
+
+    it "raises rather than skipping the window when tolerance is explicitly blank" do
+      expect { described_class.hmac(secret:, payload:, signature: hex, timestamp: nil, tolerance: nil, now:) }
+        .to raise_error(ArgumentError, /tolerance/)
     end
 
     it "pins the inclusive boundary: exactly at tolerance is accepted" do

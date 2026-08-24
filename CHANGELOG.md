@@ -56,6 +56,15 @@ history rather than here.
   blank authenticated anyone who signed with the empty key. `verify :basic_auth` additionally
   coerced with `to_s` before its blank check, so a `false` credential pair became the guessable
   `false:false`. `Signature.compute` guards the same at the primitive level.
+- **Replay protection can no longer disable itself silently.** Omitting `tolerance:` still means
+  "no replay check" (the documented default), but explicitly passing a blank one — the shape
+  `ENV["TOLERANCE"]&.to_i` produces on an unset var — now raises. A declared `replay:` hash must
+  carry a positive `within:`, and `verify :standard_webhooks`'s `tolerance:` must be positive; both
+  are checked at declaration.
+- **Response header values are validated** against RFC 7230's `field-value` grammar, via the same
+  shared rule the outbound path uses. A value carrying CR/LF (or any other forbidden control byte)
+  is dropped with a warning rather than rendered, so a `respond`/`unauthorized_headers` block that
+  echoes request data can't be used to inject headers or split the response.
 - Inbound query/form parsing of an **unverified** body now fails soft (`{}`) like the multipart
   branch already did, instead of letting a malformed body raise past `verify` — a ~600-byte hostile
   body turned a 401 into a 500 and fired `on_exception` once per request.

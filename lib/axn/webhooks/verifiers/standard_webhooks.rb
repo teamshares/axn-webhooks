@@ -94,6 +94,13 @@ module Axn
         # with #to_s and Base64-decoded "" into an EMPTY HMAC key. That is an authentication bypass,
         # not a mismatch: anyone who knows the secret is unset can compute a signature with the empty
         # key and be verified. Same fail-closed-on-blank stance verify :basic_auth already takes.
+        # An explicitly blank tolerance would silently disable the replay window; the 300s default
+        # applies only when the caller omits it entirely (security audit).
+        unless tolerance.is_a?(Numeric) && tolerance.positive?
+          raise ArgumentError,
+                "verify :standard_webhooks tolerance: must be a positive number of seconds (got #{tolerance.inspect})"
+        end
+
         unless secret.respond_to?(:call) || StandardWebhooks.secret_key(secret)
           raise ArgumentError, StandardWebhooks.invalid_secret_message("verify :standard_webhooks", secret)
         end
