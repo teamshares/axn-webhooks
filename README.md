@@ -154,8 +154,16 @@ request, and `async(target, **)` / `sync(target, **)` build dispatch-map entries
 | `verify :basic_auth` | Vendors gated by HTTP Basic auth | `username:`, `password:`, `realm:` (`"Webhook"`) |
 | `verify { \|req\| … }` | Anything else (vendor SDKs, URL signing) | — |
 
-Every `secret:`/`username:`/`password:` accepts a plain value or a zero-arity callable, re-resolved
-per request so a rotation needs no reboot.
+Every `secret:`/`username:`/`password:` accepts a plain value, or one of the **deferred shapes**
+re-resolved per request so a rotation needs no reboot: a **lambda/proc** (`-> { ENV.fetch("SECRET") }`,
+or 1-arity to receive the request), a **`header(…)`/`params`/`raw_body`/`url` resolver**, or a
+**Symbol** naming a `Request` method. Anything else — including a provider object that merely
+responds to `#call`, or a `Method` — is treated as a literal value, and rejected at declaration if
+it isn't a usable secret.
+
+A blank or missing secret is always rejected, never used: `""` is a legal HMAC key, so signing with
+one would make the expected signature something any stranger could compute. Literals fail at boot;
+deferred shapes are checked on every request, since they can go missing long after boot.
 
 ### `verify :hmac`
 

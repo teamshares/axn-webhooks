@@ -17,7 +17,7 @@ module Axn
         # The failure `extract_params` swallowed, if any — see #params. Kept so the POST-verification
         # parse step can still see it, without it ever reaching the pre-verification path.
         @params_error = params_error
-        @params_consumed = false
+        @params_reads = 0
         @url = url
         @http_method = http_method.to_s.upcase
       end
@@ -28,18 +28,19 @@ module Axn
       # surface it AFTER verification (see #params).
       attr_reader :params_error
 
-      # Whether anything actually read #params. The parse step re-raises `params_error` only when
-      # this is true, which keeps the failure scoped to a parse that genuinely depended on params:
-      # a JSON `parse:` never touches them, so a hostile QUERY STRING appended to a validly-signed
-      # request (the signature covers the body, not the query) cannot downgrade it to unparseable.
-      def params_consumed? = @params_consumed
+      # How many times #params has been read. A COUNT, not a flag, so a caller can scope the
+      # question to a window rather than the request's whole lifetime — Dispatch compares it either
+      # side of the parse call. A lifetime flag was wrong: a custom verifier or a
+      # `challenge_required` predicate legitimately reads params BEFORE the parse step, and counting
+      # that read re-opened the downgrade the gate exists to prevent (Codex review).
+      attr_reader :params_reads
 
       # Always a Hash, never raises — this is reachable BEFORE verification (a custom verifier or a
       # `challenge_required` predicate may read it), where a raise would let an unauthenticated
       # sender turn a 401 into a reported 500. The swallowed failure is not lost: it is kept on
       # #params_error and re-raised by the parse step, which runs only after verification.
       def params
-        @params_consumed = true
+        @params_reads += 1
         @params
       end
 

@@ -101,7 +101,7 @@ module Axn
                 "verify :standard_webhooks tolerance: must be a positive number of seconds (got #{tolerance.inspect})"
         end
 
-        unless secret.respond_to?(:call) || StandardWebhooks.secret_key(secret)
+        unless Resolvers.deferred?(secret) || StandardWebhooks.secret_key(secret)
           raise ArgumentError, StandardWebhooks.invalid_secret_message("verify :standard_webhooks", secret)
         end
 

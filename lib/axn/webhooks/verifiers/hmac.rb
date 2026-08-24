@@ -25,7 +25,7 @@ module Axn
         end
 
         # A literal secret is knowable now; a callable/Resolver is checked per request below.
-        literal_secret = !(secret.respond_to?(:call) || secret.is_a?(Symbol))
+        literal_secret = !Resolvers.deferred?(secret)
         Verifiers.require_secret!("verify :hmac", secret, error: ArgumentError) if literal_secret
 
         lambda do |request|

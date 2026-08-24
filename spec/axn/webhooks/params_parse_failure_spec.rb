@@ -95,6 +95,22 @@ RSpec.describe "unparseable params, before vs after verification" do
     # The signature covers the BODY, not the query string, so an attacker can append a hostile
     # query to a validly-signed request. That must not make it unparseable — a JSON parse never
     # consumed params, so the query's failure is irrelevant to it.
+    # The consumption gate must be scoped to the PARSE CALL, not the request's lifetime: a custom
+    # verifier or a challenge_required predicate legitimately reads params BEFORE the parse step,
+    # and counting that read re-opens the very downgrade this gate exists to prevent (Codex review).
+    it "is not downgraded when a custom VERIFIER read params first" do
+      Axn::Webhooks.inbound(:v) do
+        verify { |req| req.params["x"].nil? } # reads params, and verifies
+        dispatch to: "ParamsHandler"          # default JSON parse — never reads params
+      end
+
+      status, = Axn::Webhooks::Inbound[:v].call(json_env('{"a":1}', query: deep_query))
+
+      expect(Thread.current[:event]).to eq({ "a" => 1 })
+      expect(status).to eq(200)
+      expect(reported).to be_empty
+    end
+
     it "still parses a valid JSON body when the query string is malformed" do
       status, = declare(parse: nil).call(json_env('{"a":1}', query: deep_query))
 

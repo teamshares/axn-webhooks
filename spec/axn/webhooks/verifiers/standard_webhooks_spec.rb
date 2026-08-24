@@ -125,9 +125,24 @@ RSpec.describe "verify :standard_webhooks strategy" do
       expect { declare(nil) }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
     end
 
-    it "rejects non-String, non-callable literals (Integer, Symbol)" do
+    it "rejects a non-deferred, non-String literal (Integer)" do
       expect { declare(42) }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
-      expect { declare(:a_symbol) }.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    # A Symbol IS one of the shapes `Resolvers.resolve` defers (`request.public_send(sym)`), so it
+    # is a request-time value like a lambda, not a literal — and `verify :hmac` already treated it
+    # that way. The two strategies now agree, via `Resolvers.deferred?`; its RESOLVED value is still
+    # validated on every request (Codex review).
+    it "defers a Symbol to request time rather than rejecting it at declaration" do
+      expect { declare(:a_symbol) }.not_to raise_error
+    end
+
+    it "still rejects what a deferred Symbol resolves to, per request" do
+      Axn::Webhooks::Inbound.reset!
+      Axn::Webhooks.inbound(:v) { verify :standard_webhooks, secret: :raw_body }
+      request = Axn::Webhooks::Request.new(raw_body: "not-a-whsec-secret", headers: {})
+
+      expect(Axn::Webhooks::Inbound[:v].verify(request)).not_to be_ok
     end
 
     it "rejects an empty-String secret" do
