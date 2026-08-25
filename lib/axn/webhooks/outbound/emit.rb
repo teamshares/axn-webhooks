@@ -10,7 +10,10 @@ module Axn
         include Axn::Webhooks::VendorFacet
 
         expects :event
-        expects :data, type: Hash, allow_blank: true, default: {}
+        # sensitive: this is the caller's own event payload — routinely PII (the whole point of a
+        # webhook is shipping domain data), and axn's auto-logging would otherwise render it into
+        # the application log on every emit. Matches `Deliver`'s `body`, which is this serialized.
+        expects :data, type: Hash, allow_blank: true, default: {}, sensitive: true
 
         # Per-call overrides (both nil = declaration-time behavior). `to:` is a URL String or an
         # Array of them; `async:` is a tri-state — nil (:auto), true (demand async), false (force

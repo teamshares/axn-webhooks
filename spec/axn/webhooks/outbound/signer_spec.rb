@@ -55,22 +55,25 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
         .to raise_error(ArgumentError, "secret store returned an invalid response")
     end
 
+    # These cover the PER-ATTEMPT guard, which a CALLABLE secret is the only way to reach now that a
+    # literal one is rejected at declaration (see "rejects a literal secret…" below). That's the case
+    # the guard exists for anyway: a secret store that transiently resolves to something malformed.
     it "raises a named error when the resolved secret isn't a decodable whsec_ value" do
-      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: "not-whsec" }, block: nil)
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: -> { "not-whsec" } }, block: nil)
 
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
         .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
     end
 
     it "raises rather than silently signing with an empty key when the secret is blank" do
-      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: "" }, block: nil)
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: -> { "" } }, block: nil)
 
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
         .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
     end
 
     it "raises rather than silently signing with an empty key when the secret is whsec_ with nothing after it" do
-      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: "whsec_" }, block: nil)
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: -> { "whsec_" } }, block: nil)
 
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
         .to raise_error(Axn::Webhooks::Error, /sign :standard_webhooks secret must be a whsec_<base64> value/)
@@ -78,7 +81,7 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
 
     it "raises on a bare base64 secret missing the required whsec_ prefix" do
       signer = described_class.build(
-        strategy: :standard_webhooks, opts: { secret: Base64.strict_encode64("secret") }, block: nil,
+        strategy: :standard_webhooks, opts: { secret: -> { Base64.strict_encode64("secret") } }, block: nil,
       )
 
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
@@ -91,7 +94,7 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
     # (Codex P1 finding).
     it "never includes the actual secret bytes in the error message" do
       %w[a-live-looking-secret-value whsec_not-valid-base64!!!].each do |bad_secret|
-        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: bad_secret }, block: nil)
+        signer = described_class.build(strategy: :standard_webhooks, opts: { secret: -> { bad_secret } }, block: nil)
 
         expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
           .to raise_error(Axn::Webhooks::Error) { |e| expect(e.message).not_to include(bad_secret) }
@@ -99,7 +102,7 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
     end
 
     it "never includes a non-String secret's value in the error message, only its class" do
-      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: 12_345 }, block: nil)
+      signer = described_class.build(strategy: :standard_webhooks, opts: { secret: -> { 12_345 } }, block: nil)
 
       expect { signer.call(id: "msg_1", timestamp: 1_700_000_000, body: "{}") }
         .to raise_error(Axn::Webhooks::Error, /Integer/)
@@ -111,6 +114,45 @@ RSpec.describe Axn::Webhooks::Outbound::Signer do
     # into an Axn::Webhooks::Error `Deliver` can't classify as retryable and left for the async
     # adapter's unbounded exception retries instead of the bounded outbound retry engine (Codex P2
     # finding, widened for the subscriber-aware case). Reject at construction (boot) instead.
+    # A LITERAL secret is fully knowable at boot, so the whsec_ check that already guards every
+    # signing attempt can run once at declaration instead. Without this, a plain non-whsec_ String
+    # (the natural mistake — pasting the raw key a vendor shows you) declares cleanly and then
+    # raises inside EVERY delivery, which the async adapter retries as if it were a network blip.
+    it "rejects a literal secret that isn't whsec_-prefixed, at declaration" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: "my-plain-secret" }, block: nil)
+      end.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    it "rejects a literal whsec_ secret whose base64 body doesn't decode, at declaration" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: "whsec_!!!not-base64!!!" }, block: nil)
+      end.to raise_error(ArgumentError, /must be a whsec_<base64> value/)
+    end
+
+    it "names the shape of a rejected literal secret without leaking its bytes" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: "hunter2hunter2" }, block: nil)
+      end.to raise_error(ArgumentError) do |e|
+        expect(e.message).to include("14-char String")
+        expect(e.message).not_to include("hunter2")
+      end
+    end
+
+    it "accepts a valid literal whsec_ secret" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: "whsec_#{Base64.strict_encode64('k')}" }, block: nil)
+      end.not_to raise_error
+    end
+
+    # A CALLABLE secret is deliberately NOT resolved at boot (it may read a secret store, or be
+    # per-subscriber) — its value stays a per-attempt check, as documented.
+    it "does not resolve a callable secret at declaration" do
+      expect do
+        described_class.build(strategy: :standard_webhooks, opts: { secret: -> { raise "should not be called at boot" } }, block: nil)
+      end.not_to raise_error
+    end
+
     it "rejects a secret callable that needs more than the subscriber" do
       expect do
         described_class.build(strategy: :standard_webhooks, opts: { secret: ->(a, b) { "#{a}#{b}" } }, block: nil)

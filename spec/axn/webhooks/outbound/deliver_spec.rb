@@ -775,7 +775,10 @@ RSpec.describe Axn::Webhooks::Outbound::Deliver do
 
       result = described_class.call(**kwargs)
 
-      expect(result.error).to eq("permanent delivery failure (HTTP 422) for lead_signed to https://os.example/hook")
+      # The URL is redacted to its ORIGIN in any message that can reach a log or error tracker:
+      # a Slack/Discord/Teams hook carries its secret in the path (security audit). Correlate on
+      # webhook_id/subscriber_id, which are credential-free by design.
+      expect(result.error).to eq("permanent delivery failure (HTTP 422) for lead_signed to https://os.example")
     end
 
     it "scrubs a long binary receiver body instead of raising Encoding::CompatibilityError" do

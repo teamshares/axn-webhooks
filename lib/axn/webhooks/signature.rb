@@ -86,7 +86,7 @@ module Axn
       # rubocop:disable Naming/PredicateMethod -- it IS a predicate, but `hmac` is the documented
       # public entry point (README, every direct caller); renaming it to `hmac?` is a breaking change.
       def hmac(secret:, payload:, signature:, digest: :sha256, encoding: :hex, prefix: nil,
-               timestamp: nil, tolerance: nil, now: nil, unit: AUTO)
+               timestamp: nil, tolerance: NO_TOLERANCE, now: nil, unit: AUTO)
         hmac_check(secret:, payload:, signature:, digest:, encoding:, prefix:, timestamp:, tolerance:, now:, unit:).ok?
       end
       # rubocop:enable Naming/PredicateMethod
@@ -95,10 +95,11 @@ module Axn
       # bare false. `hmac` is this method's `.ok?`, so the replay window lives in exactly one
       # place and every caller (both built-in verifiers, and `Signature.hmac` itself) agrees.
       def hmac_check(secret:, payload:, signature:, digest: :sha256, encoding: :hex, prefix: nil,
-                     timestamp: nil, tolerance: nil, now: nil, unit: AUTO)
+                     timestamp: nil, tolerance: NO_TOLERANCE, now: nil, unit: AUTO)
         # Validate unit: unconditionally — a misconfigured unit: is a config error independent of
         # whether replay protection is active or the request happens to carry a signature.
         validate_unit!(unit)
+        tolerance = validate_tolerance!(tolerance)
 
         if tolerance
           now ||= Time.now
@@ -122,6 +123,15 @@ module Axn
 
       # The encoded expected signature for `payload`. Reused by outbound's Signer::StandardWebhooksSigner.
       def compute(secret:, payload:, digest: :sha256, encoding: :hex)
+        # A blank secret is a WEAK KEY, not a failure: "" is a legal HMAC key, so the digest it
+        # produces is one any stranger can compute. Guarded at this chokepoint — the lowest layer
+        # every signing and verification path funnels through — so the public primitive is safe on
+        # its own, not merely when reached via a strategy that happens to check first. The README's
+        # own example passes `ENV["WEBHOOK_SECRET"]` straight in, and a set-but-empty env var is
+        # routine in k8s ConfigMaps and CI. Never interpolates the value.
+        raise ArgumentError, "secret must be a non-empty String (got #{secret.is_a?(String) ? 'an empty String' : secret.class})" \
+          unless secret.is_a?(String) && !secret.empty?
+
         raw = OpenSSL::HMAC.digest(openssl_digest(digest), secret, payload.to_s)
         encode(raw, encoding)
       end
@@ -136,8 +146,14 @@ module Axn
 
       # True when `timestamp` is present, parseable, and within ±tolerance seconds of `now`.
       def within_tolerance?(timestamp:, tolerance:, now: nil, unit: AUTO)
+        # `tolerance:` is required here, so there is no "omitted" case to honor — any blank value is
+        # an explicit one, and `nil.to_i` silently collapsing the window to 0 is the same
+        # coerce-instead-of-reject shape the audit flagged elsewhere. Fails closed today (0 rejects
+        # nearly everything) rather than open, but it should say so rather than pretend.
+        validate_tolerance!(tolerance)
+
         drift = skew(timestamp:, now:, unit:)
-        !drift.nil? && drift.abs <= tolerance.to_i
+        !drift.nil? && drift.abs <= tolerance
       end
 
       # Seconds between `now` and `timestamp`, signed (positive = `timestamp` is in the past).
@@ -223,6 +239,24 @@ module Axn
       # Raises on an unrecognized unit. Called eagerly by `hmac` (independent of whether replay
       # protection is active or the request carries a signature), so a misconfigured `unit:` is a
       # loud config error rather than a silent 401.
+      # Distinguishes "caller omitted tolerance:" (no replay check — the documented default, and
+      # what `Signature.hmac(secret:, payload:, signature:)` relies on) from "caller PASSED a blank
+      # tolerance". The latter is a value that came from somewhere — `ENV["TOLERANCE"]&.to_i` on an
+      # unset var is the shape — and silently turning replay protection OFF for it is the one place
+      # this gem failed open where everything else fails closed (security audit).
+      #
+      # Same stance `unit:` already takes: default only on absence, never on an explicit blank.
+      NO_TOLERANCE = Object.new.freeze
+
+      def validate_tolerance!(tolerance)
+        return nil if tolerance.equal?(NO_TOLERANCE)
+        return tolerance if tolerance.is_a?(Numeric) && tolerance.positive?
+
+        raise ArgumentError,
+              "tolerance must be a positive number of seconds, or omitted entirely to skip the " \
+              "replay window (got #{tolerance.inspect})"
+      end
+
       def validate_unit!(unit)
         return if unit == AUTO || UNITS.key?(unit)
 

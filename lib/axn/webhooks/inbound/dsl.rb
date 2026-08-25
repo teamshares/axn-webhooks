@@ -53,11 +53,10 @@ module Axn
         # `unparseable_status:` overrides Axn::Webhooks.config.unparseable_status for THIS endpoint —
         # it belongs here, next to `parse:`, because it only describes what happens when that parse
         # fails, and because the right value is a fact about one vendor's retry policy (PRO-3143).
-        # rubocop:disable Naming/MethodParameterName
+        # rubocop:disable-next Naming/MethodParameterName
         def dispatch(to: nil, on: nil, otherwise: nil, via: nil, parse: :json, mode: :auto, unparseable_status: nil)
           @dispatch_spec = { to:, on:, otherwise:, via:, parse:, mode:, unparseable_status: }
         end
-        # rubocop:enable Naming/MethodParameterName
 
         # respond { |handler_result| text("...") } — maps a genuine handler success to a
         # Response. Every other outcome (ack, business fail!, verify failure/exception, or a

@@ -30,7 +30,7 @@ Gem::Specification.new do |spec|
   # AGENTS-consuming.md ships if you write one (agent-facing usage guide, read via `bundle show`);
   # `git ls-files` just omits it when absent, so it's a harmless no-op until then.
   spec.files = IO.popen(
-    %w[git ls-files -z -- lib README.md CHANGELOG.md LICENSE.txt AGENTS-consuming.md],
+    %w[git ls-files -z -- lib README.md DESIGN-NOTES.md CHANGELOG.md LICENSE.txt AGENTS-consuming.md],
     chdir: __dir__, err: IO::NULL,
   ) { |ls| ls.readlines("\x0", chomp: true) }
   spec.bindir = "exe"
@@ -41,7 +41,8 @@ Gem::Specification.new do |spec|
   # error hierarchy includes at load time), `Axn.config.default_async?`, and `Axn::Extensions.best_effort`.
   spec.add_dependency "axn", ">= 0.1.0-alpha.5", "< 0.2.0"
   # Requires Rack 3: Response's headers are lowercased per Rack 3's SPEC, and Rack 3's native
-  # Array multi-value headers are used. Consumers need Rails 7.1+ (the first Rails whose
-  # actionpack allows Rack 3); Rails 7.0 is Rack-2-only and intentionally unsupported.
+  # Array multi-value headers are used. Rails 7.0 is Rack-2-only and intentionally unsupported;
+  # Rails 7.1 does allow Rack 3, but `axn` requires activesupport >= 7.2, so the effective floor
+  # for a Rails consumer is 7.2+. Keep this comment and the README's Installation section in sync.
   spec.add_dependency "rack", ">= 3.0", "< 4"
 end

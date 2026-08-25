@@ -277,13 +277,50 @@ module Axn
             # `Subscriber` for a 1-arity per-subscriber secret; a callable needing MORE than that
             # would otherwise boot successfully and raise ArgumentError on every real signing attempt
             # (Codex P2 finding, widened for the subscriber-aware case).
-            if secret.respond_to?(:call) && !(CallableArity.accepts?(secret, 0) || CallableArity.accepts?(secret, 1))
-              raise ArgumentError,
-                    "sign :standard_webhooks secret callable must accept zero or one arguments " \
-                    "(resolved with no args, or the Subscriber, per signing attempt)"
+            if secret.respond_to?(:call)
+              unless CallableArity.accepts?(secret, 0) || CallableArity.accepts?(secret, 1)
+                raise ArgumentError,
+                      "sign :standard_webhooks secret callable must accept zero or one arguments " \
+                      "(resolved with no args, or the Subscriber, per signing attempt)"
+              end
+            else
+              # A LITERAL secret is fully knowable now, so the whsec_ check that guards every signing
+              # attempt runs once here instead. Otherwise the natural mistake — pasting the raw key a
+              # vendor's dashboard shows you, without the `whsec_` prefix — declares cleanly and then
+              # raises inside EVERY delivery attempt, which is the worst place for it: an async
+              # adapter retries that as if it were a transient network failure. ArgumentError (not
+              # Axn::Webhooks::Error) to match the arity check above and Config's misconfiguration
+              # split: a declaration mistake, decided at boot.
+              #
+              # A CALLABLE secret is deliberately NOT resolved here — it may read a secret store or
+              # be per-subscriber, so its VALUE stays a per-attempt check (its arity is all that's
+              # knowable at boot). Documented in the README's "Boot-time validation" section.
+              raise ArgumentError, invalid_secret_message(secret) unless Verifiers::StandardWebhooks.secret_key(secret)
             end
 
             @secret = secret
+          end
+
+          # The raw HMAC key behind a Standard Webhooks secret, or nil if it isn't one: `whsec_` +
+          # a base64 body that decodes to something non-empty. Both the boot-time check above and
+          # the per-attempt `decoded_secret` below go through this, so validity and the decoded
+          # bytes can never disagree, and the decode happens exactly once per caller.
+          #
+          # An unprefixed or blank secret would otherwise decode "successfully" (both are valid
+          # base64) and sign every delivery with an empty or wrong key — silently, since the
+          # receiver's 401 is indistinguishable from any other misconfiguration (Codex P1 finding).
+          # The rescue is scoped to ONLY the decode: a callable secret's own resolver may raise its
+          # own ArgumentError for an unrelated reason (a secret-store wrapper rejecting a malformed
+          # response), and that diagnostic must reach Axn.config.on_exception intact rather than
+          # being rewritten as a generic invalid-secret message (Codex P2 finding) — which is why
+          # resolution happens in `decoded_secret`, outside this method.
+          def self.decode_secret(secret)
+            return nil unless secret.is_a?(String) && secret.start_with?("whsec_")
+
+            decoded = Verifiers::StandardWebhooks.decode_secret(secret)
+            decoded.empty? ? nil : decoded
+          rescue ArgumentError
+            nil
           end
 
           def call(id:, timestamp:, body:, subscriber: nil)
@@ -315,45 +352,22 @@ module Axn
             CallableArity.prefers_zero_args?(@secret) ? @secret.call : @secret.call(subscriber)
           end
 
+          # `resolve_secret` runs OUTSIDE the guard on purpose — a secret store's own ArgumentError
+          # must reach the exception reporter intact, not be rewritten as an invalid-secret message.
           def decoded_secret(subscriber)
             secret = resolve_secret(subscriber)
-            raise invalid_secret_error(secret) unless secret.is_a?(String) && secret.start_with?("whsec_")
 
-            decoded = decode_or_reject(secret)
-            raise invalid_secret_error(secret) if decoded.empty?
-
-            decoded
+            Verifiers::StandardWebhooks.secret_key(secret) || raise(invalid_secret_error(secret))
           end
 
-          # Scoped to ONLY the Base64 decode: a callable secret's own resolver can raise its own
-          # ArgumentError for a completely different reason (e.g. a secret-store wrapper rejecting a
-          # malformed response) — wrapping `resolve_secret` in this rescue would silently rewrite
-          # that operational failure as a generic invalid-secret message, discarding the resolver's
-          # actual diagnostic before it ever reaches Axn's exception reporter (Codex P2 finding).
-          def decode_or_reject(secret)
-            Verifiers::StandardWebhooks.decode_secret(secret)
-          rescue ArgumentError
-            raise invalid_secret_error(secret)
-          end
-
-          # A blank secret, or one missing the `whsec_` prefix, would otherwise decode "successfully"
-          # (an empty or unprefixed value is still valid base64) and sign every delivery with an empty
-          # or wrong key — silently, since the receiver's 401 is indistinguishable from any other
-          # misconfiguration (Codex P1 finding).
           def invalid_secret_error(secret)
-            Axn::Webhooks::Error.new("sign :standard_webhooks secret must be a whsec_<base64> value (got #{describe_secret(secret)})")
+            Axn::Webhooks::Error.new(invalid_secret_message(secret))
           end
 
-          # Never interpolates the secret's actual bytes into the message: this error can be raised
-          # on every delivery attempt (a callable secret is re-resolved per call, and may transiently
-          # resolve to something malformed), and would otherwise flow the live signing credential
-          # straight into whatever logs/exception reporter Axn.config.on_exception is wired to
-          # (Codex P1 finding).
-          def describe_secret(secret)
-            return secret.class.name unless secret.is_a?(String)
-            return "a #{secret.length}-char String not prefixed with whsec_" unless secret.start_with?("whsec_")
-
-            "a whsec_-prefixed String that failed to decode"
+          # Shared with inbound `verify :standard_webhooks` so both halves reject the same values
+          # and describe them the same way — never interpolating the secret's own bytes.
+          def invalid_secret_message(secret)
+            Verifiers::StandardWebhooks.invalid_secret_message("sign :standard_webhooks", secret)
           end
         end
       end

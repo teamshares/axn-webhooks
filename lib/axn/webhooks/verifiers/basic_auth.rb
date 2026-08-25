@@ -44,18 +44,18 @@ module Axn
         def pretty_print(printer) = printer.text(inspect)
 
         def call(request)
-          expected_username = Resolvers.resolve(@username, request).to_s
-          expected_password = Resolvers.resolve(@password, request).to_s
-
           # Fail closed on a misconfigured deploy rather than comparing against "": an unset
           # credential pair would otherwise authenticate `Authorization: Basic Og==` for anyone.
           # Blank-but-present counts as missing — CI and secret managers can both set an empty
           # string. Raising (not returning false) makes it a reported exception, since a 401 that
           # means "we are misconfigured" is indistinguishable from one that means "you are not
           # Twilio" and would otherwise present as an unexplained outage.
-          if expected_username.empty? || expected_password.empty?
-            raise Axn::Webhooks::Error, "verify :basic_auth is missing a username or password (blank counts as missing)"
-          end
+          #
+          # Guarded BEFORE any #to_s (security audit): coercing first let non-Strings through, and
+          # `false.to_s` is the non-empty String "false" — so a `false` credential pair sailed past
+          # an emptiness check and collapsed the login to the guessable constant `false:false`.
+          expected_username = Verifiers.require_secret!("verify :basic_auth", Resolvers.resolve(@username, request), label: "username")
+          expected_password = Verifiers.require_secret!("verify :basic_auth", Resolvers.resolve(@password, request), label: "password")
 
           username, password = credentials(request)
           # Absent/non-Basic credentials are reported apart from wrong ones. Under RFC 7617 a bare

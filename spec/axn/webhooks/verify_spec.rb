@@ -16,6 +16,64 @@ RSpec.describe Axn::Webhooks::Verify do
     expect(result.error).to include("verification failed")
   end
 
+  # A verifier that returns a non-Check object reporting its OWN verdict via #ok? — an Axn::Result
+  # being the one everybody reaches for in an axn-consuming app — used to be read for bare Ruby
+  # truthiness. A rejecting Axn::Result is still a truthy object, so EVERY rejected request verified
+  # and dispatched, with no verify failure recorded anywhere: authentication silently off.
+  describe "a verifier that reports its own verdict via #ok?" do
+    # A minimal stand-in for any object that reports its own verdict via #ok? — the shape
+    # Axn::Result shares, and the reason truthiness alone is unsafe here.
+    def result_double(verdict)
+      Class.new do
+        def initialize(verdict) = @verdict = verdict
+
+        def ok? = @verdict
+      end.new(verdict)
+    end
+
+    it "treats a NOT-ok #ok? responder as rejected, despite being truthy" do
+      result = described_class.call(request:, verifier: ->(_req) { result_double(false) })
+      expect(result).not_to be_ok
+      expect(result.reason).to eq(:signature_mismatch)
+    end
+
+    it "treats an ok #ok? responder as verified" do
+      expect(described_class.call(request:, verifier: ->(_req) { result_double(true) })).to be_ok
+    end
+
+    it "rejects a real failed Axn::Result (the actual footgun)" do
+      failing = Class.new do
+        include Axn
+
+        def call = fail!("nope")
+      end
+      result = described_class.call(request:, verifier: ->(_req) { failing.call })
+      expect(result).not_to be_ok
+      expect(result.reason).to eq(:signature_mismatch)
+    end
+
+    it "accepts a successful Axn::Result" do
+      passing = Class.new do
+        include Axn
+
+        def call = nil
+      end
+      expect(described_class.call(request:, verifier: ->(_req) { passing.call })).to be_ok
+    end
+
+    # Regression guard: a truthy object with NO #ok? keeps meaning "verified". Plenty of custom
+    # blocks end in a lookup that returns a record rather than a boolean.
+    it "still treats a truthy object with no #ok? as verified" do
+      expect(described_class.call(request:, verifier: ->(_req) { Object.new })).to be_ok
+      expect(described_class.call(request:, verifier: ->(_req) { "a string" })).to be_ok
+    end
+
+    it "still treats nil and false as rejected" do
+      expect(described_class.call(request:, verifier: ->(_req) {})).not_to be_ok
+      expect(described_class.call(request:, verifier: ->(_req) { false })).not_to be_ok
+    end
+  end
+
   # PRO-3141: a replay-window miss and an HMAC mismatch were both a bare `false` -> both
   # "signature mismatch" -> indistinguishable in the logs, and actively wrong for the replay case.
   describe "rejection reasons" do

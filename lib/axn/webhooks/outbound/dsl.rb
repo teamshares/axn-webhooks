@@ -71,11 +71,10 @@ module Axn
         # follows. 0-arity (ignores the subscriber) or 1-arity (receives it). nil by default.
         def headers(callable = UNSET, &block) = @headers = resolve_settable(callable, block)
 
-        # rubocop:disable Naming/MethodParameterName
+        # rubocop:disable-next Naming/MethodParameterName
         def event(name, to: nil, type: nil, vendor: nil)
           @events[name.to_sym] = { to:, type:, vendor: }
         end
-        # rubocop:enable Naming/MethodParameterName
 
         # Internal: build the resolved Config, validating declarations.
         def __config__
