@@ -37,9 +37,11 @@ Gem::Specification.new do |spec|
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
 
-  # Floor is alpha-5: the first release carrying `Axn::Error` (the public-error boundary this gem's
-  # error hierarchy includes at load time), `Axn.config.default_async?`, and `Axn::Extensions.best_effort`.
-  spec.add_dependency "axn", ">= 0.1.0-alpha.5", "< 0.2.0"
+  # Floor is alpha-6: the first release carrying `Axn::Extensions::InvokedVia` (which the inbound
+  # pipeline's Endpoint#call/#handle wrap with `.with(:webhooks)`), on top of everything alpha-5
+  # added — `Axn::Error` (the public-error boundary this gem's error hierarchy includes at load
+  # time), `Axn.config.default_async?`, and `Axn::Extensions.best_effort`.
+  spec.add_dependency "axn", ">= 0.1.0-alpha.6", "< 0.2.0"
   # Requires Rack 3: Response's headers are lowercased per Rack 3's SPEC, and Rack 3's native
   # Array multi-value headers are used. Rails 7.0 is Rack-2-only and intentionally unsupported;
   # Rails 7.1 does allow Rack 3, but `axn` requires activesupport >= 7.2, so the effective floor

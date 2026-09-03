@@ -84,12 +84,17 @@ module Axn
 
         # Full pipeline: verify, then (if a dispatch is declared and verification passed)
         # parse + route to the handler. Returns the final Axn::Result.
+        #
+        # A second, independent entrypoint alongside #call (the Rack app) — not called from it, so it
+        # carries its own Axn::Extensions::InvokedVia wrap rather than inheriting one.
         def handle(request)
-          verified = verify(request)
-          return verified unless verified.ok? && @dispatch
+          Axn::Extensions::InvokedVia.with(:webhooks) do
+            verified = verify(request)
+            next verified unless verified.ok? && @dispatch
 
-          Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
-                        mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
+            Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
+                          mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
+          end
         end
 
         # The staged HTTP outcome mapping (spec: "Respond + staged outcome model"). Verify and
@@ -128,17 +133,19 @@ module Axn
         # mount owns the whole path and every verb: POST -> #to_response, GET -> #challenge_response,
         # anything else -> 405. Named `call`, deliberately reserved since Phase 3 (see #handle).
         def call(env)
-          built = BuildRequest.call(env:, vendor: @name)
-          return Response.new(status: 500).to_rack unless built.ok?
+          Axn::Extensions::InvokedVia.with(:webhooks) do
+            built = BuildRequest.call(env:, vendor: @name)
+            next Response.new(status: 500).to_rack unless built.ok?
 
-          request = built.request
-          response =
-            case request.http_method
-            when "POST" then to_response(request)
-            when "GET" then challenge_response(request)
-            else Response.new(status: 405)
-            end
-          response.to_rack
+            request = built.request
+            response =
+              case request.http_method
+              when "POST" then to_response(request)
+              when "GET" then challenge_response(request)
+              else Response.new(status: 405)
+              end
+            response.to_rack
+          end
         end
 
         private
