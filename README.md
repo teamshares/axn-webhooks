@@ -623,12 +623,15 @@ by `vendor`.
 
 ## Entry-point attribution
 
-Every inbound request — however it arrives, `#call` (the Rack app) or the direct `#handle` API — is
-wrapped once in [`axn`](https://github.com/teamshares/axn)'s `Axn::Extensions::InvokedVia.with(:webhooks)`.
-That stamps an `invoked_via: "webhooks"` dimension on the *whole* call tree: `BuildRequest`,
-`ChallengeRequired`, `Verify`, `Dispatch`, `Respond`/`StaticRespond`, `Challenge`, and — with no
-opt-in required — the handler axn your `dispatch` block routes to. Unlike the
-[vendor facet](#per-vendor-observability) above, there's no config flag: it's always on, and no
+Every inbound request — however it arrives, the mounted Rack app (`#call`) or one of the
+controller-driven entrypoints (`#verify`, `#handle`, `#to_response`, `#challenge_response`; see
+[Mounting](#mounting)) — is wrapped in [`axn`](https://github.com/teamshares/axn)'s
+`Axn::Extensions::InvokedVia.with(:webhooks)`. Each entrypoint carries its own wrap (they nest safely,
+so `#call` calling into `#to_response` calling into `#verify` just re-stamps the same value), which
+stamps an `invoked_via: "webhooks"` dimension on the *whole* call tree reached from wherever a caller
+enters: `BuildRequest`, `ChallengeRequired`, `Verify`, `Dispatch`, `Respond`/`StaticRespond`,
+`Challenge`, and — with no opt-in required — the handler axn your `dispatch` block routes to. Unlike
+the [vendor facet](#per-vendor-observability) above, there's no config flag: it's always on, and no
 per-class declaration is needed, because `InvokedVia` is ambient rather than a value threaded through
 each `.call`.
 

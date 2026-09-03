@@ -13,14 +13,16 @@ _Prepared, not yet tagged — the version is cut immediately on merge. Update th
 
 ### Observability
 
-- Bumped the `axn` floor to `>= 0.1.0-alpha.6` for `Axn::Extensions::InvokedVia`. The inbound
-  pipeline's two entrypoints (`Endpoint#call`, the Rack app; `Endpoint#handle`, the direct
-  verify+dispatch API) now each wrap themselves in `InvokedVia.with(:webhooks)`, so every axn in a
-  request's call tree — `BuildRequest`, `ChallengeRequired`, `Verify`, `Dispatch`, `Respond`/
-  `StaticRespond`, `Challenge`, and the consuming app's own handler axn — is stamped with an
-  `invoked_via: :webhooks` dimension, with no per-class opt-in required (unlike the
+- Bumped the `axn` floor to `>= 0.1.0-alpha.6` for `Axn::Extensions::InvokedVia`. Every public
+  `Endpoint` entrypoint — `#call` (the Rack app), `#handle`, `#to_response`, `#challenge_response`,
+  and `#verify` (the controller-driven alternatives README documents alongside mounting) — now wraps
+  itself in `InvokedVia.with(:webhooks)`, so every axn in a request's call tree — `BuildRequest`,
+  `ChallengeRequired`, `Verify`, `Dispatch`, `Respond`/`StaticRespond`, `Challenge`, and the consuming
+  app's own handler axn — is stamped with an `invoked_via: :webhooks` dimension regardless of which
+  entrypoint a caller uses, with no per-class opt-in required (unlike the
   [vendor facet](#per-vendor-observability), which is declared per-class and threaded through
-  explicitly).
+  explicitly). Wraps nest safely, so calling one entrypoint from another (e.g. `#call` -> `#to_response`
+  -> `#verify`) re-stamps the same value harmlessly.
 - Known gap, not addressed here: a route dispatched via `:auto`/`:async` mode enqueues a background
   job from inside the wrapped tree, so the *enqueue* is tagged — but the job's *performed* execution
   runs in a separate process, outside the ambient stamp's scope, so the handler's own execution

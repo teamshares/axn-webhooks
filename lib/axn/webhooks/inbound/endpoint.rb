@@ -78,8 +78,12 @@ module Axn
 
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
         # a failure on mismatch, an exception if the verifier raises.
+        #
+        # A standalone entrypoint too (README: "drive it yourself from a controller"), so it carries
+        # its own InvokedVia wrap — nests harmlessly when reached via #handle/#to_response/#call, which
+        # already wrap themselves.
         def verify(request)
-          Verify.call(request:, verifier: @verifier, vendor: @name)
+          Axn::Extensions::InvokedVia.with(:webhooks) { Verify.call(request:, verifier: @verifier, vendor: @name) }
         end
 
         # Full pipeline: verify, then (if a dispatch is declared and verification passed)
@@ -101,31 +105,39 @@ module Axn
         # dispatch are mapped in separate branches — deliberately NOT a single outcome->status
         # rule, because a verify failure (401) and a handler business fail! (2xx) are both
         # `outcome.failure?` but mean opposite things at the HTTP layer.
+        #
+        # Also a standalone entrypoint (README: "drive it yourself from a controller") reachable
+        # without going through #call, so it carries its own InvokedVia wrap (Codex review, PR #31).
         def to_response(request)
-          # Ahead of verify, deliberately: a request that isn't an authentication attempt gets the
-          # challenge rather than a recorded verify failure (see #challenge_required?). Same 401 on
-          # the wire, and it still can't reach a handler — strictly safer than the `done!` that
-          # would settle this leg as a *success*.
-          return Response.new(status: 401, headers: unauthorized_headers) if challenge_required?(request)
+          Axn::Extensions::InvokedVia.with(:webhooks) do
+            # Ahead of verify, deliberately: a request that isn't an authentication attempt gets the
+            # challenge rather than a recorded verify failure (see #challenge_required?). Same 401 on
+            # the wire, and it still can't reach a handler — strictly safer than the `done!` that
+            # would settle this leg as a *success*.
+            next Response.new(status: 401, headers: unauthorized_headers) if challenge_required?(request)
 
-          verified = verify(request)
-          return Response.new(status: 401, headers: unauthorized_headers) unless verified.ok?
-          return default_ack unless @dispatch
+            verified = verify(request)
+            next Response.new(status: 401, headers: unauthorized_headers) unless verified.ok?
+            next default_ack unless @dispatch
 
-          dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
-                                     mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
-          response_for(dispatched)
+            dispatched = Dispatch.call(request:, router: @dispatch[:router], parse: @dispatch[:parse],
+                                       mode: @dispatch[:mode], respond_declared: !@respond.nil?, vendor: @name)
+            response_for(dispatched)
+          end
         end
 
         # The GET branch (spec: the mount owns the whole path, every verb). Testable without a Rack
-        # env, mirroring #verify/#handle/#to_response.
+        # env, mirroring #verify/#handle/#to_response — and, like them, a standalone entrypoint that
+        # carries its own InvokedVia wrap rather than relying on #call.
         def challenge_response(request)
-          return Response.new(status: 405) unless @challenge
+          Axn::Extensions::InvokedVia.with(:webhooks) do
+            next Response.new(status: 405) unless @challenge
 
-          # The Challenge axn computes the exact Response (200 echo / 403 guard-fail / 400 nil).
-          # Only a raising resolver/guard makes it not-ok -> a reported 500.
-          result = Challenge.call(request:, resolver: @challenge[:resolver], guard: @challenge[:guard], vendor: @name)
-          result.ok? ? result.response : Response.new(status: 500)
+            # The Challenge axn computes the exact Response (200 echo / 403 guard-fail / 400 nil).
+            # Only a raising resolver/guard makes it not-ok -> a reported 500.
+            result = Challenge.call(request:, resolver: @challenge[:resolver], guard: @challenge[:guard], vendor: @name)
+            result.ok? ? result.response : Response.new(status: 500)
+          end
         end
 
         # The Rack app entry point (spec: mount-first packaging). `Inbound[:vendor]` (this object)

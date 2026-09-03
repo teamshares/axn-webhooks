@@ -78,7 +78,9 @@ RSpec.describe "Axn::Webhooks vendor_facet" do
         Axn::Webhooks::Inbound[:codat].verify(Axn::Webhooks::Request.new(raw_body: "{}"))
       end
       payload = events.find { |e| e[:action].instance_of?(Axn::Webhooks::Verify) }
-      expect(payload[:dimensions]).to eq(vendor: "codat")
+      # Scoped to :vendor — #verify also carries an invoked_via: :webhooks stamp (its own concern,
+      # covered in invoked_via_spec.rb), which this vendor-facet-focused test isn't about.
+      expect(payload[:dimensions][:vendor]).to eq("codat")
     end
   end
 end
