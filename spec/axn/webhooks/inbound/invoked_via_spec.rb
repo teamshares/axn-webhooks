@@ -140,4 +140,22 @@ RSpec.describe "Axn::Webhooks inbound invoked_via stamp" do
       expect(dimensions_for(Axn::Webhooks::Verify, events)).to eq(invoked_via: "webhooks")
     end
   end
+
+  # DESIGN-NOTES.md documents #challenge_required? as public for controllers driving
+  # #verify/#handle themselves — a third path to ChallengeRequired besides #to_response/#call.
+  # (Codex review, PR #31, round 2.)
+  describe "#challenge_required? (the standalone 401-challenge predicate)" do
+    it "stamps invoked_via: :webhooks on ChallengeRequired when called directly" do
+      Axn::Webhooks.inbound(:vendor) do
+        verify { |_req| true }
+        unauthorized_headers "WWW-Authenticate" => %(Basic realm="Webhook")
+        challenge_required { |req| req.header("Authorization").to_s.strip.empty? }
+      end
+      request = Axn::Webhooks::Request.new(raw_body: "", headers: {})
+
+      events = capture_events { Axn::Webhooks::Inbound[:vendor].challenge_required?(request) }
+
+      expect(dimensions_for(Axn::Webhooks::Inbound::ChallengeRequired, events)).to eq(invoked_via: "webhooks")
+    end
+  end
 end

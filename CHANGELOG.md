@@ -15,8 +15,9 @@ _Prepared, not yet tagged — the version is cut immediately on merge. Update th
 
 - Bumped the `axn` floor to `>= 0.1.0-alpha.6` for `Axn::Extensions::InvokedVia`. Every public
   `Endpoint` entrypoint — `#call` (the Rack app), `#handle`, `#to_response`, `#challenge_response`,
-  and `#verify` (the controller-driven alternatives README documents alongside mounting) — now wraps
-  itself in `InvokedVia.with(:webhooks)`, so every axn in a request's call tree — `BuildRequest`,
+  `#verify`, and `#challenge_required?` (the controller-driven alternatives README/DESIGN-NOTES
+  document alongside mounting) — now wraps itself in `InvokedVia.with(:webhooks)`, so every axn in a
+  request's call tree — `BuildRequest`,
   `ChallengeRequired`, `Verify`, `Dispatch`, `Respond`/`StaticRespond`, `Challenge`, and the consuming
   app's own handler axn — is stamped with an `invoked_via: :webhooks` dimension regardless of which
   entrypoint a caller uses, with no per-class opt-in required (unlike the

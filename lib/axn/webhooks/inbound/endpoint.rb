@@ -65,15 +65,20 @@ module Axn
         #
         # Note this is NOT the `challenge` declaration (that's the vendor's GET handshake, see
         # #challenge_response). Same word, different protocol: this one is the 401 kind.
+        #
+        # DESIGN-NOTES.md documents this as public for controllers driving #verify/#handle
+        # themselves, so — like them — it carries its own InvokedVia wrap (Codex review, PR #31).
         def challenge_required?(request)
           predicate = challenge_predicate
           return false unless predicate
 
-          # Inside an Axn boundary: the predicate is request-dependent code the gem doesn't own, and
-          # it runs ahead of every other boundary on the POST path. A crash settles not-ok and is read
-          # as "can't tell" -> verify normally (see ChallengeRequired for why that's the safe answer).
-          checked = ChallengeRequired.call(request:, predicate:, vendor: @name)
-          checked.ok? && checked.required
+          Axn::Extensions::InvokedVia.with(:webhooks) do
+            # Inside an Axn boundary: the predicate is request-dependent code the gem doesn't own, and
+            # it runs ahead of every other boundary on the POST path. A crash settles not-ok and is
+            # read as "can't tell" -> verify normally (see ChallengeRequired for why that's safe).
+            checked = ChallengeRequired.call(request:, predicate:, vendor: @name)
+            checked.ok? && checked.required
+          end
         end
 
         # Verify the request's signature. Returns an Axn::Result: ok? when verified,
