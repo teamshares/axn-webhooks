@@ -7,6 +7,28 @@ All notable changes to this project are documented here. This project adheres to
 
 _Nothing yet._
 
+## [0.1.1] - 2026-09-03
+
+_Prepared, not yet tagged — the version is cut immediately on merge. Update this date if that slips._
+
+### Observability
+
+- Bumped the `axn` floor to `>= 0.1.0-alpha.6` for `Axn::Extensions::InvokedVia`. Every public
+  `Endpoint` entrypoint — `#call` (the Rack app), `#handle`, `#to_response`, `#challenge_response`,
+  `#verify`, and `#challenge_required?` (the controller-driven alternatives README/DESIGN-NOTES
+  document alongside mounting) — now wraps itself in `InvokedVia.with(:webhooks)`, so every axn in a
+  request's call tree — `BuildRequest`,
+  `ChallengeRequired`, `Verify`, `Dispatch`, `Respond`/`StaticRespond`, `Challenge`, and the consuming
+  app's own handler axn — is stamped with an `invoked_via: :webhooks` dimension regardless of which
+  entrypoint a caller uses, with no per-class opt-in required (unlike the
+  [vendor facet](#per-vendor-observability), which is declared per-class and threaded through
+  explicitly). Wraps nest safely, so calling one entrypoint from another (e.g. `#call` -> `#to_response`
+  -> `#verify`) re-stamps the same value harmlessly.
+- Known gap, not addressed here: a route dispatched via `:auto`/`:async` mode enqueues a background
+  job from inside the wrapped tree, so the *enqueue* is tagged — but the job's *performed* execution
+  runs in a separate process, outside the ambient stamp's scope, so the handler's own execution
+  metrics won't carry `invoked_via` in that mode.
+
 ## [0.1.0] - 2026-08-24
 
 _Prepared, not yet tagged — the version is cut immediately on merge. Update this date if that slips._
