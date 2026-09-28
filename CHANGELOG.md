@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [Unreleased]
 
+> **Before cutting a release:** these changes need `Axn::Extensions::Auth`, which is on axn `main` but not in a released axn yet. Raise the gemspec `axn` floor to the release that ships it (alpha 7, PRO-3301) and drop the temporary `gem "axn", git: …` pins in `Gemfile` and `spec_rails/dummy_app/Gemfile`.
+
 - [FEAT] Added `verify :bearer, keys: { "partner" => … }, header: "Authorization"`, a static API-token strategy. It is axn core's `Axn::Extensions::Auth::Bearer`, so it is shared with axn-openapi.
   - Keys can be literal Strings, Procs resolved on every request, or Arrays of either (for rotation). The `header(…)`/Symbol shapes are not accepted, because they name a request value rather than a secret.
   - Every candidate is compared in constant time. A blank key raises instead of authenticating anyone: `ArgumentError` at declaration, or `Axn::Webhooks::Error` when a Proc resolves blank at request time.
