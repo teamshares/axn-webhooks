@@ -5,7 +5,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [Unreleased]
 
-_Nothing yet._
+- [FEAT] Added `verify :bearer, keys: { "partner" => … }, header: "Authorization"`, a static API-token strategy. It is axn core's `Axn::Extensions::Auth::Bearer`, so it is shared with axn-openapi.
+  - Keys can be literals, Procs resolved on every request, or Arrays of either (for rotation).
+  - Every candidate is compared in constant time, and a blank key raises instead of authenticating anyone.
+  - A 401 carries `www-authenticate: Bearer`.
+  - Its rejections are recorded as `:credentials_missing` / `:credentials_mismatch`, with mechanism-neutral messages ("credentials rejected"). `:basic_auth` keeps its Basic-specific wording.
+- [FEAT] A custom `verify` block that returns an `Axn::Extensions::Auth` verdict (or any `ok?`/`reason` object) whose reason `Verify` knows now keeps that reason. Previously it was recorded as `:signature_mismatch`. Unknown reasons still fall back to `:signature_mismatch`.
+- [INTERNAL] The request-auth primitives are delegated to axn core's new `Axn::Extensions::Auth`, so there is one hardened copy shared with axn-openapi. Public API and behavior are unchanged:
+  - `Verifiers.require_secret!` delegates to `Auth.require_secret!`; the default `error:` is still `Axn::Webhooks::Error` and the message is unchanged.
+  - `Resolvers.resolve` / `deferred?` keep this gem's `Resolver` and `Symbol` shapes and delegate Procs and literals to core.
+  - `BasicAuth` compares with core's length-independent `Auth.secure_compare` instead of a private copy.
+  - `Verify#verified?` delegates to `Auth.verified?`.
+  - `Signature.secure_compare` stays as it was: it is length-prechecked for fixed-width signatures.
+  - Requires the axn prerelease that ships `Axn::Extensions::Auth`.
 
 ## [0.1.1] - 2026-09-03
 
