@@ -30,6 +30,14 @@ module Axn
         credentials_mismatch: ->(_check) { "Basic credentials rejected" },
       }.freeze
 
+      # The two credential reasons as any non-Basic strategy reports them (`verify :bearer`, or a custom
+      # block returning an `Axn::Extensions::Auth` verdict). MESSAGES' wording is Basic auth's own —
+      # right for BasicAuth, a misdirection on an endpoint that never speaks Basic.
+      GENERIC_CREDENTIAL_MESSAGES = {
+        credentials_missing: "no credentials offered",
+        credentials_mismatch: "credentials rejected",
+      }.freeze
+
       expects :request, type: Axn::Webhooks::Request, sensitive: true
       # A verifier closes over or holds the vendor's secret — that's its whole job — so it must
       # never be rendered into the per-call log line. The built-in strategies redact themselves
@@ -62,7 +70,7 @@ module Axn
         return if verified?(check)
 
         # Set before fail! so the result-phase dimension resolvers can read them.
-        rejection = check.is_a?(Signature::Check) ? check : Signature::MISMATCH
+        rejection = rejection_for(check)
         @reason = rejection.reason
         @skew = rejection.skew
         @suggested_unit = rejection.suggested_unit
@@ -76,7 +84,8 @@ module Axn
       # alone still reads as a possible replay. A timestamp is not a secret and the HTTP
       # response is a bare 401 either way, so this discloses nothing to the sender.
       def message_for(rejection)
-        message = MESSAGES.fetch(rejection.reason).call(rejection)
+        generic = GENERIC_CREDENTIAL_MESSAGES[rejection.reason] unless verifier.is_a?(Verifiers::BasicAuth)
+        message = generic || MESSAGES.fetch(rejection.reason).call(rejection)
         return message unless rejection.suggested_unit
 
         "#{message} — would fit as unit: #{rejection.suggested_unit.inspect}"
@@ -100,7 +109,22 @@ module Axn
       # SUCCEEDED, not necessarily that the signature was valid. An action that returns ok while
       # carrying its verdict in an exposure is still mis-read; see the README's custom-verify
       # section. Fixing the always-verifies case does not make every Result shape safe.
-      def verified?(check) = check.respond_to?(:ok?) ? check.ok? : !!check
+      #
+      # The rule itself is axn core's (`Axn::Extensions::Auth.verified?`), shared with axn-openapi.
+      def verified?(check) = Axn::Extensions::Auth.verified?(check)
+
+      # A Signature::Check as-is. Any other verdict keeps its own `reason` when it is one this stage
+      # can report — so a core `Axn::Extensions::Auth` verdict (`verify :bearer`, or a custom block
+      # returning `Auth::CREDENTIALS_MISMATCH`) is recorded as what it is rather than as a signature
+      # mismatch on an endpoint with no signature. Anything else is read as :signature_mismatch.
+      def rejection_for(check)
+        return check if check.is_a?(Signature::Check)
+
+        reason = Axn::Extensions::Auth.normalize(check).reason
+        return Signature::MISMATCH unless MESSAGES.key?(reason)
+
+        Signature::Check.new(ok: false, reason:, skew: nil, suggested_unit: nil)
+      end
     end
   end
 end

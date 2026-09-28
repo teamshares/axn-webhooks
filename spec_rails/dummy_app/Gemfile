@@ -13,3 +13,6 @@ group :development, :test do
   gem "rack-test", "~> 2.0"
   gem "rspec", "~> 3.0"
 end
+
+# TEMP (PRO-3566): mirror the root Gemfile's unreleased-axn pin; drop with it.
+gem "axn", git: "https://github.com/teamshares/axn", branch: "main"

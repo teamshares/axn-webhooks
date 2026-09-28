@@ -152,6 +152,7 @@ request, and `async(target, **)` / `sync(target, **)` build dispatch-map entries
 | `verify :standard_webhooks` | Standard Webhooks / Svix (Codat, Lob, …) | `secret:`, `tolerance:` (300) |
 | `verify :hmac` | Anything signing the body with an HMAC | `secret:`, `signature:`, `signing_string:`, `digest:`, `encoding:`, `prefix:`, `replay:` |
 | `verify :basic_auth` | Vendors gated by HTTP Basic auth | `username:`, `password:`, `realm:` (`"Webhook"`) |
+| `verify :bearer` | Senders presenting a static API token | `keys:` (principal id => key(s)), `header:` (`"Authorization"`) |
 | `verify { \|req\| … }` | Anything else (vendor SDKs, URL signing) | — |
 
 Every `secret:`/`username:`/`password:` accepts a plain value, or one of the **deferred shapes**
@@ -224,6 +225,28 @@ clients like Twilio require before they will send credentials at all — see
 [Basic auth is two-legged](DESIGN-NOTES.md#basic-auth-is-two-legged) for why that matters and what a custom block
 has to do instead. Prefer signature verification wherever the vendor offers it.
 
+### `verify :bearer`
+
+Use this for a sender that presents a static token instead of signing the body. It is axn core's
+`Axn::Extensions::Auth::Bearer`, the same strategy axn-openapi uses:
+
+```ruby
+Axn::Webhooks.inbound :partner do
+  verify :bearer, keys: { "partner" => -> { ENV.fetch("PARTNER_WEBHOOK_TOKEN") } }
+end
+```
+
+- **Where the token comes from.** It is read from `Authorization: Bearer <token>`, or from the raw
+  value of `header:` (e.g. `"X-API-Key"`).
+- **Rotation.** Each key can be a literal String, a Proc (resolved on every request), or an Array of
+  either, which lets old and new tokens overlap during a rotation. Keys don't accept the
+  `header(…)`/Symbol shapes.
+- **Checks.** Every candidate is compared in constant time. A blank key raises rather than
+  authenticating anyone: `ArgumentError` at declaration, or `Axn::Webhooks::Error` when a Proc
+  resolves blank on a request.
+- **401s.** A 401 carries `www-authenticate: Bearer`.
+- **Prefer signatures.** A token proves who sent the request, but not that the body is intact.
+
 ### Custom `verify` blocks
 
 The contract is `->(request) { Boolean }`. A return value is read as:
@@ -271,8 +294,8 @@ result.error   # => "Webhook verification failed: replay window exceeded (timest
 | `:replay_timestamp_invalid` | Timestamp absent or unparseable | A typo'd `replay: { timestamp: … }`, or a vendor that stopped sending it |
 | `:signature_missing` | No signature header at all | A typo'd `signature:` header name, or an unsigned sender |
 | `:signature_mismatch` | The HMAC genuinely didn't match | Wrong/rotated secret, or the wrong `signing_string` |
-| `:credentials_missing` | (`:basic_auth`) An `Authorization` header that isn't a Basic credential | A client using the wrong scheme, or a scanner |
-| `:credentials_mismatch` | (`:basic_auth`) Credentials offered and rejected | Wrong/rotated credentials, or a scanner guessing |
+| `:credentials_missing` | (`:basic_auth`) An `Authorization` header that isn't a Basic credential; (`:bearer`) no token presented | A client using the wrong scheme, or a scanner |
+| `:credentials_mismatch` | (`:basic_auth`, `:bearer`) Credentials offered and rejected | Wrong/rotated credentials, or a scanner guessing |
 
 A `:replay_window` rejection also carries **`suggested_unit`** — the scale that *would* have fit
 (`nil` for a genuine replay). Since `unit:` [infers the scale](#replay-protection) by default, it is

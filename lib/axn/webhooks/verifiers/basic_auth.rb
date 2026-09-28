@@ -65,7 +65,10 @@ module Axn
           return Signature::CREDENTIALS_MISSING unless username
 
           # `&` rather than `&&` so the comparison doesn't short-circuit on the username.
-          matched = secure_compare(username, expected_username) & secure_compare(password, expected_password)
+          # Core's comparison hashes both sides first, so it answers neither "which byte differed" nor
+          # "is the password N characters long?" — both sides here are arbitrary user-chosen strings.
+          matched = Axn::Extensions::Auth.secure_compare(username, expected_username) &
+                    Axn::Extensions::Auth.secure_compare(password, expected_password)
           matched ? Signature::OK : Signature::CREDENTIALS_MISMATCH
         end
 
@@ -105,18 +108,6 @@ module Axn
           # split(":", 2) — a password may legitimately contain colons; a username may not.
           username, password = Base64.decode64(encoded.to_s).split(":", 2)
           [username.to_s, password.to_s]
-        end
-
-        # Hash first, then compare the two fixed-width digests — so the comparison itself is
-        # constant-time AND independent of credential length. The obvious alternative, the bytesize
-        # precheck in Signature#secure_compare, is fine for signatures (fixed width by construction)
-        # but would answer "is the password N characters long?" here, where both sides are
-        # arbitrary user-chosen strings. Same construction as ActiveSupport::SecurityUtils.
-        def secure_compare(candidate, expected)
-          OpenSSL.fixed_length_secure_compare(
-            OpenSSL::Digest::SHA256.digest(candidate),
-            OpenSSL::Digest::SHA256.digest(expected),
-          )
         end
       end
 

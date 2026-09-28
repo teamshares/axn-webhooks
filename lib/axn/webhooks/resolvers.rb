@@ -28,14 +28,17 @@ module Axn
       # `respond_to?(:call)`: a credential-provider object or a Method responds to #call but is NOT
       # resolved here, so exempting it from validation let it declare cleanly and then fail every
       # request with a type error instead of failing loudly at boot (Codex review).
-      def deferred?(value) = value.is_a?(Resolver) || value.is_a?(Symbol) || value.is_a?(Proc)
+      #
+      # A Resolver and a Symbol are this gem's DSL conventions; everything else (a Proc, or a literal)
+      # is axn core's `Axn::Extensions::Auth` rule, so the two gems that accept inbound requests agree
+      # on what a deferred secret is.
+      def deferred?(value) = value.is_a?(Resolver) || value.is_a?(Symbol) || Axn::Extensions::Auth.deferred?(value)
 
       def resolve(value, request)
         case value
         when Resolver then value.call(request)
         when Symbol   then request.public_send(value)
-        when Proc     then value.arity.zero? ? value.call : value.call(request)
-        else value
+        else Axn::Extensions::Auth.resolve(value, request)
         end
       end
     end
