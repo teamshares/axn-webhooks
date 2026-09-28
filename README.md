@@ -238,10 +238,12 @@ end
 
 - **Where the token comes from.** It is read from `Authorization: Bearer <token>`, or from the raw
   value of `header:` (e.g. `"X-API-Key"`).
-- **Rotation.** Each key can be a literal, a Proc (resolved on every request), or an Array of either,
-  which lets old and new tokens overlap during a rotation.
+- **Rotation.** Each key can be a literal String, a Proc (resolved on every request), or an Array of
+  either, which lets old and new tokens overlap during a rotation. Keys don't accept the
+  `header(…)`/Symbol shapes.
 - **Checks.** Every candidate is compared in constant time. A blank key raises rather than
-  authenticating anyone.
+  authenticating anyone: `ArgumentError` at declaration, or `Axn::Webhooks::Error` when a Proc
+  resolves blank on a request.
 - **401s.** A 401 carries `www-authenticate: Bearer`.
 - **Prefer signatures.** A token proves who sent the request, but not that the body is intact.
 

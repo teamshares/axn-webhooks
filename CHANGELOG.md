@@ -6,8 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 ## [Unreleased]
 
 - [FEAT] Added `verify :bearer, keys: { "partner" => … }, header: "Authorization"`, a static API-token strategy. It is axn core's `Axn::Extensions::Auth::Bearer`, so it is shared with axn-openapi.
-  - Keys can be literals, Procs resolved on every request, or Arrays of either (for rotation).
-  - Every candidate is compared in constant time, and a blank key raises instead of authenticating anyone.
+  - Keys can be literal Strings, Procs resolved on every request, or Arrays of either (for rotation). The `header(…)`/Symbol shapes are not accepted, because they name a request value rather than a secret.
+  - Every candidate is compared in constant time. A blank key raises instead of authenticating anyone: `ArgumentError` at declaration, or `Axn::Webhooks::Error` when a Proc resolves blank at request time.
   - A 401 carries `www-authenticate: Bearer`.
   - Its rejections are recorded as `:credentials_missing` / `:credentials_mismatch`, with mechanism-neutral messages ("credentials rejected"). `:basic_auth` keeps its Basic-specific wording.
 - [FEAT] A custom `verify` block that returns an `Axn::Extensions::Auth` verdict (or any `ok?`/`reason` object) whose reason `Verify` knows now keeps that reason. Previously it was recorded as `:signature_mismatch`. Unknown reasons still fall back to `:signature_mismatch`.

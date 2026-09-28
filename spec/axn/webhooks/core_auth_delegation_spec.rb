@@ -92,6 +92,18 @@ RSpec.describe "delegation to Axn::Extensions::Auth" do
       expect(response.headers).to include("www-authenticate" => "Bearer")
     end
 
+    it "raises this gem's request-time error for a key that resolves blank, and ArgumentError at boot" do
+      verifier = Axn::Webhooks::Verifiers.build(strategy: :bearer, opts: { keys: { "partner" => -> { "" } } }, block: nil)
+      expect { verifier.call(request(headers: { "Authorization" => "Bearer x" })) }.to raise_error(Axn::Webhooks::Error, /non-empty String/)
+      expect { Axn::Webhooks::Verifiers.build(strategy: :bearer, opts: { keys: { "partner" => "" } }, block: nil) }
+        .to raise_error(ArgumentError)
+    end
+
+    it "never renders its keys" do
+      verifier = Axn::Webhooks::Verifiers.build(strategy: :bearer, opts: { keys: { "partner" => "tok-secret" } }, block: nil)
+      expect(verifier.inspect).not_to include("tok-secret")
+    end
+
     it "accepts a custom header" do
       Axn::Webhooks.inbound(:partner) { verify :bearer, keys: { "partner" => "tok" }, header: "X-API-Key" }
       expect(Axn::Webhooks::Inbound[:partner].verify(request(headers: { "X-API-Key" => "tok" }))).to be_ok
