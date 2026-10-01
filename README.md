@@ -20,7 +20,7 @@ The *why* behind the surprising parts — and the traps worth naming — lives i
 gem "axn-webhooks"
 ```
 
-Requires Ruby 3.2.1+ and Rack 3. Under Rails, `axn`'s own ActiveSupport 7.2 floor makes **Rails 7.2+**
+Requires Ruby 3.3+ and Rack 3. Under Rails, `axn`'s own ActiveSupport 7.2 floor makes **Rails 7.2+**
 the effective minimum.
 
 ## Quick start
