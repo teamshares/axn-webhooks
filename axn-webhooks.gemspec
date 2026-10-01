@@ -14,8 +14,8 @@ Gem::Specification.new do |spec|
   spec.homepage = "https://github.com/teamshares/axn-webhooks"
   spec.license = "MIT"
 
-  # axn requires Ruby 3.2.1+ (Data.define, Vernier profiling).
-  spec.required_ruby_version = ">= 3.2.1"
+  # Matches axn core's floor (Ruby 3.2 is EOL).
+  spec.required_ruby_version = ">= 3.3"
 
   spec.metadata["homepage_uri"] = spec.homepage
   spec.metadata["source_code_uri"] = spec.homepage
